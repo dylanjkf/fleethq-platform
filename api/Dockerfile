@@ -4,6 +4,13 @@
 
 FROM node:22-alpine AS deps
 WORKDIR /app
+# Alpine ships no OpenSSL at all by default — Prisma's engine binaries shell
+# out to `openssl version` to pick the right build (openssl-1.1.x vs 3.0.x)
+# and, with nothing installed to detect, silently default to 1.1.x and then
+# fail to load at all. Installing it here (present in every stage that
+# touches `prisma generate`/`migrate deploy`) is the standard fix, not a
+# workaround — see https://www.prisma.io/docs/orm/reference/environment-variables-reference#prisma_binary_target-1.
+RUN apk add --no-cache openssl
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 # postinstall runs `prisma generate`, which needs prisma/schema.prisma
@@ -19,6 +26,11 @@ RUN npm run build
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+
+# See the `deps` stage's comment — this is the image that actually ships and
+# runs `prisma migrate deploy` at container start (docker-entrypoint.sh), so
+# it needs OpenSSL installed just as much as the build-time stage does.
+RUN apk add --no-cache openssl
 
 # Production-only dependencies, generated fresh in this stage (not copied
 # from `deps`) so devDependencies never enter this image's layers at all.
