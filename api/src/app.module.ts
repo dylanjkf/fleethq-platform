@@ -51,6 +51,7 @@ import { HealthModule } from './health/health.module';
 import { AuditModule } from './audit/audit.module';
 import { BarcodeModule } from './barcode/barcode.module';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { ContactModule } from './contact/contact.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
@@ -171,6 +172,7 @@ import { validateEnv } from './config/env.validation';
     AuditModule,
     BarcodeModule,
     IntegrationsModule,
+    ContactModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before

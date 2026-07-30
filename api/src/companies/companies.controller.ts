@@ -15,10 +15,12 @@ export class CompaniesController {
   constructor(private readonly companiesService: CompaniesService) {}
 
   /**
-   * Self-service signup — the "10 minutes to first value" on-ramp
-   * (00-Company/Mission.md). Creates a Company, its Administrator/Read Only
-   * role templates, and the first admin User atomically, then logs that user
-   * straight in — no separate POST /v1/auth/login round-trip needed.
+   * Creates a Company, its Administrator/Read Only role templates, and the
+   * first admin User atomically, then logs that user straight in — no
+   * separate POST /v1/auth/login round-trip needed. No trial is granted
+   * (FleetHQ has no self-service signup/free-trial product path — a
+   * prospective customer's only route in is the public contact form, see
+   * src/contact/). This endpoint remains for direct/internal provisioning.
    */
   @Public()
   @Throttle({ default: { limit: process.env.NODE_ENV === 'test' ? 100_000 : 10, ttl: 60_000 } })

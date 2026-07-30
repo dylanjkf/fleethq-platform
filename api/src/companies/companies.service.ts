@@ -7,7 +7,6 @@ import { AuthService, LoginResult } from '../auth/auth.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { provisionCompany } from './provision-company';
-import { TRIAL_DAYS } from '../billing/plans';
 import { SignupCompanyDto } from './dto/signup-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 
@@ -33,7 +32,9 @@ export class CompaniesService {
           adminPassword: dto.adminPassword,
           adminFullName: dto.adminFullName,
           adminEmail: dto.adminEmail,
-          trialDays: TRIAL_DAYS,
+          // No free trial — FleetHQ has no self-service signup path in the
+          // product anymore (see fleethq-frontend's LoginPage/ContactPage);
+          // this endpoint still exists for direct/internal provisioning.
         }),
       );
 

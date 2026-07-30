@@ -1,9 +1,10 @@
 /**
- * Company signup is the "10 minutes to first value" on-ramp
- * (00-Company/Mission.md) — this is the only endpoint in the whole API that
- * creates a tenant from nothing, so it gets its own coverage distinct from
- * the tenant-isolation/permission specs, which all assume a tenant already
- * exists.
+ * POST /v1/companies is the only endpoint in the whole API that creates a
+ * tenant from nothing, so it gets its own coverage distinct from the
+ * tenant-isolation/permission specs, which all assume a tenant already
+ * exists. Not linked from the product's public UI (no self-service
+ * signup/free-trial — see fleethq-frontend's ContactPage) but kept for
+ * direct/internal provisioning.
  */
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -57,15 +58,15 @@ describe('Company signup', () => {
       .expect(201);
   });
 
-  it('starts a self-serve signup on a native free trial', async () => {
+  it('does not grant a free trial on signup', async () => {
     const suffix = randomUUID();
     const res = await request(app.getHttpServer())
       .post('/v1/companies')
       .send({
-        companyName: `Trial Co ${suffix}`,
-        adminUsername: `trial-admin-${suffix}`,
+        companyName: `No Trial Co ${suffix}`,
+        adminUsername: `no-trial-admin-${suffix}`,
         adminPassword: 'a-strong-password',
-        adminFullName: 'Trial Admin',
+        adminFullName: 'No Trial Admin',
       })
       .expect(201);
     const token = res.body.accessToken as string;
@@ -74,10 +75,9 @@ describe('Company signup', () => {
       .get('/v1/billing/entitlements')
       .set('Authorization', `Bearer ${token}`)
       .expect(200);
-    expect(ent.body.trialActive).toBe(true);
-    expect(ent.body.trialEndsAt).toEqual(expect.any(String));
-    expect(ent.body.trialDaysLeft).toBeGreaterThan(0);
-    expect(ent.body.trialDaysLeft).toBeLessThanOrEqual(14);
+    expect(ent.body.trialActive).toBe(false);
+    expect(ent.body.trialEndsAt).toBeNull();
+    expect(ent.body.trialDaysLeft).toBeNull();
   });
 
   it('rejects signup when the admin username is already taken', async () => {

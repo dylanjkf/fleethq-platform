@@ -61,9 +61,6 @@ export const TRIAL_TIER: PlanTier = {
   limits: { maxOperators: 25, maxAssets: 25 },
 };
 
-/** Days a self-serve signup gets before the trial lapses to Free. */
-export const TRIAL_DAYS = 14;
-
 /** The purchasable tiers, keyed by the config var holding their Stripe price id. */
 export const PAID_TIERS: Record<string, PlanTier> = {
   STRIPE_PRICE_STARTER: { key: 'starter', name: 'Starter', features: ['core', 'forms'], limits: { maxOperators: 10, maxAssets: 10 } },
