@@ -1,0 +1,290 @@
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { MaintenanceJobStatus, Prisma, TimelineEntityType } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { ListQueryDto } from '../common/dto/list-query.dto';
+import { CreateMaintenanceJobDto } from './dto/create-maintenance-job.dto';
+import { UpdateMaintenanceJobDto } from './dto/update-maintenance-job.dto';
+import { CloseMaintenanceJobDto } from './dto/close-maintenance-job.dto';
+import { RecordPartsUsedDto } from './dto/record-parts-used.dto';
+
+const PARTS_USED_INCLUDE = { partsUsed: { include: { part: true }, orderBy: { createdAt: 'asc' as const } } };
+
+/**
+ * The Workshop milestone's scoped slice (06-Workshop/Workshop_Overview.md):
+ * manual job logging, a linear status lifecycle, and an optional approval
+ * record. No Smart Checklist/OBD auto-creation, no
+ * service-due scheduling, no parts inventory — see the doc's implementation
+ * notes for the full reasoning.
+ */
+@Injectable()
+export class MaintenanceService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly timeline: TimelineService,
+  ) {}
+
+  async create(companyId: string, actorUserId: string, dto: CreateMaintenanceJobDto) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      // Idempotent replay: a DriverOS fault report queued offline and re-sent
+      // after a lost response carries a stable clientRequestId — return the
+      // existing job rather than opening a duplicate workshop job.
+      if (dto.clientRequestId) {
+        const existing = await tx.maintenanceJob.findFirst({
+          where: { companyId, clientRequestId: dto.clientRequestId },
+        });
+        if (existing) return existing;
+      }
+
+      await this.assertAssetExists(tx, companyId, dto.assetId);
+      if (dto.reportedByOperatorId) {
+        await this.assertOperatorExists(tx, companyId, dto.reportedByOperatorId);
+      }
+
+      const job = await tx.maintenanceJob.create({
+        data: {
+          companyId,
+          assetId: dto.assetId,
+          title: dto.title,
+          description: dto.description,
+          reportedByOperatorId: dto.reportedByOperatorId,
+          clientRequestId: dto.clientRequestId ?? null,
+        },
+      });
+
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: TimelineEntityType.MAINTENANCE_JOB,
+        entityId: job.id,
+        eventType: 'created',
+        summary: `Maintenance job "${job.title}" logged.`,
+        actorUserId,
+      });
+
+      return job;
+    });
+  }
+
+  async findAll(companyId: string, query: ListQueryDto) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      // Maintenance jobs have no archivedAt — Complete is a terminal status,
+      // always visible, same reasoning as Job (05-Dispatch).
+      const [items, total] = await Promise.all([
+        tx.maintenanceJob.findMany({
+          include: { asset: true, reportedByOperator: true, ...PARTS_USED_INCLUDE },
+          orderBy: { createdAt: 'desc' },
+          skip: query.skip,
+          take: query.take,
+        }),
+        tx.maintenanceJob.count(),
+      ]);
+      return { items, total, page: query.page ?? 1, pageSize: query.take };
+    });
+  }
+
+  async findOne(companyId: string, id: string) {
+    const job = await this.prisma.withTenant(companyId, (tx) =>
+      tx.maintenanceJob.findUnique({
+        where: { id },
+        include: { asset: true, reportedByOperator: true, ...PARTS_USED_INCLUDE },
+      }),
+    );
+    if (!job || job.companyId !== companyId) {
+      throw new NotFoundException({ code: 'MAINTENANCE_JOB_NOT_FOUND', message: 'Maintenance job not found.' });
+    }
+    return job;
+  }
+
+  async update(companyId: string, actorUserId: string, id: string, dto: UpdateMaintenanceJobDto) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const existing = await this.requireJob(tx, companyId, id);
+      this.assertNotComplete(existing);
+
+      const changed: Record<string, { from: unknown; to: unknown }> = {};
+      for (const field of ['title', 'description', 'status'] as const) {
+        if (dto[field] !== undefined && dto[field] !== existing[field]) {
+          changed[field] = { from: existing[field], to: dto[field] };
+        }
+      }
+
+      const job = await tx.maintenanceJob.update({
+        where: { id },
+        data: {
+          title: dto.title,
+          description: dto.description,
+          status: dto.status,
+        },
+      });
+
+      if (Object.keys(changed).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: TimelineEntityType.MAINTENANCE_JOB,
+          entityId: job.id,
+          eventType: 'updated',
+          summary: `Maintenance job "${job.title}" updated.`,
+          payload: changed,
+          actorUserId,
+        });
+      }
+
+      return job;
+    });
+  }
+
+  async approve(companyId: string, actorUserId: string, id: string) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const existing = await this.requireJob(tx, companyId, id);
+      this.assertNotComplete(existing);
+      if (existing.approvedAt) {
+        throw new ConflictException({
+          code: 'ALREADY_APPROVED',
+          message: 'This maintenance job has already been approved.',
+        });
+      }
+
+      const job = await tx.maintenanceJob.update({
+        where: { id },
+        data: { approvedAt: new Date(), approvedByUserId: actorUserId },
+      });
+
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: TimelineEntityType.MAINTENANCE_JOB,
+        entityId: job.id,
+        eventType: 'approved',
+        summary: `Maintenance job "${job.title}" approved.`,
+        actorUserId,
+      });
+
+      return job;
+    });
+  }
+
+  async close(companyId: string, actorUserId: string, id: string, dto: CloseMaintenanceJobDto) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const existing = await this.requireJob(tx, companyId, id);
+      this.assertNotComplete(existing);
+
+      const job = await tx.maintenanceJob.update({
+        where: { id },
+        data: {
+          status: MaintenanceJobStatus.COMPLETE,
+          completedAt: new Date(),
+          resolutionNotes: dto.resolutionNotes,
+          partsCost: dto.partsCost,
+          laborCost: dto.laborCost,
+        },
+      });
+
+      const payload: Record<string, unknown> = {};
+      if (dto.resolutionNotes) payload.resolutionNotes = dto.resolutionNotes;
+      if (dto.partsCost !== undefined) payload.partsCost = dto.partsCost;
+      if (dto.laborCost !== undefined) payload.laborCost = dto.laborCost;
+
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: TimelineEntityType.MAINTENANCE_JOB,
+        entityId: job.id,
+        eventType: 'closed',
+        summary: `Maintenance job "${job.title}" closed.`,
+        payload: Object.keys(payload).length > 0 ? payload : undefined,
+        actorUserId,
+      });
+
+      return job;
+    });
+  }
+
+  /**
+   * Parts inventory basics (06-Workshop/Workshop_Overview.md's "Future
+   * expansion notes"): log a part used against a job, decrementing stock and
+   * snapshotting its unit cost at the time of use. Allowed any time before
+   * the job is closed — a technician logs parts as they go, not only at the
+   * end. Insufficient stock is rejected rather than allowed to go negative;
+   * the fix is a stock adjustment (`PATCH /v1/parts/:id`) first.
+   */
+  async recordPartsUsed(companyId: string, actorUserId: string, jobId: string, dto: RecordPartsUsedDto) {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const job = await this.requireJob(tx, companyId, jobId);
+      this.assertNotComplete(job);
+
+      const part = await tx.part.findUnique({ where: { id: dto.partId } });
+      if (!part || part.companyId !== companyId || part.archivedAt) {
+        throw new NotFoundException({ code: 'PART_NOT_FOUND', message: 'Part not found.' });
+      }
+      if (part.quantityOnHand < dto.quantity) {
+        throw new ConflictException({
+          code: 'INSUFFICIENT_STOCK',
+          message: `Only ${part.quantityOnHand} of "${part.name}" in stock.`,
+        });
+      }
+
+      const updatedPart = await tx.part.update({
+        where: { id: part.id },
+        data: { quantityOnHand: { decrement: dto.quantity } },
+      });
+
+      const usage = await tx.maintenanceJobPartUsage.create({
+        data: {
+          companyId,
+          maintenanceJobId: jobId,
+          partId: part.id,
+          quantity: dto.quantity,
+          unitCostAtUse: part.unitCost,
+        },
+        include: { part: true },
+      });
+
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: TimelineEntityType.MAINTENANCE_JOB,
+        entityId: jobId,
+        eventType: 'parts_used',
+        summary: `${dto.quantity} × "${part.name}" logged against maintenance job "${job.title}".`,
+        actorUserId,
+      });
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: TimelineEntityType.PART,
+        entityId: part.id,
+        eventType: 'used',
+        summary: `${dto.quantity} used on maintenance job "${job.title}"; ${updatedPart.quantityOnHand} remaining.`,
+        actorUserId,
+      });
+
+      return usage;
+    });
+  }
+
+  private async requireJob(tx: Prisma.TransactionClient, companyId: string, id: string) {
+    const job = await tx.maintenanceJob.findUnique({ where: { id } });
+    if (!job || job.companyId !== companyId) {
+      throw new NotFoundException({ code: 'MAINTENANCE_JOB_NOT_FOUND', message: 'Maintenance job not found.' });
+    }
+    return job;
+  }
+
+  private assertNotComplete(job: { status: MaintenanceJobStatus }) {
+    if (job.status === MaintenanceJobStatus.COMPLETE) {
+      throw new ConflictException({
+        code: 'MAINTENANCE_JOB_CLOSED',
+        message: 'This maintenance job has already been closed.',
+      });
+    }
+  }
+
+  private async assertAssetExists(tx: Prisma.TransactionClient, companyId: string, assetId: string) {
+    const asset = await tx.asset.findUnique({ where: { id: assetId } });
+    if (!asset || asset.companyId !== companyId || asset.archivedAt) {
+      throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
+    }
+  }
+
+  private async assertOperatorExists(tx: Prisma.TransactionClient, companyId: string, operatorId: string) {
+    const operator = await tx.operator.findUnique({ where: { id: operatorId } });
+    if (!operator || operator.companyId !== companyId || operator.archivedAt) {
+      throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
+    }
+  }
+}

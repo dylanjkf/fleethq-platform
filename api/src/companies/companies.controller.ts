@@ -1,0 +1,53 @@
+import { Body, Controller, Get, Patch, Post } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { Public } from '../common/decorators/public.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { AuthenticatedOnly } from '../common/decorators/authenticated-only.decorator';
+import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { PERMISSIONS } from '../common/permissions/permission-catalog';
+import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
+import { CompaniesService } from './companies.service';
+import { SignupCompanyDto } from './dto/signup-company.dto';
+import { UpdateCompanyDto } from './dto/update-company.dto';
+
+@Controller({ path: 'companies', version: '1' })
+export class CompaniesController {
+  constructor(private readonly companiesService: CompaniesService) {}
+
+  /**
+   * Self-service signup — the "10 minutes to first value" on-ramp
+   * (00-Company/Mission.md). Creates a Company, its Administrator/Read Only
+   * role templates, and the first admin User atomically, then logs that user
+   * straight in — no separate POST /v1/auth/login round-trip needed.
+   */
+  @Public()
+  @Throttle({ default: { limit: process.env.NODE_ENV === 'test' ? 100_000 : 10, ttl: 60_000 } })
+  @Post()
+  signup(@Body() dto: SignupCompanyDto) {
+    return this.companiesService.signup(dto);
+  }
+
+  @Get('me')
+  @RequirePermission(PERMISSIONS.COMPANIES_VIEW)
+  getMe(@CurrentUser() user: AuthenticatedRequestUser) {
+    return this.companiesService.getMe(user.companyId);
+  }
+
+  /**
+   * 01-Product/Support_Help_Pathway.md: no @RequirePermission — every
+   * authenticated user (including a Driver role with no companies:view)
+   * can read the company's support contact, the same "every user manages/
+   * reads their own context" precedent as notification preferences.
+   */
+  @Get('me/support')
+  @AuthenticatedOnly()
+  getSupportInfo(@CurrentUser() user: AuthenticatedRequestUser) {
+    return this.companiesService.getSupportInfo(user.companyId);
+  }
+
+  @Patch('me')
+  @RequirePermission(PERMISSIONS.COMPANIES_EDIT)
+  updateMe(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: UpdateCompanyDto) {
+    return this.companiesService.updateMe(user.companyId, user.userId, dto);
+  }
+}

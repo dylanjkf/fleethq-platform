@@ -1,0 +1,2333 @@
+// FleetOS core data model — foundation slice.
+// Source of truth for entity shape is 11-Database/Data_Model.md; terminology and
+// the AssetClass axis are governed by 02-Architecture/Asset_Class_Model.md.
+//
+// Multi-tenancy: every company-scoped table carries companyId AND is protected by
+// a Postgres row-level security policy (see prisma/migrations/*_add_row_level_security)
+// keyed on the `app.current_company_id` session setting — company_id columns here are
+// not the only enforcement mechanism, per Data_Model.md's non-negotiable constraint.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & Permissions (14-Security/Permissions_Model.md)
+// ---------------------------------------------------------------------------
+
+/// Cross-instance leader election for the background scheduler. Not tenant
+/// data — one row per periodic task holding a short lease, so that in a
+/// multi-replica deployment exactly one instance runs a given tick. No RLS
+/// (system-level, like the gps tables); only the scheduler (via the privileged
+/// SystemPrismaService / fleetos_auth role) reads/writes it.
+model SchedulerLease {
+  task        String   @id
+  lockedUntil DateTime @map("locked_until")
+  holder      String
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("scheduler_leases")
+}
+
+model Company {
+  id                   String             @id @default(uuid()) @db.Uuid
+  name                 String
+  /// ISO-ish jurisdiction code. Only "AU" is a supported value at the API layer
+  /// today, but the column exists from day one per 08-Compliance/Jurisdiction_Model.md
+  /// so a second jurisdiction is configuration, not a schema change.
+  jurisdiction         String             @default("AU")
+  /// FOUNDER_NOTES.md's Support/help pathway gap: a phone number/note an
+  /// operator stuck mid-shift can fall back to when messaging the office
+  /// isn't fast enough (or there's no connectivity for DriverOS's own
+  /// message-outbox sync). Readable by any authenticated user in the
+  /// company via GET /v1/companies/me/support (no companies:view gate,
+  /// same "every user can read this slice of their own context" precedent
+  /// as notification preferences) — see 01-Product/Support_Help_Pathway.md.
+  supportPhone         String?            @map("support_phone")
+  supportNotes         String?            @map("support_notes")
+  /// Billing (FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing &
+  /// subscription management spec"): one Stripe Customer + Subscription per
+  /// Company, mirroring the Company-level singleton shape supportPhone/Notes
+  /// already use — billing is a company-wide account fact, not something to
+  /// model as a separate one-to-many entity. `null` fields mean "no Stripe
+  /// object created yet" (e.g. a company that signed up before billing
+  /// existed, or is on a manually-managed arrangement) — see
+  /// 19-Billing/Billing_And_Subscriptions.md for the full spec and why
+  /// subscription status is surfaced, not enforced as a hard lockout, in v1.
+  stripeCustomerId     String?            @unique @map("stripe_customer_id")
+  stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
+  subscriptionStatus   SubscriptionStatus @default(NONE) @map("subscription_status")
+  /// The Stripe Price ID the company's active subscription is on, e.g.
+  /// "price_...". Not an internal plan enum — Stripe's own Price object is
+  /// the source of truth for what a plan costs/includes, so there's nothing
+  /// to keep in sync if pricing changes in the Stripe Dashboard.
+  planPriceId          String?            @map("plan_price_id")
+  /// Self-serve free-trial window. Set at signup (14 days) so a new company
+  /// experiences the full product before subscribing; entitlements grant the
+  /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
+  /// of Stripe's own TRIALING status — this is FleetOS's native, no-card trial.
+  trialEndsAt          DateTime?          @map("trial_ends_at")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+  archivedAt           DateTime?          @map("archived_at")
+
+  memberships                  CompanyMembership[]
+  roles                        Role[]
+  assets                       Asset[]
+  operators                    Operator[]
+  attachedUnits                AttachedUnit[]
+  jobs                         Job[]
+  maintenanceJobs              MaintenanceJob[]
+  complianceDocuments          ComplianceDocument[]
+  checklistTemplates           ChecklistTemplate[]
+  checklistSubmissions         ChecklistSubmission[]
+  messages                     Message[]
+  attachments                  Attachment[]
+  jobStops                     JobStop[]
+  notifications                Notification[]
+  customers                    Customer[]
+  depots                       Depot[]
+  operatorShifts               OperatorShift[]
+  timelineEvents               TimelineEvent[]
+  graphRelationships           GraphRelationship[]
+  formTemplates                FormTemplate[]
+  formSubmissions              FormSubmission[]
+  parts                        Part[]
+  maintenanceJobPartUsages     MaintenanceJobPartUsage[]
+  stopParcels                  StopParcel[]
+  documents                    Document[]
+  knowledgeArticles            KnowledgeArticle[]
+  stockItems                   StockItem[]
+  stockAdjustments             StockAdjustment[]
+  utilisationSnapshots         UtilisationSnapshot[]
+  analyticsSetting             AnalyticsSetting?
+  analyticsOverrides           AnalyticsOverride[]
+  warehouseMachines            WarehouseMachine[]
+  warehouseMachineLogs         WarehouseMachineLog[]
+  fatigueRuleSets              FatigueRuleSet[]
+  maintenanceScheduleTemplates MaintenanceScheduleTemplate[]
+  assetMaintenancePlans        AssetMaintenancePlan[]
+  warehouseMachinePlans        WarehouseMachinePlan[]
+  notificationPresets          NotificationPreset[]
+  dashboardLayoutPresets       DashboardLayoutPreset[]
+  checklistBundles             ChecklistBundle[]
+  checklistBundleItems         ChecklistBundleItem[]
+  checklistTemplateAssignments ChecklistTemplateAssignment[]
+  addressBooks                 AddressBook[]
+  assetClasses                 AssetClass[]
+  hiddenAssetClasses           HiddenAssetClass[]
+  fuelEntries                  FuelEntry[]
+  gpsDevices                   GpsDevice[]
+  gpsPings                     GpsPing[]
+  barcodeSearchableFields      BarcodeSearchableField[]
+  barcodeFieldMappings         BarcodeFieldMapping[]
+  barcodeScanConfig            BarcodeScanConfig?
+  integrationConnections       IntegrationConnection[]
+  integrationCredentials       IntegrationCredential[]
+  integrationFieldMappings     IntegrationFieldMapping[]
+  integrationWebhooks          IntegrationWebhook[]
+
+  @@map("companies")
+}
+
+/// A named group of ChecklistTemplates (Saved Layout): assemble a set of
+/// pre-start / inspection checklists once, then deploy the whole set to an
+/// asset class in one action (scoping each member template to that class).
+model ChecklistBundle {
+  id          String    @id @default(uuid()) @db.Uuid
+  companyId   String    @map("company_id") @db.Uuid
+  name        String
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  archivedAt  DateTime? @map("archived_at")
+
+  company Company               @relation(fields: [companyId], references: [id])
+  items   ChecklistBundleItem[]
+
+  @@index([companyId])
+  @@map("checklist_bundles")
+}
+
+model ChecklistBundleItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String   @map("company_id") @db.Uuid
+  bundleId   String   @map("bundle_id") @db.Uuid
+  templateId String   @map("template_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  company  Company           @relation(fields: [companyId], references: [id])
+  bundle   ChecklistBundle   @relation(fields: [bundleId], references: [id])
+  template ChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  @@unique([bundleId, templateId])
+  @@index([companyId])
+  @@map("checklist_bundle_items")
+}
+
+/// A persistent "this inspection applies to this specific asset" link, so the
+/// office assigns a template to an asset once instead of re-selecting it each
+/// day. Complements `ChecklistTemplate.appliesToAssetClassId` (whole-class
+/// targeting): an asset's applicable inspections are the class-matched ones,
+/// the class-agnostic (null-class) ones, PLUS any assigned directly here.
+model ChecklistTemplateAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String   @map("company_id") @db.Uuid
+  templateId String   @map("template_id") @db.Uuid
+  assetId    String   @map("asset_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  company  Company           @relation(fields: [companyId], references: [id])
+  template ChecklistTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  asset    Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, assetId])
+  @@index([companyId])
+  @@index([companyId, assetId])
+  @@map("checklist_template_assignments")
+}
+
+/// A savable, portable snapshot of depot/customer locations (Saved Layout): a
+/// multi-entity operator exports selected locations as a named address book,
+/// then imports them into another company they belong to. The transfer is
+/// payload-based (the exported JSON is carried by the client and imported
+/// under the target company's own tenant context) — never a cross-tenant DB
+/// read, so RLS isolation is never crossed.
+model AddressBook {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  name       String
+  /// [{ kind: 'depot'|'customer', name, address?, contactName?, phone?, notes? }]
+  entries    Json
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("address_books")
+}
+
+/// A savable notification-preference bundle (Saved Layout): a named set of the
+/// per-type mute list + digest-only flag, deployable to many company members
+/// at once. Deploying writes each target user's own preference fields.
+model NotificationPreset {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  name       String
+  digestOnly Boolean   @default(false) @map("digest_only")
+  /// notification-types.ts NOTIFICATION_TYPE_KEYS that are muted.
+  mutedTypes String[]  @default([]) @map("muted_types")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("notification_presets")
+}
+
+/// A savable dashboard arrangement (Saved Layout): an ordered list of widget
+/// keys with a visible flag, deployable to many members' dashboards. A
+/// member's own current arrangement lives on CompanyMembership.dashboardLayout.
+model DashboardLayoutPreset {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  name       String
+  isDefault  Boolean   @default(false) @map("is_default")
+  /// [{ key: string, visible: boolean }] in display order.
+  widgets    Json
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("dashboard_layout_presets")
+}
+
+/// A customer-saved fatigue rule set — the thresholds that drive the fatigue
+/// engine (08-Compliance). A "savable layout": create it once, then deploy it
+/// to many operators (Operator.fatigueRuleSetId) or set one as the company
+/// default. When an operator has none and there's no company default, the
+/// built-in jurisdiction rule set (AU Standard Hours) applies.
+model FatigueRuleSet {
+  id                   String    @id @default(uuid()) @db.Uuid
+  companyId            String    @map("company_id") @db.Uuid
+  name                 String
+  /// The company-wide fallback when an operator has no explicit assignment.
+  isDefault            Boolean   @default(false) @map("is_default")
+  maxWork24hMin        Int       @map("max_work_24h_min")
+  minRest24hMin        Int       @map("min_rest_24h_min")
+  maxWork7dMin         Int       @map("max_work_7d_min")
+  minRest7dMin         Int       @map("min_rest_7d_min")
+  approachingBufferMin Int       @map("approaching_buffer_min")
+  lookbackDays         Int       @default(8) @map("lookback_days")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  archivedAt           DateTime? @map("archived_at")
+
+  company   Company    @relation(fields: [companyId], references: [id])
+  operators Operator[]
+
+  @@index([companyId])
+  @@map("fatigue_rule_sets")
+}
+
+/// Mirrors Stripe Subscription's own status values that matter for FleetOS's
+/// purposes (19-Billing/Billing_And_Subscriptions.md) — not every Stripe
+/// status (e.g. "incomplete_expired" is folded into NONE) since this column
+/// exists to drive a dashboard banner, not to be a full local replica of
+/// Stripe's state machine; Stripe itself remains the source of truth.
+enum SubscriptionStatus {
+  /// No Stripe subscription exists yet (never subscribed, or a pre-billing company).
+  NONE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+/// A person's login identity. A User can belong to more than one Company (via
+/// CompanyMembership) with a different Role — and therefore different permissions
+/// — in each, under the one login. See Permissions_Model.md "Multi-Company Support".
+model User {
+  id                      String    @id @default(uuid()) @db.Uuid
+  /// Company-issued username, per CLAUDE.md's v1 login scope decision (no NFC/QR/biometric).
+  /// Globally unique so the same login works across a multi-company user's company switcher.
+  username                String    @unique
+  passwordHash            String    @map("password_hash")
+  fullName                String    @map("full_name")
+  /// Contact email — the destination for verification + password-reset links.
+  /// Nullable: pre-existing users (and username-only logins) may not have one,
+  /// in which case self-service password reset simply isn't available to them.
+  email                   String?
+  emailVerifiedAt         DateTime? @map("email_verified_at")
+  /// Brute-force throttle: consecutive failed logins, and a lock window that
+  /// clears on the next successful login. Written via the SELECT+UPDATE-scoped
+  /// fleetos_auth role since login runs before any tenant context exists.
+  failedLoginCount        Int       @default(0) @map("failed_login_count")
+  lockedUntil             DateTime? @map("locked_until")
+  /// Session-revocation counter. Every issued session JWT carries the value
+  /// this had at issue time; the JWT strategy rejects a token whose value no
+  /// longer matches. Bumped on a password reset so a reset immediately
+  /// invalidates every existing session for the account (not just for the
+  /// token's remaining lifetime).
+  tokenVersion            Int       @default(0) @map("token_version")
+  /// Multi-factor auth (TOTP). `mfaSecret` is the base32 shared secret;
+  /// `mfaEnabledAt` is set only once a code is confirmed, and MFA is enforced at
+  /// login iff it is non-null (a secret without it is a pending enrolment).
+  /// `mfaBackupCodes` holds bcrypt hashes of single-use recovery codes.
+  mfaSecret               String?   @map("mfa_secret")
+  mfaEnabledAt            DateTime? @map("mfa_enabled_at")
+  mfaBackupCodes          String[]  @default([]) @map("mfa_backup_codes")
+  /// Alert-fatigue control (FOUNDER_NOTES.md's "notifications as its own system"
+  /// gap): when true, notifications still record and feed the email digest,
+  /// they just don't drive a live in-app unread badge.
+  digestOnlyNotifications Boolean   @default(false) @map("digest_only_notifications")
+  /// Per-type mute list (notification-types.ts's NOTIFICATION_TYPE_KEYS) — a
+  /// muted type is never recorded for this user at all, so it can't drive an
+  /// unread badge, a push, or an email digest line either.
+  mutedNotificationTypes  String[]  @default([]) @map("muted_notification_types")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+  archivedAt              DateTime? @map("archived_at")
+
+  memberships             CompanyMembership[]
+  timelineEventsActedOn   TimelineEvent[]       @relation("TimelineActorUser")
+  maintenanceJobsApproved MaintenanceJob[]      @relation("MaintenanceApprovedByUser")
+  messagesSent            Message[]             @relation("MessageSender")
+  attachmentsUploaded     Attachment[]          @relation("AttachmentUploader")
+  notifications           Notification[]        @relation("NotificationRecipient")
+  pushSubscriptions       PushSubscription[]
+  operatorLink            Operator?
+  formSubmissions         FormSubmission[]      @relation("FormSubmittedByUser")
+  authTokens              AuthToken[]
+  documentsUploaded       Document[]            @relation("DocumentUploader")
+  knowledgeArticles       KnowledgeArticle[]    @relation("KnowledgeAuthor")
+  warehouseMachineLogs    WarehouseMachineLog[] @relation("WarehouseLogAuthor")
+  stockAdjustments        StockAdjustment[]
+  analyticsOverrides      AnalyticsOverride[]
+
+  @@map("users")
+}
+
+enum AuthTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+/// Single-use, expiring tokens for email verification, password reset, and
+/// invite (set-your-password) links. Only the SHA-256 *hash* of the token is
+/// stored, so a database leak can't be replayed into account takeover. Not
+/// company-scoped (reset happens before any tenant context) and touched only
+/// by the BYPASSRLS fleetos_auth role, so it carries no RLS policy — access is
+/// bounded by that role's narrow grants instead.
+model AuthToken {
+  id        String        @id @default(uuid()) @db.Uuid
+  userId    String        @map("user_id") @db.Uuid
+  type      AuthTokenType
+  tokenHash String        @map("token_hash")
+  expiresAt DateTime      @map("expires_at")
+  usedAt    DateTime?     @map("used_at")
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, type])
+  @@map("auth_tokens")
+}
+
+/// One browser/device's Web Push registration (04-DriverOS/DriverOS_Overview.md
+/// + FOUNDER_NOTES.md's notifications gap). Tied to the User identity, not a
+/// Company, the same way the identity itself isn't — a login registers once
+/// per device regardless of which company it's currently viewing. No RLS,
+/// same deliberate treatment as `users` itself (see PrismaService's doc
+/// comment): there's no tenant context to scope a device registration by.
+model PushSubscription {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("push_subscriptions")
+}
+
+/// Join of User x Company x Role. This is the thing a login JWT is actually scoped
+/// to — 12-API/API_Architecture.md requires a multi-company user's token to only be
+/// valid for the company context it was issued for.
+model CompanyMembership {
+  id              String    @id @default(uuid()) @db.Uuid
+  companyId       String    @map("company_id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  roleId          String    @map("role_id") @db.Uuid
+  /// This member's saved dashboard arrangement: [{ key, visible }] in order.
+  /// Null = the app's default widget layout.
+  dashboardLayout Json?     @map("dashboard_layout")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  archivedAt      DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  role    Role    @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, companyId])
+  @@index([companyId])
+  // Reverse lookup: "how many memberships use this role?" (role-archive guard).
+  @@index([companyId, roleId])
+  @@map("company_memberships")
+}
+
+/// A named, company-editable bundle of Permissions. Never referenced by name in
+/// application logic — every capability check resolves through RolePermission.
+model Role {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  name             String
+  description      String?
+  /// Marks the seeded starting-point templates (Administrator, Read Only, ...) from
+  /// Permissions_Model.md so FleetHQ can show "cloned from template" provenance.
+  /// Companies can still edit or archive these — this flag is informational only.
+  isSystemTemplate Boolean   @default(false) @map("is_system_template")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  archivedAt       DateTime? @map("archived_at")
+
+  company     Company             @relation(fields: [companyId], references: [id])
+  permissions RolePermission[]
+  memberships CompanyMembership[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("roles")
+}
+
+/// The global catalog of individually grantable capabilities. Not company-scoped —
+/// this is a platform-defined list (Permissions_Model.md), not something a company
+/// invents; companies only choose which ones each of their Roles includes.
+model Permission {
+  id          String @id @default(uuid()) @db.Uuid
+  /// Stable machine key, e.g. "assets:create". This is what guards check against.
+  key         String @unique
+  /// Grouping shown in the FleetHQ role editor, e.g. "Assets", "Operators".
+  category    String
+  description String
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  // Reverse lookup: "which roles grant this permission?" (the PK covers roleId).
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// Asset Class Model (02-Architecture/Asset_Class_Model.md)
+// ---------------------------------------------------------------------------
+
+/// An asset category. Every Asset belongs to exactly one. Categories are
+/// customer-definable: `companyId = null` rows are the shared built-ins
+/// (Land/Air/Sea) available to every company, and a company can add its own
+/// (Reefer, Van, Forklift, Vessel, …) — each able to have its own checklists.
+/// `key` is a stable slug (unique among built-ins, and unique per company).
+model AssetClass {
+  id            String    @id @default(uuid()) @db.Uuid
+  companyId     String?   @map("company_id") @db.Uuid
+  key           String
+  name          String
+  description   String?
+  /// Legacy flag kept for compatibility; every category is now usable.
+  isImplemented Boolean   @default(true) @map("is_implemented")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  archivedAt    DateTime? @map("archived_at")
+
+  company            Company?            @relation(fields: [companyId], references: [id])
+  assets             Asset[]
+  checklistTemplates ChecklistTemplate[]
+  hiddenBy           HiddenAssetClass[]
+
+  @@index([companyId])
+  @@map("asset_classes")
+}
+
+/// Hides one shared built-in AssetClass (company_id IS NULL) from one company.
+///
+/// A built-in is a single global row read by every tenant, so a company asking to
+/// "remove Air" cannot delete or archive it — that would remove it for everyone.
+/// Each company therefore keeps a suppression list instead: presence of a row
+/// here hides that category from this company only, and deleting the row restores
+/// it. Only built-ins are ever suppressed this way; a company's OWN custom
+/// category is archived normally on its own record.
+model HiddenAssetClass {
+  id           String   @id @default(uuid()) @db.Uuid
+  companyId    String   @map("company_id") @db.Uuid
+  assetClassId String   @map("asset_class_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assetClass AssetClass @relation(fields: [assetClassId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, assetClassId])
+  @@index([assetClassId])
+  @@map("hidden_asset_classes")
+}
+
+// ---------------------------------------------------------------------------
+// Fleet Registry (02-Architecture/System_Architecture.md)
+// ---------------------------------------------------------------------------
+
+model Asset {
+  id                String    @id @default(uuid()) @db.Uuid
+  companyId         String    @map("company_id") @db.Uuid
+  assetClassId      String    @map("asset_class_id") @db.Uuid
+  /// Display identifier (e.g. a rego plate, a fleet number, a tail number) — kept
+  /// as a single generic label rather than a Land-specific "registration" column,
+  /// per Asset_Class_Model.md's requirement that Asset Class determine which
+  /// fields are even offered. Class-specific structured fields (registration
+  /// documents, airworthiness certs, ...) live in Digital Glovebox, not here.
+  name              String
+  externalReference String?   @map("external_reference")
+  /// Optional structured specs a company can fill in if they want richer asset
+  /// records than the single `name` label — kept generic (they suit a road
+  /// vehicle but a company can leave any blank). `odometer` is the current
+  /// reading in the asset's own unit; a full reading-history table is future
+  /// work. `customFields` is a free-form JSON object of company-defined fields
+  /// (the same never-migrate-per-customer pattern StockItem/WarehouseMachine
+  /// use) so a category with unusual attributes isn't blocked on a schema change.
+  make              String?
+  model             String?
+  year              Int?
+  vin               String?
+  registration      String?
+  odometer          Int?
+  odometerUnit      String?   @map("odometer_unit")
+  customFields      Json?     @map("custom_fields")
+  /// Digital Glovebox (01-Product/Digital_Glovebox.md): a single free-text
+  /// contact shown to a DriverOS operator alongside compliance document
+  /// status for the asset they're currently assigned to. Deliberately not a
+  /// separate document/entity — the full spec's file-upload glovebox
+  /// (registration/insurance/roadworthy PDFs) is out of scope for this slice;
+  /// registration/insurance/roadworthy status is served from the
+  /// already-built ComplianceDocument records instead.
+  emergencyContact  String?   @map("emergency_contact")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  archivedAt        DateTime? @map("archived_at")
+
+  company              Company                       @relation(fields: [companyId], references: [id])
+  assetClass           AssetClass                    @relation(fields: [assetClassId], references: [id])
+  jobs                 Job[]
+  maintenanceJobs      MaintenanceJob[]
+  complianceDocuments  ComplianceDocument[]
+  checklistSubmissions ChecklistSubmission[]
+  checklistAssignments ChecklistTemplateAssignment[]
+  maintenancePlans     AssetMaintenancePlan[]
+  gpsDevices           GpsDevice[]
+
+  fuelEntries FuelEntry[]
+
+  @@index([companyId])
+  // DB-level data-quality backstops (partial unique indexes, see migration
+  // 20260723200000): VIN and registration are each unique within a company
+  // among live (non-archived) assets — prevents entering the same vehicle
+  // twice. Filtered indexes, so they live only in the migration SQL.
+  // Reverse lookup: "which assets are in this class?" (+ class-in-use guard).
+  @@index([companyId, assetClassId])
+  @@map("assets")
+}
+
+/// A hardware GPS tracker (not a driver's phone): any device or telematics
+/// provider that can POST a position. It authenticates to the ingest endpoint
+/// with its own secret `deviceKey` (bearer token) rather than a user login, and
+/// is optionally bound to an Asset so the fleet map can show the asset's live
+/// position even when no driver is on shift. These tables are scoped in the
+/// service layer (every query filters by companyId) rather than by RLS, because
+/// ingest is a keyless credential lookup by `deviceKey` — the one path that must
+/// resolve a tenant *before* any company context exists.
+model GpsDevice {
+  id             String    @id @default(uuid()) @db.Uuid
+  companyId      String    @map("company_id") @db.Uuid
+  name           String
+  /// SHA-256 hash of the device's bearer key — never the plaintext. The key has
+  /// 32 bytes of entropy (not a low-entropy password), so a fast deterministic
+  /// hash is both safe and indexable: ingest resolves the tenant by hashing the
+  /// presented key and looking it up here. The plaintext is shown exactly once,
+  /// at registration/rotation, and is unrecoverable thereafter.
+  deviceKeyHash  String    @unique @map("device_key_hash")
+  provider       String?
+  assetId        String?   @map("asset_id") @db.Uuid
+  lastLat        Float?    @map("last_lat")
+  lastLng        Float?    @map("last_lng")
+  lastLocationAt DateTime? @map("last_location_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  archivedAt     DateTime? @map("archived_at")
+
+  company Company   @relation(fields: [companyId], references: [id])
+  asset   Asset?    @relation(fields: [assetId], references: [id])
+  pings   GpsPing[]
+
+  @@index([companyId])
+  @@map("gps_devices")
+}
+
+/// An append-only position report from a GpsDevice — the breadcrumb trail. The
+/// latest fix is also denormalised onto GpsDevice for cheap map reads.
+model GpsPing {
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String   @map("company_id") @db.Uuid
+  deviceId   String   @map("device_id") @db.Uuid
+  lat        Float
+  lng        Float
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  company Company   @relation(fields: [companyId], references: [id])
+  device  GpsDevice @relation(fields: [deviceId], references: [id])
+
+  @@index([companyId, deviceId])
+  @@map("gps_pings")
+}
+
+/// A savable maintenance-schedule layout: a named set of recurring service
+/// items a customer defines once (basic presets or fully custom), then deploys
+/// to many trucks/assets at once. Items live as JSON so a customer's own
+/// schedule needs no migration. Deploying materializes one
+/// AssetMaintenancePlan per item per asset.
+model MaintenanceScheduleTemplate {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  name       String
+  isDefault  Boolean   @default(false) @map("is_default")
+  /// [{ label: string, intervalDays: number }]
+  items      Json
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company      Company                @relation(fields: [companyId], references: [id])
+  plans        AssetMaintenancePlan[]
+  machinePlans WarehouseMachinePlan[]
+
+  @@index([companyId])
+  @@map("maintenance_schedule_templates")
+}
+
+/// A recurring maintenance item deployed to a specific asset (e.g. "Service"
+/// every 180 days). Time-based in v1. `lastServiceAt` (or the row's creation
+/// time as the baseline) + intervalDays gives the next-due date, from which
+/// overdue/due-soon status — and the asset's health deduction — is derived at
+/// read time (never stored).
+model AssetMaintenancePlan {
+  id            String    @id @default(uuid()) @db.Uuid
+  companyId     String    @map("company_id") @db.Uuid
+  assetId       String    @map("asset_id") @db.Uuid
+  templateId    String?   @map("template_id") @db.Uuid
+  label         String
+  intervalDays  Int       @map("interval_days")
+  lastServiceAt DateTime? @map("last_service_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  archivedAt    DateTime? @map("archived_at")
+
+  company  Company                      @relation(fields: [companyId], references: [id])
+  asset    Asset                        @relation(fields: [assetId], references: [id])
+  template MaintenanceScheduleTemplate? @relation(fields: [templateId], references: [id])
+
+  @@index([companyId])
+  @@index([assetId])
+  @@map("asset_maintenance_plans")
+}
+
+/// `userId` is the DriverOS login link (DriverOS v0 milestone): an Operator
+/// is a fleet-registry record (name/contact, referenced by Jobs and
+/// Maintenance reports) and is *not* itself login-capable — logging into
+/// DriverOS means the Operator has an associated User (with a normal
+/// CompanyMembership + Role, exactly like any FleetHQ user). Nullable and
+/// unique: most Operators won't have a DriverOS login yet, and a User can
+/// back at most one Operator per company. See 04-DriverOS/DriverOS_Overview.md.
+model Operator {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  fullName         String    @map("full_name")
+  email            String?
+  phone            String?
+  userId           String?   @unique @map("user_id") @db.Uuid
+  /// Last-known live location, reported by the operator's DriverOS device while
+  /// on shift (05-Dispatch/Dispatch_Overview.md's "where is my driver now").
+  /// Only the latest position is kept, not a breadcrumb trail — this is live
+  /// telemetry, not the kind of meaningful business event that belongs on the
+  /// Timeline. It is personal information under the Privacy Act, so the erasure
+  /// path clears it (see 14-Security/Privacy_Data_Protection.md).
+  lastLat          Float?    @map("last_lat")
+  lastLng          Float?    @map("last_lng")
+  lastLocationAt   DateTime? @map("last_location_at")
+  /// The saved fatigue rule set deployed to this operator. Null = fall back to
+  /// the company default rule set, then to the built-in jurisdiction default.
+  fatigueRuleSetId String?   @map("fatigue_rule_set_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  archivedAt       DateTime? @map("archived_at")
+
+  company                 Company               @relation(fields: [companyId], references: [id])
+  user                    User?                 @relation(fields: [userId], references: [id])
+  fatigueRuleSet          FatigueRuleSet?       @relation(fields: [fatigueRuleSetId], references: [id])
+  jobs                    Job[]
+  maintenanceJobsReported MaintenanceJob[]      @relation("MaintenanceReportedByOperator")
+  checklistSubmissions    ChecklistSubmission[]
+  messages                Message[]
+  shifts                  OperatorShift[]
+  complianceDocuments     ComplianceDocument[]
+
+  fuelEntries FuelEntry[]
+
+  @@index([companyId])
+  // Reverse lookup: "which operators use this fatigue rule set?" (+ eval joins).
+  @@index([companyId, fatigueRuleSetId])
+  @@map("operators")
+}
+
+enum ShiftStatus {
+  ACTIVE
+  ENDED
+}
+
+/// An operator's DriverOS shift boundary ("Start my day" / "End my day"). Lays
+/// the groundwork data (start/end timestamps) the deferred fatigue/hours
+/// engine will eventually need, without building that engine now — see
+/// FOUNDER_NOTES.md and CLAUDE.md's Australia-first jurisdiction scope. One
+/// ACTIVE shift per operator at a time, enforced in the service (not the
+/// schema — a partial unique index would work too, but the service already
+/// has to check "is there an open shift" for the day-summary read anyway).
+model OperatorShift {
+  id         String      @id @default(uuid()) @db.Uuid
+  companyId  String      @map("company_id") @db.Uuid
+  operatorId String      @map("operator_id") @db.Uuid
+  status     ShiftStatus @default(ACTIVE)
+  startedAt  DateTime    @default(now()) @map("started_at")
+  endedAt    DateTime?   @map("ended_at")
+
+  company  Company  @relation(fields: [companyId], references: [id])
+  operator Operator @relation(fields: [operatorId], references: [id])
+
+  @@index([companyId, operatorId])
+  // DB-level backstop (partial unique index `operator_one_active_shift`, see
+  // migration 20260723200000): at most one ACTIVE shift per operator, closing
+  // the check-then-insert race in ShiftsService. Not expressible in Prisma's
+  // schema DSL (filtered index), so it lives only in the migration SQL.
+  @@map("operator_shifts")
+}
+
+/// Modeled per 11-Database/Data_Model.md's core entity list. CRUD-only, mirroring
+/// Asset/Operator exactly (see AttachedUnitsModule) — hitching/pairing an
+/// AttachedUnit to an Asset via a Fleet Graph PAIRED_WITH relationship is a
+/// deliberately separate, not-yet-built slice (01-Product/Fleet_Graph.md).
+model AttachedUnit {
+  id                String    @id @default(uuid()) @db.Uuid
+  companyId         String    @map("company_id") @db.Uuid
+  name              String
+  externalReference String?   @map("external_reference")
+  /// Optional structured specs, mirroring Asset's: a trailer or dolly has a
+  /// registration, VIN, make and build year just like a prime mover does. Every
+  /// field is nullable — a company that only wants a name is unaffected — and
+  /// `customFields` is the same free-form company-defined escape hatch Asset
+  /// uses, so an unusual attribute never needs a schema change.
+  make              String?
+  model             String?
+  year              Int?
+  vin               String?
+  registration      String?
+  notes             String?
+  customFields      Json?     @map("custom_fields")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  archivedAt        DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("attached_units")
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch (05-Dispatch/Dispatch_Overview.md)
+// ---------------------------------------------------------------------------
+
+enum JobStatus {
+  UNASSIGNED
+  ASSIGNED
+  COMPLETED
+  CANCELLED
+}
+
+/// The Dispatch milestone's deliberately scoped-down slice of the full
+/// Dispatch_Overview.md spec: job creation, assignment to an Asset and/or
+/// Operator, and status. No live map/GPS, OBD-derived status, route
+/// optimization, operator chat, or customer/job messaging — those all require
+/// data sources (live telemetry, a DriverOS client, a Customer entity) that
+/// don't exist yet. Terminal states (COMPLETED/CANCELLED) are the "no hard
+/// delete" mechanism here rather than a separate archivedAt flag — a Job's
+/// natural lifecycle already satisfies "everything has a timeline" once it
+/// reaches a terminal status; nothing about a Job is ever hidden or deleted.
+model Job {
+  id            String    @id @default(uuid()) @db.Uuid
+  companyId     String    @map("company_id") @db.Uuid
+  title         String
+  description   String?
+  assetId       String?   @map("asset_id") @db.Uuid
+  operatorId    String?   @map("operator_id") @db.Uuid
+  /// The fleet's own pickup location for this run (see Depot below).
+  /// Optional — not every run starts from a named depot.
+  pickupDepotId String?   @map("pickup_depot_id") @db.Uuid
+  status        JobStatus @default(UNASSIGNED)
+  scheduledAt   DateTime? @map("scheduled_at")
+  completedAt   DateTime? @map("completed_at")
+  cancelledAt   DateTime? @map("cancelled_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  company     Company   @relation(fields: [companyId], references: [id])
+  asset       Asset?    @relation(fields: [assetId], references: [id])
+  operator    Operator? @relation(fields: [operatorId], references: [id])
+  pickupDepot Depot?    @relation(fields: [pickupDepotId], references: [id])
+  stops       JobStop[]
+
+  @@index([companyId])
+  // Dispatch board filters/sorts jobs by scheduledAt (Today/Upcoming/History).
+  @@index([companyId, scheduledAt])
+  // "This operator's jobs" and "this asset's jobs" — driver/asset detail views.
+  @@index([companyId, operatorId])
+  @@index([companyId, assetId])
+  @@map("jobs")
+}
+
+/// The fleet's OWN pickup locations — depots, warehouses, branches — distinct
+/// from Customer (who the fleet delivers TO, see below). Mirrors the Customer
+/// reference-record pattern exactly (`archivedAt`, never hard-deleted).
+model Depot {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  name       String
+  address    String?
+  notes      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+  jobs    Job[]
+
+  @@index([companyId])
+  @@map("depots")
+}
+
+enum StopOutcome {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// A defined reason for a failed delivery, captured at completion time instead
+/// of leaving `JobStop.note` as the only record — turns "why do we fail
+/// deliveries" from anecdote (reading free text one row at a time) into
+/// aggregable data for Reports.
+enum StopFailureReason {
+  NOBODY_HOME
+  ACCESS_DENIED
+  BUSINESS_CLOSED
+  ADDRESS_ISSUE
+  REFUSED
+  OTHER
+}
+
+/// The fleet's own record of who it delivers to — a saved name + address +
+/// contact so a stop references a Customer instead of the office retyping the
+/// same address every day ("zero duplicate data entry", CLAUDE.md). Internal
+/// directory only: no customer login, portal, or self-service — that stays out
+/// of scope per CLAUDE.md. `archivedAt` follows the Asset/Operator reference-
+/// record pattern (a customer is corrected/retired, never hard-deleted).
+/// A named company document (policy, contract, template, licence PDF…) with a
+/// stored file. Distinct from Compliance documents (which have expiry/asset
+/// semantics) and from the Digital Glovebox (asset-scoped) — this is the
+/// office's general file library. Bytes live in the shared Attachment store.
+model Document {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  title            String
+  /// Free-text grouping the office chooses (e.g. "Policies", "Contracts").
+  category         String?
+  description      String?
+  fileAttachmentId String    @map("file_attachment_id") @db.Uuid
+  uploadedByUserId String?   @map("uploaded_by_user_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  archivedAt       DateTime? @map("archived_at")
+
+  company        Company            @relation(fields: [companyId], references: [id])
+  fileAttachment Attachment         @relation("DocumentFile", fields: [fileAttachmentId], references: [id])
+  uploadedByUser User?              @relation("DocumentUploader", fields: [uploadedByUserId], references: [id])
+  /// Knowledge Base articles and Form templates that surface this document, so
+  /// the same PDF is uploaded once and referenced wherever it's needed.
+  articles       KnowledgeArticle[] @relation("ArticleSourceDocument")
+  formTemplates  FormTemplate[]     @relation("FormReferenceDocument")
+
+  @@index([companyId, category])
+  @@map("documents")
+}
+
+/// An internal knowledge-base article / SOP written in FleetHQ (markdown body).
+/// Distinct from Documents (uploaded files) — this is authored, versionable
+/// prose: how-to guides, standard operating procedures, policies-in-text.
+model KnowledgeArticle {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  title            String
+  /// Free-text grouping the team chooses (e.g. "Onboarding", "Safety").
+  category         String?
+  /// One-line summary shown in the article list.
+  summary          String?
+  /// Markdown body. Optional, because an article can instead (or also) be an
+  /// imported document — see `sourceDocumentId`.
+  body             String?
+  /// 'draft' (only visible with knowledge:create) or 'published' (all viewers).
+  status           String    @default("draft")
+  authorUserId     String?   @map("author_user_id") @db.Uuid
+  /// An imported document (policy/SOP PDF) this article presents. Referenced
+  /// rather than re-uploaded, so the file has one home in the document library.
+  sourceDocumentId String?   @map("source_document_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  publishedAt      DateTime? @map("published_at")
+  archivedAt       DateTime? @map("archived_at")
+
+  company        Company   @relation(fields: [companyId], references: [id])
+  authorUser     User?     @relation("KnowledgeAuthor", fields: [authorUserId], references: [id])
+  sourceDocument Document? @relation("ArticleSourceDocument", fields: [sourceDocumentId], references: [id])
+
+  @@index([companyId, category])
+  @@index([sourceDocumentId])
+  @@map("knowledge_articles")
+}
+
+model Customer {
+  id          String    @id @default(uuid()) @db.Uuid
+  companyId   String    @map("company_id") @db.Uuid
+  name        String
+  address     String?
+  contactName String?   @map("contact_name")
+  phone       String?
+  notes       String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  archivedAt  DateTime? @map("archived_at")
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  jobStops JobStop[]
+
+  @@index([companyId])
+  @@map("customers")
+}
+
+/// An ordered delivery stop on a Job — a courier's day is a manifest of these
+/// (05-Dispatch/Dispatch_Overview.md; delivery vertical, see
+/// 00-Company/Commercial_Priority.md). The operator completes each stop on
+/// DriverOS with an outcome plus Proof of Delivery: recipient name, a note, an
+/// optional photo (`podAttachmentId`), and an optional signature
+/// (`signatureAttachmentId`). A stop is terminal once DELIVERED or FAILED; when
+/// every stop on a job is terminal the job rolls up to COMPLETED. `customerId`
+/// is optional — a stop can still be pure free text (label/address/contactName)
+/// for a one-off delivery, or reference a saved Customer so the address isn't
+/// retyped; when a Customer is referenced, label/address/contactName default
+/// from it but can still be overridden per stop (e.g. an occasional alternate
+/// site for the same customer). Proof capture here is internal to the fleet —
+/// not customer-facing sharing, which CLAUDE.md keeps out of scope. This is
+/// ordering/manifest, not route optimization (still deferred).
+model JobStop {
+  id                    String             @id @default(uuid()) @db.Uuid
+  companyId             String             @map("company_id") @db.Uuid
+  jobId                 String             @map("job_id") @db.Uuid
+  customerId            String?            @map("customer_id") @db.Uuid
+  sequence              Int
+  label                 String
+  address               String?
+  contactName           String?            @map("contact_name")
+  /// The delivery time window this stop was promised for (e.g. "9am-12pm"),
+  /// if any — surfaced on DriverOS as "Due by X" and used to compute a genuine
+  /// on-time rate in Reports, distinct from the simple delivered/failed split.
+  windowStart           DateTime?          @map("window_start")
+  windowEnd             DateTime?          @map("window_end")
+  outcome               StopOutcome        @default(PENDING)
+  completedAt           DateTime?          @map("completed_at")
+  recipientName         String?            @map("recipient_name")
+  note                  String?
+  failureReason         StopFailureReason? @map("failure_reason")
+  podAttachmentId       String?            @map("pod_attachment_id") @db.Uuid
+  signatureAttachmentId String?            @map("signature_attachment_id") @db.Uuid
+  /// Set when this stop was created as a redelivery attempt of a FAILED stop
+  /// (see JobsService.reattemptStop) — lets the office trace a delivery's
+  /// full attempt history even across separate jobs.
+  reattemptOfStopId     String?            @map("reattempt_of_stop_id") @db.Uuid
+  createdAt             DateTime           @default(now()) @map("created_at")
+  updatedAt             DateTime           @updatedAt @map("updated_at")
+
+  company             Company      @relation(fields: [companyId], references: [id])
+  job                 Job          @relation(fields: [jobId], references: [id])
+  customer            Customer?    @relation(fields: [customerId], references: [id])
+  podAttachment       Attachment?  @relation("StopPod", fields: [podAttachmentId], references: [id])
+  signatureAttachment Attachment?  @relation("StopSignature", fields: [signatureAttachmentId], references: [id])
+  reattemptOfStop     JobStop?     @relation("StopReattempt", fields: [reattemptOfStopId], references: [id])
+  reattempts          JobStop[]    @relation("StopReattempt")
+  parcels             StopParcel[]
+
+  @@index([companyId, jobId])
+  @@index([companyId, customerId])
+  // Reports/impact scan delivered/failed stops by completedAt within a tenant.
+  @@index([companyId, completedAt])
+  @@map("job_stops")
+}
+
+/// An individual parcel/consignment at a delivery stop, so a courier run can
+/// track "3 of 4 parcels scanned" rather than a stop being all-or-nothing.
+/// The `reference` is the barcode / consignment number the driver scans (or
+/// types); `scannedAt` marks it loaded/handled. Multi-parcel is optional per
+/// stop — a stop with no parcels behaves exactly as before.
+///
+/// Everything from `trackingNumber` down was added for configurable barcode
+/// scanning (01-Product/Barcode_Scanning.md): a scan searches whichever
+/// column an admin has configured (see BarcodeSearchableField) and, once
+/// matched, a BarcodeFieldMapping can copy/lookup a value into any of these —
+/// all nullable and optional, so a parcel created the old way (just a bare
+/// `reference`) is unaffected. `customFields` is the same free-form
+/// company-defined escape hatch Asset/AttachedUnit use, for a mapping target
+/// with no dedicated column.
+model StopParcel {
+  id                String    @id @default(uuid()) @db.Uuid
+  companyId         String    @map("company_id") @db.Uuid
+  stopId            String    @map("stop_id") @db.Uuid
+  reference         String
+  label             String?
+  scannedAt         DateTime? @map("scanned_at")
+  trackingNumber    String?   @map("tracking_number")
+  consignmentNumber String?   @map("consignment_number")
+  manifestNumber    String?   @map("manifest_number")
+  internalId        String?   @map("internal_id")
+  customerReference String?   @map("customer_reference")
+  deliveryAddress   String?   @map("delivery_address")
+  contactName       String?   @map("contact_name")
+  deliveryNotes     String?   @map("delivery_notes")
+  serviceType       String?   @map("service_type")
+  parcelCount       Int?      @map("parcel_count")
+  weightKg          Decimal?  @map("weight_kg") @db.Decimal(10, 3)
+  cubicM3           Decimal?  @map("cubic_m3") @db.Decimal(10, 3)
+  dangerousGoods    Boolean   @default(false) @map("dangerous_goods")
+  customFields      Json?     @map("custom_fields")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  company     Company            @relation(fields: [companyId], references: [id])
+  stop        JobStop            @relation(fields: [stopId], references: [id])
+  scanEvents  BarcodeScanEvent[]
+
+  @@unique([stopId, reference])
+  @@index([companyId, stopId])
+  @@index([companyId, trackingNumber])
+  @@index([companyId, consignmentNumber])
+  @@index([companyId, manifestNumber])
+  @@index([companyId, internalId])
+  @@index([companyId, customerReference])
+  @@map("stop_parcels")
+}
+
+// ---------------------------------------------------------------------------
+// Barcode Scanning (01-Product/Barcode_Scanning.md)
+//
+// Configurable per company: which field(s) a scan searches (BarcodeSearchable
+// Field — admin-extensible, includes custom fields), what happens to
+// populate other fields once matched (BarcodeFieldMapping), and overall
+// behaviour (BarcodeScanConfig — mode, manual-entry fallback, missing-field
+// handling). BarcodeScanEvent is a session/audit trail of every scan
+// (matched, duplicate-blocked, unknown, or missing-fields) — deliberately
+// unrelated (no Prisma @relation, following AuditLog's convention) since it's
+// a high-volume append-only log, not an owned collection.
+// ---------------------------------------------------------------------------
+
+enum BarcodeScanMode {
+  /// Barcode contains only an identifier; every other field comes from a
+  /// database lookup against the matched StopParcel/related records.
+  DATABASE_LOOKUP
+  /// The barcode payload itself is decoded (JSON or `key:value;...` pairs)
+  /// for as many fields as it contains.
+  ENCODED_BARCODE
+  /// Decode what the barcode contains, then database-lookup anything it
+  /// didn't.
+  HYBRID
+}
+
+enum BarcodeFieldTarget {
+  TRACKING_NUMBER
+  CONSIGNMENT_NUMBER
+  MANIFEST_NUMBER
+  INTERNAL_ID
+  CUSTOMER_REFERENCE
+  CUSTOMER
+  DELIVERY_ADDRESS
+  CONTACT
+  DELIVERY_NOTES
+  SERVICE_TYPE
+  PARCEL_COUNT
+  WEIGHT
+  CUBIC
+  DANGEROUS_GOODS
+  CUSTOM_FIELD
+}
+
+enum BarcodeScanOutcome {
+  MATCHED
+  DUPLICATE_BLOCKED
+  UNKNOWN
+  MISSING_FIELDS
+  IGNORED
+}
+
+/// One row per field an admin has made scannable/searchable — the built-ins
+/// (`reference`, `trackingNumber`, `consignmentNumber`, `manifestNumber`,
+/// `internalId`, `customerReference`) map to a StopParcel column; `isCustom`
+/// rows key into StopParcel.customFields instead. Adding a new searchable
+/// field is a row insert, not a code change, per the spec's "administrators
+/// should be able to add additional searchable fields in the future without
+/// code changes."
+model BarcodeSearchableField {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  key        String
+  label      String
+  isCustom   Boolean   @default(false) @map("is_custom")
+  order      Int       @default(0)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  archivedAt DateTime? @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, key])
+  @@index([companyId])
+  @@map("barcode_searchable_fields")
+}
+
+/// A configurable "once X is known, populate Y" rule — e.g. sourceField
+/// `trackingNumber` (a BarcodeSearchableField.key) → targetField CUSTOMER via
+/// a database lookup, or sourceField `scan` (the raw/decoded scan payload
+/// itself) → targetField TRACKING_NUMBER via a direct copy. `isDatabaseLookup`
+/// distinguishes the two: false copies the source value as-is, true looks up
+/// the existing StopParcel/Customer the source value resolves to and copies
+/// from there.
+model BarcodeFieldMapping {
+  id               String             @id @default(uuid()) @db.Uuid
+  companyId        String             @map("company_id") @db.Uuid
+  sourceField      String             @map("source_field")
+  targetField      BarcodeFieldTarget @map("target_field")
+  customFieldKey   String?            @map("custom_field_key")
+  isDatabaseLookup Boolean            @default(false) @map("is_database_lookup")
+  order            Int                @default(0)
+  createdAt        DateTime           @default(now()) @map("created_at")
+  archivedAt       DateTime?          @map("archived_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("barcode_field_mappings")
+}
+
+/// Singleton per company (one row, upserted) — overall scan behaviour.
+/// `requiredFields` lists BarcodeFieldTarget values (as strings) that must
+/// resolve to a value before a scan can proceed when `blockOnMissingFields`
+/// is true; otherwise missing fields are surfaced but don't block.
+model BarcodeScanConfig {
+  id                   String          @id @default(uuid()) @db.Uuid
+  companyId            String          @unique @map("company_id") @db.Uuid
+  scanMode             BarcodeScanMode @default(DATABASE_LOOKUP) @map("scan_mode")
+  allowManualEntry     Boolean         @default(true) @map("allow_manual_entry")
+  blockOnMissingFields Boolean         @default(false) @map("block_on_missing_fields")
+  requiredFields       String[]        @default([]) @map("required_fields")
+  createdAt            DateTime        @default(now()) @map("created_at")
+  updatedAt            DateTime        @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("barcode_scan_configs")
+}
+
+model BarcodeScanEvent {
+  id              String              @id @default(uuid()) @db.Uuid
+  companyId       String?             @map("company_id") @db.Uuid
+  userId          String?             @map("user_id") @db.Uuid
+  scannedValue    String              @map("scanned_value")
+  scanMode        BarcodeScanMode     @map("scan_mode")
+  outcome         BarcodeScanOutcome
+  matchedParcelId String?             @map("matched_parcel_id") @db.Uuid
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  matchedParcel StopParcel? @relation(fields: [matchedParcelId], references: [id])
+
+  @@index([companyId, userId, createdAt])
+  @@map("barcode_scan_events")
+}
+
+// ---------------------------------------------------------------------------
+// Workshop (06-Workshop/Workshop_Overview.md)
+// ---------------------------------------------------------------------------
+
+enum MaintenanceJobStatus {
+  OPEN
+  IN_PROGRESS
+  PARTS_PENDING
+  COMPLETE
+}
+
+/// The Workshop milestone's deliberately scoped-down slice of the full
+/// Workshop_Overview.md spec: manual job creation, a linear status lifecycle,
+/// and an optional approval step. Dispatch warns against assigning an asset
+/// with *any* open maintenance job (the earlier Normal/Critical severity flag
+/// was removed — see the drop_maintenance_severity migration). No Smart
+/// Checklist or OBD/CAN auto-creation (neither exists yet). Approval is
+/// recorded but not a hard gate on closing — that would need a company-level
+/// "requires sign-off" setting this slice doesn't build.
+model MaintenanceJob {
+  id                   String               @id @default(uuid()) @db.Uuid
+  companyId            String               @map("company_id") @db.Uuid
+  assetId              String               @map("asset_id") @db.Uuid
+  title                String
+  description          String?
+  status               MaintenanceJobStatus @default(OPEN)
+  reportedByOperatorId String?              @map("reported_by_operator_id") @db.Uuid
+  resolutionNotes      String?              @map("resolution_notes")
+  partsCost            Float?               @map("parts_cost")
+  laborCost            Float?               @map("labor_cost")
+  approvedAt           DateTime?            @map("approved_at")
+  approvedByUserId     String?              @map("approved_by_user_id") @db.Uuid
+  completedAt          DateTime?            @map("completed_at")
+  // Client-generated idempotency key so a DriverOS fault report queued offline
+  // and replayed after a lost response can't create a duplicate workshop job.
+  // Null for office-created / non-DriverOS jobs.
+  clientRequestId      String?              @map("client_request_id") @db.Uuid
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  company            Company                   @relation(fields: [companyId], references: [id])
+  asset              Asset                     @relation(fields: [assetId], references: [id])
+  reportedByOperator Operator?                 @relation("MaintenanceReportedByOperator", fields: [reportedByOperatorId], references: [id])
+  approvedByUser     User?                     @relation("MaintenanceApprovedByUser", fields: [approvedByUserId], references: [id])
+  partsUsed          MaintenanceJobPartUsage[]
+
+  @@index([companyId])
+  // "All maintenance for this asset" — the asset detail / history page.
+  @@index([companyId, assetId])
+  @@unique([companyId, clientRequestId])
+  @@map("maintenance_jobs")
+}
+
+/// Parts inventory basics (06-Workshop/Workshop_Overview.md's "Future
+/// expansion notes" — parts inventory, now a first slice): a simple catalog
+/// with a quantity on hand, decremented when logged against a maintenance
+/// job. No supplier integration, no reorder automation, no multi-location
+/// stock — a single quantityOnHand per company, matching this doc's own
+/// "basics" framing.
+model Part {
+  id                String    @id @default(uuid()) @db.Uuid
+  companyId         String    @map("company_id") @db.Uuid
+  name              String
+  partNumber        String?   @map("part_number")
+  quantityOnHand    Int       @default(0) @map("quantity_on_hand")
+  unitCost          Float?    @map("unit_cost")
+  lowStockThreshold Int?      @map("low_stock_threshold")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  archivedAt        DateTime? @map("archived_at")
+
+  company Company                   @relation(fields: [companyId], references: [id])
+  usages  MaintenanceJobPartUsage[]
+
+  @@index([companyId])
+  @@map("parts")
+}
+
+/// One log line per parts-used event — a snapshot of `unitCost` at the time
+/// it was used (`unitCostAtUse`), since the catalog's unit cost can change
+/// later and the log should reflect what was actually spent, not what the
+/// part costs today. Immutable once created — no update/delete in this
+/// slice; a mistake is corrected with a stock adjustment via `PATCH
+/// /v1/parts/:id`, not by editing the log.
+model MaintenanceJobPartUsage {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  maintenanceJobId String   @map("maintenance_job_id") @db.Uuid
+  partId           String   @map("part_id") @db.Uuid
+  quantity         Int
+  unitCostAtUse    Float?   @map("unit_cost_at_use")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  company        Company        @relation(fields: [companyId], references: [id])
+  maintenanceJob MaintenanceJob @relation(fields: [maintenanceJobId], references: [id])
+  part           Part           @relation(fields: [partId], references: [id])
+
+  @@index([companyId])
+  @@index([maintenanceJobId])
+  // Reverse lookup: "where has this part been used?" (+ part-archive guard).
+  @@index([companyId, partId])
+  @@map("maintenance_job_part_usages")
+}
+
+// ---------------------------------------------------------------------------
+// Warehouse add-on: stock inventory + warehouse machines
+// ---------------------------------------------------------------------------
+
+/// A warehouse stock line (SKU). Distinct from Part (workshop consumables tied
+/// to maintenance jobs) — this is the customer's own sellable/storable stock.
+/// `attributes` is a free-form JSON object of customer-defined fields
+/// ("fully customizable": batch, supplier, expiry, anything), never
+/// schema-migrated per customer.
+model StockItem {
+  id          String    @id @default(uuid()) @db.Uuid
+  companyId   String    @map("company_id") @db.Uuid
+  sku         String?
+  name        String
+  description String?
+  category    String?
+  quantity    Float     @default(0)
+  unit        String?
+  /// Where it lives in the warehouse (aisle/bin/zone — free text).
+  location    String?
+  minQuantity Float?    @map("min_quantity")
+  attributes  Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  archivedAt  DateTime? @map("archived_at")
+
+  company     Company           @relation(fields: [companyId], references: [id])
+  adjustments StockAdjustment[]
+
+  @@index([companyId, category])
+  @@map("stock_items")
+}
+
+/// An append-only ledger of manual quantity changes to a StockItem. The
+/// AdjustStock endpoint accepts a delta and a free-text reason ("5 damaged in
+/// transit"); each adjustment lands here immutably with the resulting quantity
+/// and who made it, so a warehouse module can answer "why did the count
+/// change?" — the stock_items row only ever holds the current quantity.
+model StockAdjustment {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  stockItemId   String   @map("stock_item_id") @db.Uuid
+  /// The signed change applied (may be negative).
+  delta         Float
+  /// The stock item's quantity immediately after this adjustment.
+  quantityAfter Float    @map("quantity_after")
+  /// The operator's free-text reason for the change, if given.
+  reason        String?
+  actorUserId   String?  @map("actor_user_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  company   Company   @relation(fields: [companyId], references: [id])
+  stockItem StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+  actorUser User?     @relation(fields: [actorUserId], references: [id])
+
+  @@index([stockItemId, createdAt(sort: Desc)])
+  @@map("stock_adjustments")
+}
+
+/// One row per company per day: an accumulating record of fleet utilisation
+/// samples the scheduler takes (assets on an active job ÷ active assets). Each
+/// scheduler tick adds the current busy/active counts and bumps sampleCount, so
+/// the day's utilisation is busySum ÷ activeSum — a real, weighted daily average
+/// that grows into a genuine trend over time, never a fabricated back-fill.
+model UtilisationSnapshot {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  /// The calendar day (UTC midnight) this row accumulates samples for.
+  day            DateTime @db.Date
+  /// Running sum of "assets on an active job" across the day's samples.
+  busySum        Int      @default(0) @map("busy_sum")
+  /// Running sum of "active assets" across the day's samples.
+  activeSum      Int      @default(0) @map("active_sum")
+  /// Running sums of the other ops-snapshot KPIs, so a "vs yesterday" delta can
+  /// be computed against a real prior-day average (never a fabricated baseline).
+  workshopSum    Int      @default(0) @map("workshop_sum")
+  defectsSum     Int      @default(0) @map("defects_sum")
+  servicesDueSum Int      @default(0) @map("services_due_sum")
+  /// How many samples have been folded in today.
+  sampleCount    Int      @default(0) @map("sample_count")
+  /// An authorised user (analytics:manage) can exclude a day whose figure is
+  /// unrepresentative (e.g. a test job inflated it) — excluded days are dropped
+  /// from the trend and the "vs yesterday" delta. A correction to inputs, not an
+  /// override of the output; audit-logged.
+  excluded       Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, day])
+  @@index([companyId, day])
+  @@map("utilisation_snapshots")
+}
+
+/// Per-company analytics configuration: the target percentages a company sets
+/// for itself (the utilisation target line, compliance-currency target) and the
+/// green/amber cut-offs that colour the dashboard bars. One row per company;
+/// absent means "use the platform defaults". Editable by analytics:manage.
+model AnalyticsSetting {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @unique @map("company_id") @db.Uuid
+  utilisationTarget Int      @default(80) @map("utilisation_target")
+  complianceTarget  Int      @default(95) @map("compliance_target")
+  /// A metric at/above this percent shows green; at/above warnThreshold, amber; below, red.
+  goodThreshold     Int      @default(95) @map("good_threshold")
+  warnThreshold     Int      @default(80) @map("warn_threshold")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("analytics_settings")
+}
+
+/// A manual override of a live dashboard percentage (utilisation / compliance-
+/// current / pre-start). One active row per (company, metric); the dashboard
+/// shows the overridden value with an "adjusted" marker and the note, so a
+/// hand-set figure is never mistaken for the raw computed one. Every set/clear
+/// is audit-logged. Deleting the row restores the real computed value.
+model AnalyticsOverride {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  /// Which percentage is overridden: 'utilisation' | 'compliance_current' | 'prestart'.
+  metric      String
+  /// The percentage (0–100) to show instead of the computed one.
+  value       Int
+  /// Why it was adjusted — surfaced next to the figure for transparency.
+  note        String?
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  company   Company @relation(fields: [companyId], references: [id])
+  actorUser User?   @relation(fields: [actorUserId], references: [id])
+
+  @@unique([companyId, metric])
+  @@map("analytics_overrides")
+}
+
+/// A machine on the warehouse floor (forklift, wrapper, conveyor, compressor).
+/// Maintenance/monitoring history lives in WarehouseMachineLog; the row keeps
+/// the latest status + service dates for glanceable dashboards.
+model WarehouseMachine {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  name             String
+  /// Free-text kind ("Forklift", "Pallet wrapper") — customer-defined.
+  machineType      String?   @map("machine_type")
+  serialNumber     String?   @map("serial_number")
+  /// OPERATIONAL | NEEDS_ATTENTION | DOWN — string, not enum, so customers'
+  /// own vocabularies don't require a migration.
+  status           String    @default("OPERATIONAL")
+  location         String?
+  notes            String?
+  attributes       Json?
+  lastServiceAt    DateTime? @map("last_service_at")
+  nextServiceDueAt DateTime? @map("next_service_due_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  archivedAt       DateTime? @map("archived_at")
+
+  company Company                @relation(fields: [companyId], references: [id])
+  logs    WarehouseMachineLog[]
+  plans   WarehouseMachinePlan[]
+
+  @@index([companyId])
+  @@map("warehouse_machines")
+}
+
+/// A recurring maintenance item deployed to a warehouse machine — the same
+/// savable/deployable schedule pattern as AssetMaintenancePlan, targeting a
+/// machine instead of a truck. Time-based: next-due = (lastServiceAt ??
+/// createdAt) + intervalDays, status derived at read time. May originate from
+/// a shared MaintenanceScheduleTemplate, or be copied from another machine.
+model WarehouseMachinePlan {
+  id            String    @id @default(uuid()) @db.Uuid
+  companyId     String    @map("company_id") @db.Uuid
+  machineId     String    @map("machine_id") @db.Uuid
+  templateId    String?   @map("template_id") @db.Uuid
+  label         String
+  intervalDays  Int       @map("interval_days")
+  lastServiceAt DateTime? @map("last_service_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  archivedAt    DateTime? @map("archived_at")
+
+  company  Company                      @relation(fields: [companyId], references: [id])
+  machine  WarehouseMachine             @relation(fields: [machineId], references: [id])
+  template MaintenanceScheduleTemplate? @relation(fields: [templateId], references: [id])
+
+  @@index([companyId])
+  @@index([machineId])
+  @@map("warehouse_machine_plans")
+}
+
+/// One maintenance/monitoring entry for a machine: a service, a repair, a
+/// meter reading (hours/cycles/temperature), or a plain note. Append-only.
+model WarehouseMachineLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  companyId       String   @map("company_id") @db.Uuid
+  machineId       String   @map("machine_id") @db.Uuid
+  /// SERVICE | REPAIR | READING | NOTE
+  kind            String
+  summary         String
+  meterValue      Float?   @map("meter_value")
+  meterUnit       String?  @map("meter_unit")
+  occurredAt      DateTime @default(now()) @map("occurred_at")
+  createdByUserId String?  @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  company       Company          @relation(fields: [companyId], references: [id])
+  machine       WarehouseMachine @relation(fields: [machineId], references: [id])
+  createdByUser User?            @relation("WarehouseLogAuthor", fields: [createdByUserId], references: [id])
+
+  @@index([companyId])
+  @@index([machineId])
+  @@map("warehouse_machine_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Compliance (08-Compliance/Australian_Compliance.md)
+// ---------------------------------------------------------------------------
+
+enum ComplianceDocumentType {
+  REGISTRATION
+  INSURANCE
+  ROADWORTHY
+  /// Operator-level document types (added once Attachment storage existed to
+  /// back the actual file upload — see the model comment below).
+  LICENCE
+  MEDICAL_CERTIFICATE
+}
+
+/// The Compliance milestone's deliberately scoped-down slice of the full
+/// Australian_Compliance.md spec: document expiry tracking for both Assets
+/// (registration/insurance/roadworthy) and, since this later slice, Operators
+/// (licence/medical certificate — the "named future addition" this model's
+/// original comment flagged, now built). Exactly one of `assetId`/`operatorId`
+/// is set — enforced by a hand-written CHECK constraint in the migration, not
+/// just app logic, since this is a structural invariant. No fatigue/hours
+/// tracking or NHVR/Chain-of-Responsibility rule engine yet. "Current" status
+/// (valid/expiring soon/expired) is derived from `expiresAt` at read time,
+/// never stored, per "zero duplicate data." `archivedAt` follows the
+/// Asset/Operator/AttachedUnit reference-record pattern (not the
+/// Job/MaintenanceJob terminal-status pattern) since a document record has no
+/// natural terminal lifecycle of its own — archiving just corrects a mistaken
+/// entry; renewing a document means creating a new row, not mutating this one.
+/// `fileAttachmentId` is optional: the actual uploaded file (a scan of the
+/// registration/insurance/licence) now that Attachment storage exists —
+/// Digital Glovebox's original view-only slice deferred this pending storage.
+model ComplianceDocument {
+  id                String                 @id @default(uuid()) @db.Uuid
+  companyId         String                 @map("company_id") @db.Uuid
+  assetId           String?                @map("asset_id") @db.Uuid
+  operatorId        String?                @map("operator_id") @db.Uuid
+  documentType      ComplianceDocumentType @map("document_type")
+  documentNumber    String?                @map("document_number")
+  /// Per Data_Model.md's constraint that compliance-relevant tables support a
+  /// jurisdiction concept from day one, even though only Australia is
+  /// populated at launch.
+  jurisdiction      String                 @default("AU")
+  issuedAt          DateTime?              @map("issued_at")
+  expiresAt         DateTime               @map("expires_at")
+  notes             String?
+  fileAttachmentId  String?                @map("file_attachment_id") @db.Uuid
+  /// Idempotency marks for the compliance-expiry alert sweep (SchedulerService).
+  /// Set the first time a document crosses into the "expiring soon" window and
+  /// the first time it crosses into "expired", so the daily sweep raises each
+  /// alert exactly once over the document's life rather than every tick. Both
+  /// reset to null on nothing — a renewed document is a *new* row, so a fresh
+  /// alert lifecycle starts naturally.
+  expiringAlertedAt DateTime?              @map("expiring_alerted_at")
+  expiredAlertedAt  DateTime?              @map("expired_alerted_at")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+  archivedAt        DateTime?              @map("archived_at")
+
+  company        Company     @relation(fields: [companyId], references: [id])
+  asset          Asset?      @relation(fields: [assetId], references: [id])
+  operator       Operator?   @relation(fields: [operatorId], references: [id])
+  fileAttachment Attachment? @relation("ComplianceDocumentFile", fields: [fileAttachmentId], references: [id])
+
+  @@index([companyId])
+  // Compliance docs are looked up per-asset (rego/insurance/roadworthy for a
+  // vehicle) and per-operator (licence/medical for a driver).
+  @@index([companyId, assetId])
+  @@index([companyId, operatorId])
+  @@map("compliance_documents")
+}
+
+// ---------------------------------------------------------------------------
+// Smart Checklists (01-Product/Smart_Checklists.md)
+// ---------------------------------------------------------------------------
+
+/// The Smart Checklists milestone's deliberately scoped-down slice of the full
+/// Smart_Checklists.md spec: company-configurable, versioned pre-start checklist
+/// templates plus immutable operator submissions that run fully offline on
+/// DriverOS. `items` is a data-driven JSON array — each item is
+/// `{ id, label, type: 'pass_fail' | 'pass_fail_na', requireNoteOnFail: bool,
+/// createsFaultOnFail: bool }`. This is NOT the full Universal Forms
+/// drag-and-drop builder, and the only "branching" is those two boolean
+/// follow-ups (a failed item can require a note and/or spawn a MaintenanceJob).
+/// No photo/location/measurement capture, no conditional question trees, no
+/// scheduling/assignment. `archivedAt` follows the ComplianceDocument
+/// reference-record pattern; a template is never hard-deleted, and editing its
+/// content bumps `version` so previously-recorded submissions keep the exact
+/// wording they were answered against (see ChecklistSubmission).
+model ChecklistTemplate {
+  id                    String    @id @default(uuid()) @db.Uuid
+  companyId             String    @map("company_id") @db.Uuid
+  name                  String
+  /// Null = applies to any Asset Class. Only LAND is implemented at launch, but
+  /// templates are scoped by class from day one so an Air/Sea pre-start is
+  /// additive, not a rewrite.
+  appliesToAssetClassId String?   @map("applies_to_asset_class_id") @db.Uuid
+  /// Monotonic version, bumped on every content edit. A submission snapshots the
+  /// version + items it was answered against, so an office-side edit never
+  /// retroactively rewrites a completed checklist.
+  version               Int       @default(1)
+  /// Data-driven checklist definition. See the model comment for the item shape.
+  items                 Json
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  archivedAt            DateTime? @map("archived_at")
+
+  company             Company                       @relation(fields: [companyId], references: [id])
+  appliesToAssetClass AssetClass?                   @relation(fields: [appliesToAssetClassId], references: [id])
+  submissions         ChecklistSubmission[]
+  bundleItems         ChecklistBundleItem[]
+  assignments         ChecklistTemplateAssignment[]
+
+  @@index([companyId])
+  @@map("checklist_templates")
+}
+
+/// A completed checklist, immutable once submitted — the append-only Fault-Report
+/// philosophy and "every entity has a timeline." The runtime app role is granted
+/// only SELECT + INSERT on this table (see the RLS migration), never UPDATE or
+/// DELETE, so immutability is structural rather than merely conventional.
+/// `templateSnapshot` is the exact `items` array the operator saw and answered —
+/// sent by the DriverOS client, which may have been offline against an older
+/// cached template version — so it is a faithful record independent of any later
+/// office-side template edit. `id` is client-generated so an outbox replay after
+/// a flaky reconnect is idempotent (a duplicate id is a no-op, not a second
+/// checklist). Submitting an item marked createsFaultOnFail as "fail" spawns a
+/// MaintenanceJob through the existing Workshop module — the spec's headline
+/// "one operator interaction produces a workshop job" acceptance criterion.
+model ChecklistSubmission {
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  templateId       String    @map("template_id") @db.Uuid
+  templateVersion  Int       @map("template_version")
+  templateSnapshot Json      @map("template_snapshot")
+  assetId          String    @map("asset_id") @db.Uuid
+  operatorId       String?   @map("operator_id") @db.Uuid
+  /// itemId -> { status: 'pass' | 'fail' | 'na', note?: string }
+  answers          Json
+  /// Denormalized "any answer was a fail" flag so FleetHQ can surface checklists
+  /// needing attention without scanning the answers JSON. Computed on submit.
+  hasFailures      Boolean   @default(false) @map("has_failures")
+  startedAt        DateTime? @map("started_at")
+  submittedAt      DateTime  @default(now()) @map("submitted_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  company  Company           @relation(fields: [companyId], references: [id])
+  template ChecklistTemplate @relation(fields: [templateId], references: [id])
+  asset    Asset             @relation(fields: [assetId], references: [id])
+  operator Operator?         @relation(fields: [operatorId], references: [id])
+
+  @@index([companyId])
+  @@index([companyId, assetId])
+  // Reports/impact scan checklist activity by submittedAt within a tenant.
+  @@index([companyId, submittedAt])
+  // Reverse lookup: "which submissions used this checklist template?"
+  @@index([companyId, templateId])
+  @@map("checklist_submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Universal Forms (01-Product/Universal_Forms.md)
+// ---------------------------------------------------------------------------
+
+enum FormTargetContext {
+  DRIVER
+  OFFICE
+  BOTH
+}
+
+/// The Universal Forms milestone's scoped slice of the full Universal_Forms.md
+/// spec: a data-driven form builder covering the field types and single-level
+/// conditional show/hide the doc requires, sharing ChecklistTemplate's
+/// versioning/snapshot pattern rather than a full branching-tree engine. `fields`
+/// is a JSON array — see FormFieldDto for the shape (id, label, type, required,
+/// options for select types, and an optional showIfFieldId/showIfValue pair).
+/// No photo/signature/GPS capture and no multi-branch trees in this slice — see
+/// the doc's own Implementation notes for the reasoning.
+model FormTemplate {
+  id                  String            @id @default(uuid()) @db.Uuid
+  companyId           String            @map("company_id") @db.Uuid
+  name                String
+  description         String?
+  /// Which app(s) this form is assigned to — DriverOS operators, FleetHQ office
+  /// staff, or both (Universal_Forms.md: "Forms can be assigned to specific
+  /// roles/contexts").
+  targetContext       FormTargetContext @default(BOTH) @map("target_context")
+  /// Monotonic version, bumped on every content edit — same reasoning as
+  /// ChecklistTemplate.version: a submission snapshots the fields it was
+  /// answered against, so an office-side edit never rewrites history.
+  version             Int               @default(1)
+  fields              Json
+  /// Optional guidance/reference document shown to whoever fills the form in
+  /// (the original paper form, a work instruction, a hazard sheet).
+  referenceDocumentId String?           @map("reference_document_id") @db.Uuid
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @updatedAt @map("updated_at")
+  archivedAt          DateTime?         @map("archived_at")
+
+  company           Company          @relation(fields: [companyId], references: [id])
+  submissions       FormSubmission[]
+  referenceDocument Document?        @relation("FormReferenceDocument", fields: [referenceDocumentId], references: [id])
+
+  @@index([companyId])
+  @@index([referenceDocumentId])
+  @@map("form_templates")
+}
+
+/// An immutable, submitted form. `answers` is a JSON object of `fieldId ->
+/// value` (value shape depends on the field's type — a string, a number, a
+/// string array for MULTI_SELECT, or an Asset/Operator id for the *_REF
+/// types). Submitting writes a Timeline event on every ASSET_REF/OPERATOR_REF
+/// field's referenced entity (Universal_Forms.md: "produces Timeline events on
+/// every entity they reference"), not just on this record.
+model FormSubmission {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  templateId        String   @map("template_id") @db.Uuid
+  templateVersion   Int      @map("template_version")
+  templateSnapshot  Json     @map("template_snapshot")
+  answers           Json
+  submittedByUserId String?  @map("submitted_by_user_id") @db.Uuid
+  submittedAt       DateTime @default(now()) @map("submitted_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  company         Company      @relation(fields: [companyId], references: [id])
+  template        FormTemplate @relation(fields: [templateId], references: [id])
+  submittedByUser User?        @relation("FormSubmittedByUser", fields: [submittedByUserId], references: [id])
+
+  @@index([companyId])
+  @@map("form_submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Messaging (04-DriverOS/DriverOS_Overview.md — operator ↔ office messaging)
+// ---------------------------------------------------------------------------
+
+enum MessageSenderType {
+  OPERATOR
+  OFFICE
+}
+
+/// DriverOS messaging v0: a single operator ↔ office thread per Operator,
+/// replacing the "what's next" phone call/SMS. Every message is keyed to the
+/// Operator whose thread it belongs to; `senderType` records which side sent it
+/// and `senderUserId` who (nullable so an operator with no distinct office
+/// sender, or a future system message, still models cleanly). Append-only and
+/// immutable — the app role is granted only SELECT + INSERT (see the RLS
+/// migration), same as timeline_events and checklist_submissions. Deliberately
+/// NOT mirrored into timeline_events: a thread is already its own append-only
+/// log, and per-message timeline rows would double-write with no added value.
+/// Scoped down from the full spec: no attachments/photos, no read receipts, no
+/// group/broadcast threads, no push notifications — a plain two-party thread.
+model Message {
+  id           String            @id @default(uuid()) @db.Uuid
+  companyId    String            @map("company_id") @db.Uuid
+  operatorId   String            @map("operator_id") @db.Uuid
+  senderType   MessageSenderType @map("sender_type")
+  senderUserId String?           @map("sender_user_id") @db.Uuid
+  body         String
+  // Client-generated idempotency key so a DriverOS outbox replay after a lost
+  // response can't post the same message twice. Null for office-sent messages.
+  clientRequestId String?        @map("client_request_id") @db.Uuid
+  createdAt    DateTime          @default(now()) @map("created_at")
+
+  company    Company  @relation(fields: [companyId], references: [id])
+  operator   Operator @relation(fields: [operatorId], references: [id])
+  senderUser User?    @relation("MessageSender", fields: [senderUserId], references: [id])
+
+  @@index([companyId, operatorId])
+  // Thread read takes the most recent messages ordered by createdAt.
+  @@index([companyId, operatorId, createdAt])
+  // Idempotency: at most one message per (company, clientRequestId). Postgres
+  // treats NULLs as distinct, so office messages (null key) are unconstrained.
+  @@unique([companyId, clientRequestId])
+  @@map("messages")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (cross-cutting — FOUNDER_NOTES.md named gap)
+// ---------------------------------------------------------------------------
+
+/// A per-user, in-app notification. Cross-cutting v0 so nothing built stays
+/// silent (a failed delivery, a new message, an auto-raised workshop fault, a
+/// new job assignment) — see `FOUNDER_NOTES.md` and `00-Company/Commercial_Priority.md`.
+/// Always targets one recipient User (fan-out to "the office" is N rows, one per
+/// user who holds the relevant permission), so read-state is simply this row's
+/// `readAt` with no per-user join. `linkPath` is where the client navigates when
+/// the notification is tapped. Deliberately in-app only for now — no email/SMS/
+/// push channels or user-configurable preferences yet (a fast-follow).
+model Notification {
+  id              String    @id @default(uuid()) @db.Uuid
+  companyId       String    @map("company_id") @db.Uuid
+  recipientUserId String    @map("recipient_user_id") @db.Uuid
+  type            String
+  title           String
+  body            String?
+  linkPath        String?   @map("link_path")
+  readAt          DateTime? @map("read_at")
+  /// Set once an email digest has actually been sent for this notification —
+  /// see the NotificationChannel abstraction (Job 10) — so a channel that
+  /// polls unsent notifications never double-sends.
+  emailedAt       DateTime? @map("emailed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  company   Company @relation(fields: [companyId], references: [id])
+  recipient User    @relation("NotificationRecipient", fields: [recipientUserId], references: [id])
+
+  @@index([companyId, recipientUserId, readAt])
+  // Per-recipient notification list orders by createdAt desc.
+  @@index([companyId, recipientUserId, createdAt])
+  // Digest sweep covers only the un-emailed, unread slice (partial index
+  // `notifications_pending_digest_idx`, see migration 20260723200000) so the
+  // daily digest never scans the whole notifications table. Filtered index —
+  // migration SQL only.
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (photos / files — Proof of Delivery, fault photos, glovebox docs)
+// ---------------------------------------------------------------------------
+
+/// A stored file (photo or document). v0 keeps the bytes in Postgres (`data`
+/// bytea) with base64-over-JSON upload, so an upload replays cleanly through the
+/// DriverOS offline outbox and the stack stays self-contained with no object
+/// store to provision — the deploy-time swap to S3-style storage is a
+/// `data`-column change behind the same API, per `00-Company/Commercial_Priority.md`
+/// (finish before deploying). Append-only: the app role is granted only
+/// SELECT + INSERT (see the RLS migration). Attachments are referenced by id
+/// from the records that own them (e.g. a delivery stop's proof photo).
+model Attachment {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  uploadedByUserId String?  @map("uploaded_by_user_id") @db.Uuid
+  filename         String
+  contentType      String   @map("content_type")
+  byteSize         Int      @map("byte_size")
+  /// Exactly one of `data` / `storageKey` is set per row, chosen at upload
+  /// time by config (ATTACHMENTS_BUCKET). `data` = bytes stored inline in
+  /// Postgres (the zero-infra default, fine for a pilot); `storageKey` = the
+  /// object key in the configured S3 bucket (the path once photo volume would
+  /// bloat the DB). Both nullable so a deployment can use either without a
+  /// schema change, and existing rows (all inline) keep working. See
+  /// AttachmentsService and 01-Product/File_Photo_Storage-era notes.
+  data             Bytes?
+  storageKey       String?  @map("storage_key")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  company             Company              @relation(fields: [companyId], references: [id])
+  uploadedByUser      User?                @relation("AttachmentUploader", fields: [uploadedByUserId], references: [id])
+  stopPods            JobStop[]            @relation("StopPod")
+  stopSignatures      JobStop[]            @relation("StopSignature")
+  complianceDocuments ComplianceDocument[] @relation("ComplianceDocumentFile")
+  documents           Document[]           @relation("DocumentFile")
+
+  fuelEntries FuelEntry[]
+
+  @@index([companyId])
+  @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Timelines & Fleet Graph (01-Product/Timelines.md, 01-Product/Fleet_Graph.md)
+// ---------------------------------------------------------------------------
+
+/// A fuel-card purchase recorded by a driver in DriverOS and tracked in FleetHQ.
+///
+/// `cardLast4` is the ONLY card data stored, constrained by the database to
+/// exactly four digits: PCI DSS permits storing the last four, never a full PAN,
+/// and the CHECK constraint turns "someone pasted a whole card number" into a
+/// failed write instead of a quiet data-protection incident.
+///
+/// `licencePlate` is free text even though Asset carries a `registration`,
+/// because a fuel card gets used across vehicles and the plate on the receipt is
+/// the ground truth when reconciling a statement; `assetId` is the fleet's
+/// (optional) interpretation of that plate.
+model FuelEntry {
+  id                  String   @id @default(uuid()) @db.Uuid
+  companyId           String   @map("company_id") @db.Uuid
+  assetId             String?  @map("asset_id") @db.Uuid
+  operatorId          String?  @map("operator_id") @db.Uuid
+  receiptAttachmentId String?  @map("receipt_attachment_id") @db.Uuid
+  odometerReading     Int      @map("odometer_reading")
+  licencePlate        String   @map("licence_plate")
+  cardLast4           String   @map("card_last4")
+  litres              Decimal? @db.Decimal(10, 2)
+  totalCost           Decimal? @map("total_cost") @db.Decimal(10, 2)
+  filledAt            DateTime @default(now()) @map("filled_at")
+  notes               String?
+  // Client-generated idempotency key: a DriverOS fuel entry queued offline and
+  // replayed after a lost response must not be counted twice (a duplicate would
+  // inflate the office spend rollup). Null for office-entered records.
+  clientRequestId     String?  @map("client_request_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  company           Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  asset             Asset?      @relation(fields: [assetId], references: [id])
+  operator          Operator?   @relation(fields: [operatorId], references: [id])
+  receiptAttachment Attachment? @relation(fields: [receiptAttachmentId], references: [id])
+
+  @@index([companyId, filledAt])
+  @@index([companyId, assetId])
+  @@index([operatorId])
+  @@index([receiptAttachmentId])
+  @@unique([companyId, clientRequestId])
+  @@map("fuel_entries")
+}
+
+enum TimelineEntityType {
+  ASSET
+  OPERATOR
+  ATTACHED_UNIT
+  USER
+  ROLE
+  COMPANY
+  JOB
+  MAINTENANCE_JOB
+  COMPLIANCE_DOCUMENT
+  CHECKLIST_TEMPLATE
+  CHECKLIST_SUBMISSION
+  CUSTOMER
+  DEPOT
+  FORM_TEMPLATE
+  FORM_SUBMISSION
+  PART
+}
+
+enum TimelineActorType {
+  USER
+  SYSTEM
+}
+
+/// Append-only. Nothing in this table is ever updated or deleted through the
+/// product — enforced structurally: the runtime app role is only granted SELECT
+/// and INSERT on this table (see the RLS migration), not UPDATE or DELETE.
+model TimelineEvent {
+  id          String             @id @default(uuid()) @db.Uuid
+  companyId   String             @map("company_id") @db.Uuid
+  entityType  TimelineEntityType @map("entity_type")
+  entityId    String             @map("entity_id") @db.Uuid
+  eventType   String             @map("event_type")
+  summary     String
+  /// Structured details (e.g. a field-level diff for an "updated" event).
+  payload     Json?
+  actorType   TimelineActorType  @map("actor_type")
+  actorUserId String?            @map("actor_user_id") @db.Uuid
+  occurredAt  DateTime           @default(now()) @map("occurred_at")
+
+  company   Company @relation(fields: [companyId], references: [id])
+  actorUser User?   @relation("TimelineActorUser", fields: [actorUserId], references: [id])
+
+  @@index([companyId, entityType, entityId])
+  // Company-wide recent-activity feed orders by occurredAt desc within a tenant.
+  @@index([companyId, occurredAt])
+  @@map("timeline_events")
+}
+
+/// Source entity -[relationshipType]-> target entity, time-bounded. Modeled per
+/// Data_Model.md; no relationship-creation workflow is wired up yet (that's
+/// Dispatch/Fleet Graph scope, out of this foundation milestone).
+model GraphRelationship {
+  id               String             @id @default(uuid()) @db.Uuid
+  companyId        String             @map("company_id") @db.Uuid
+  sourceType       TimelineEntityType @map("source_type")
+  sourceId         String             @map("source_id") @db.Uuid
+  targetType       TimelineEntityType @map("target_type")
+  targetId         String             @map("target_id") @db.Uuid
+  relationshipType String             @map("relationship_type")
+  validFrom        DateTime           @default(now()) @map("valid_from")
+  validTo          DateTime?          @map("valid_to")
+  createdAt        DateTime           @default(now()) @map("created_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, sourceType, sourceId])
+  @@index([companyId, targetType, targetId])
+  @@map("graph_relationships")
+}
+
+// ---------------------------------------------------------------------------
+// Security audit log (14-Security/Audit_Logging.md)
+// ---------------------------------------------------------------------------
+
+/// Append-only record of security-relevant events — authentications, privilege
+/// changes, data exports/erasures, administrative actions. Distinct from the
+/// per-entity Timeline (business history a company curates): this is the
+/// security/access trail an auditor reads, and the app role holds only
+/// SELECT + INSERT on it (never UPDATE/DELETE) so entries are immutable.
+///
+/// `companyId` is nullable: pre-tenant events (a login attempt, a password
+/// reset — recorded before any company context exists) are system-level and
+/// written via the BYPASSRLS auth role; tenant-scoped events carry the company
+/// and are visible only to that tenant's `audit:view` holders through RLS.
+/// `actorLabel` snapshots the actor's username so the trail survives the
+/// actor's later erasure/deletion.
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String?  @map("company_id") @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  actorLabel  String?  @map("actor_label")
+  action      String
+  targetType  String?  @map("target_type")
+  targetId    String?  @map("target_id")
+  outcome     String   @default("success")
+  ip          String?
+  requestId   String?  @map("request_id")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([companyId, createdAt])
+  @@index([companyId, action, createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Integration Hub (10-Integrations/Integration_Hub.md)
+//
+// FleetHQ stays a TMS, not a WMS: this is a generic, plugin-shaped framework
+// for connecting to whatever external system a customer already runs —
+// CSV/Excel import-export, a generic REST poller, and a generic incoming
+// webhook receiver ship as reference connectors. A bespoke SAP/Oracle/
+// NetSuite/etc. client is a future connector built against this same
+// interface, not a schema change.
+//
+// IntegrationConnection is the "one configured link to an external system."
+// IntegrationCredential is a separate encrypted-at-rest vault entry a
+// connection points at (never inlined in `config`, so listing/editing a
+// connection never round-trips a secret). IntegrationFieldMapping is the
+// external-field -> FleetHQ-field rule set per connection (Universal Data
+// Mapping Engine). IntegrationSyncRun/IntegrationDeadLetter are the Sync
+// Engine's execution log and retry queue. IntegrationWebhook +
+// IntegrationWebhookDelivery cover both incoming and outgoing webhooks.
+//
+// IntegrationSyncRun and IntegrationWebhookDelivery are deliberately
+// relation-less to Company (bare `companyId`, no `@relation`/back-array) —
+// same convention as AuditLog/BarcodeScanEvent: high-volume, append-only
+// logs reached through their owning connection/webhook, not queried as an
+// owned collection off Company.
+// ---------------------------------------------------------------------------
+
+enum IntegrationConnectorType {
+  CSV
+  REST
+  WEBHOOK
+}
+
+enum IntegrationDirection {
+  IMPORT
+  EXPORT
+  BIDIRECTIONAL
+}
+
+enum IntegrationSyncTrigger {
+  MANUAL
+  SCHEDULED
+}
+
+enum IntegrationSyncStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  PARTIAL_FAILURE
+  FAILURE
+}
+
+enum IntegrationTransform {
+  NONE
+  UPPERCASE
+  LOWERCASE
+  TRIM
+  DATE_FORMAT
+  UNIT_CONVERSION
+  DEFAULT_VALUE
+  LOOKUP_TABLE
+}
+
+enum IntegrationAuthType {
+  NONE
+  API_KEY
+  BEARER_TOKEN
+  BASIC_AUTH
+  WEBHOOK_SECRET
+}
+
+enum IntegrationWebhookDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum IntegrationDeadLetterStatus {
+  PENDING_RETRY
+  RETRYING
+  RESOLVED
+  DEAD
+}
+
+/// A secret, encrypted at rest (AES-256-GCM; see IntegrationCryptoService).
+/// `config` on IntegrationConnection never holds the secret itself — only a
+/// `credentialId` pointer — so listing/exporting a connection's config is
+/// always safe to show/log.
+model IntegrationCredential {
+  id               String              @id @default(uuid()) @db.Uuid
+  companyId        String              @map("company_id") @db.Uuid
+  name             String
+  authType         IntegrationAuthType @map("auth_type")
+  encryptedPayload String              @map("encrypted_payload")
+  encryptionIv     String              @map("encryption_iv")
+  encryptionTag    String              @map("encryption_tag")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+  rotatedAt        DateTime?           @map("rotated_at")
+  archivedAt       DateTime?           @map("archived_at")
+
+  company     Company                 @relation(fields: [companyId], references: [id])
+  connections IntegrationConnection[]
+
+  @@index([companyId])
+  @@map("integration_credentials")
+}
+
+model IntegrationConnection {
+  id             String                   @id @default(uuid()) @db.Uuid
+  companyId      String                   @map("company_id") @db.Uuid
+  name           String
+  connectorType  IntegrationConnectorType @map("connector_type")
+  direction      IntegrationDirection     @default(IMPORT)
+  /// Which FleetHQ entity this connection imports into / exports from, e.g.
+  /// "customers", "depots", "jobs" — the same entity keys the existing bulk
+  /// `imports` module already uses.
+  targetEntity   String                   @map("target_entity")
+  /// Connector-specific, non-secret config: REST base URL/method/headers
+  /// template, CSV delimiter/encoding, webhook route id, poll interval, etc.
+  config         Json
+  credentialId   String?                  @map("credential_id") @db.Uuid
+  scheduleCron   String?                  @map("schedule_cron")
+  isEnabled      Boolean                  @default(true) @map("is_enabled")
+  lastSyncAt     DateTime?                @map("last_sync_at")
+  lastSyncStatus IntegrationSyncStatus?   @map("last_sync_status")
+  nextRunAt      DateTime?                @map("next_run_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+  archivedAt     DateTime?                @map("archived_at")
+
+  company       Company                    @relation(fields: [companyId], references: [id])
+  credential    IntegrationCredential?     @relation(fields: [credentialId], references: [id])
+  fieldMappings IntegrationFieldMapping[]
+  webhooks      IntegrationWebhook[]
+  syncRuns      IntegrationSyncRun[]
+  deadLetters   IntegrationDeadLetter[]
+
+  @@index([companyId])
+  @@index([companyId, isEnabled, nextRunAt])
+  @@map("integration_connections")
+}
+
+/// External field -> FleetHQ field, with an optional transform. The
+/// Universal Data Mapping Engine: unlimited rows per connection, no
+/// hardcoded field list on either side.
+model IntegrationFieldMapping {
+  id              String               @id @default(uuid()) @db.Uuid
+  companyId       String               @map("company_id") @db.Uuid
+  connectionId    String               @map("connection_id") @db.Uuid
+  externalField   String               @map("external_field")
+  fleetField      String               @map("fleet_field")
+  transform       IntegrationTransform @default(NONE)
+  /// Transform-specific parameters, e.g. {"format": "DD/MM/YYYY"} for
+  /// DATE_FORMAT, {"from": "lb", "to": "kg"} for UNIT_CONVERSION, a
+  /// {"value": "..."} default, or a lookup table's {"entries": {...}}.
+  transformConfig Json?                @map("transform_config")
+  isRequired      Boolean              @default(false) @map("is_required")
+  order           Int                  @default(0)
+  createdAt       DateTime             @default(now()) @map("created_at")
+  archivedAt      DateTime?            @map("archived_at")
+
+  company    Company               @relation(fields: [companyId], references: [id])
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, connectionId])
+  @@map("integration_field_mappings")
+}
+
+/// One row per sync attempt (manual or scheduled) — the Sync Dashboard's
+/// history and the source of `lastSyncAt`/`lastSyncStatus` on the parent
+/// connection.
+model IntegrationSyncRun {
+  id                String                 @id @default(uuid()) @db.Uuid
+  companyId         String                 @map("company_id") @db.Uuid
+  connectionId      String                 @map("connection_id") @db.Uuid
+  trigger           IntegrationSyncTrigger
+  status            IntegrationSyncStatus  @default(PENDING)
+  triggeredByUserId String?                @map("triggered_by_user_id") @db.Uuid
+  recordsProcessed  Int                    @default(0) @map("records_processed")
+  recordsSucceeded  Int                    @default(0) @map("records_succeeded")
+  recordsFailed     Int                    @default(0) @map("records_failed")
+  errorSummary      String?                @map("error_summary")
+  startedAt         DateTime               @default(now()) @map("started_at")
+  finishedAt        DateTime?              @map("finished_at")
+
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, connectionId, startedAt])
+  @@map("integration_sync_runs")
+}
+
+/// A single record that failed to sync: the Error Centre's raw material and
+/// the retry queue. `nextRetryAt` drives the Sync Engine's backoff; `status`
+/// DEAD means retries are exhausted and it needs a human.
+model IntegrationDeadLetter {
+  id           String                      @id @default(uuid()) @db.Uuid
+  companyId    String                      @map("company_id") @db.Uuid
+  connectionId String                      @map("connection_id") @db.Uuid
+  syncRunId    String?                     @map("sync_run_id") @db.Uuid
+  externalRef  String?                     @map("external_ref")
+  rawPayload   Json                        @map("raw_payload")
+  errorMessage String                      @map("error_message")
+  attempts     Int                         @default(1)
+  status       IntegrationDeadLetterStatus @default(PENDING_RETRY)
+  nextRetryAt  DateTime?                   @map("next_retry_at")
+  createdAt    DateTime                    @default(now()) @map("created_at")
+  updatedAt    DateTime                    @updatedAt @map("updated_at")
+
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, connectionId, status])
+  @@map("integration_dead_letters")
+}
+
+/// Incoming (FleetHQ receives at `inboundToken`'s URL) or outgoing (FleetHQ
+/// posts to `targetUrl`) webhook config. `connectionId` is optional — a
+/// webhook can stand alone (e.g. a bare event notifier) or belong to a sync
+/// connection.
+model IntegrationWebhook {
+  id                 String                      @id @default(uuid()) @db.Uuid
+  companyId          String                      @map("company_id") @db.Uuid
+  connectionId       String?                     @map("connection_id") @db.Uuid
+  name               String
+  direction          IntegrationWebhookDirection
+  targetUrl          String?                     @map("target_url")
+  inboundToken       String?                     @unique @map("inbound_token")
+  secretCredentialId String?                     @map("secret_credential_id") @db.Uuid
+  headerTemplate     Json?                       @map("header_template")
+  isEnabled          Boolean                     @default(true) @map("is_enabled")
+  lastTriggeredAt    DateTime?                   @map("last_triggered_at")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  archivedAt         DateTime?                   @map("archived_at")
+
+  company    Company                      @relation(fields: [companyId], references: [id])
+  connection IntegrationConnection?       @relation(fields: [connectionId], references: [id])
+  deliveries IntegrationWebhookDelivery[]
+
+  @@index([companyId])
+  @@map("integration_webhooks")
+}
+
+/// Every individual delivery attempt (in or out) — the Webhook Manager's
+/// test/replay/logs material.
+model IntegrationWebhookDelivery {
+  id             String                      @id @default(uuid()) @db.Uuid
+  companyId      String                      @map("company_id") @db.Uuid
+  webhookId      String                      @map("webhook_id") @db.Uuid
+  direction      IntegrationWebhookDirection
+  requestPayload Json?                       @map("request_payload")
+  responseStatus Int?                        @map("response_status")
+  success        Boolean
+  attempt        Int                         @default(1)
+  errorMessage   String?                     @map("error_message")
+  createdAt      DateTime                    @default(now()) @map("created_at")
+
+  webhook IntegrationWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@map("integration_webhook_deliveries")
+}

@@ -1,0 +1,75 @@
+name: api-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-ci.yml'
+  pull_request:
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-ci.yml'
+
+defaults:
+  run:
+    working-directory: api
+
+env:
+  DATABASE_URL: postgresql://fleetos:fleetos_dev_only@localhost:5432/fleetos?schema=public
+  APP_DATABASE_URL: postgresql://fleetos_app:fleetos_app_dev_only@localhost:5432/fleetos?schema=public
+  AUTH_DATABASE_URL: postgresql://fleetos_auth:fleetos_auth_dev_only@localhost:5432/fleetos?schema=public
+  JWT_SECRET: ci-test-secret
+  JWT_EXPIRES_IN: 12h
+  INTEGRATION_CREDENTIAL_KEY: "JdKT12mhp2Qmo/Hh9ml7kOgmb6CZsMeSe+wW6ViXam0="
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fleetos
+          POSTGRES_PASSWORD: fleetos_dev_only
+          POSTGRES_DB: fleetos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleetos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Apply migrations (creates schema, RLS policies, and the fleetos_app role)
+        run: npm run prisma:migrate:deploy
+
+      - name: Seed (smoke-tests the local dev bootstrap path)
+        run: npm run seed
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm test

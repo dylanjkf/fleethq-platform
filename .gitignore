@@ -1,0 +1,6 @@
+# Editor/OS cruft not already covered by api/.gitignore or driveros/.gitignore
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.swp

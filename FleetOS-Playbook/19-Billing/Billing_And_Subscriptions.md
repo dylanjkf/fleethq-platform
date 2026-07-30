@@ -1,0 +1,45 @@
+# Billing & Subscriptions
+
+## Purpose
+Close `FOUNDER_NOTES.md`'s gap #4 ("Billing and subscription management... core business infrastructure, not a nice-to-have") and `17-Roadmap/Product_Roadmap.md`'s "Billing & subscription management spec" line: how FleetOS charges its customers, tracks whether a company's subscription is in good standing, and lets a company manage its own plan and payment method — without FleetOS ever touching card data itself.
+
+## Core decisions
+
+### Stripe is the source of truth, FleetOS stores the minimum
+FleetOS never stores card details, never computes prices, never runs its own dunning logic. Stripe's own Customer, Subscription, Price, and Invoice objects are authoritative. On the `companies` table FleetOS stores only:
+- `stripeCustomerId` / `stripeSubscriptionId` — the links to Stripe's objects.
+- `subscriptionStatus` (a small enum: `NONE` / `TRIALING` / `ACTIVE` / `PAST_DUE` / `CANCELED`) — a local mirror of Stripe's status, existing purely to drive a dashboard banner and the Billing page's badge without a Stripe API round trip on every page load.
+- `planPriceId` — the Stripe Price the company is on. Not an internal plan enum: pricing/packaging lives in the Stripe Dashboard, so changing a price is a Stripe-side action with nothing to redeploy.
+
+This keeps the "which of Stripe's many statuses maps to what" logic in exactly one place (`billing.service.ts`'s `mapStripeStatus`) and means FleetOS can never drift into being a half-correct replica of Stripe's billing state machine.
+
+### Billing informs; it does not hard-lock-out (v1)
+A company with `subscriptionStatus` of `NONE`, `PAST_DUE`, or `CANCELED` is **not** blocked from using FleetOS in v1. The product surfaces status (a Billing page badge, a `PAST_DUE` warning banner) and leaves enforcement to a human commercial conversation. Rationale: a fleet mid-shift being abruptly locked out of dispatch/compliance tooling because a card expired is a worse outcome — for a safety-relevant operational system — than a few days of unpaid access while the operator sorts out payment. A future milestone can add graduated enforcement (e.g. read-only after N days past due) if the commercial reality demands it; the `subscriptionStatus` column already carries everything such a policy would need, so that's an additive change, not a schema one.
+
+### The webhook is the only writer of subscription state
+`subscriptionStatus`/`planPriceId` are only ever written by the Stripe webhook handler (`POST /v1/billing/webhook`), never optimistically by the checkout/portal endpoints. Stripe — not the browser's redirect back from Checkout — is the authority on whether a payment actually succeeded. The endpoints only ever *start* a Stripe-hosted flow (Checkout for a new subscription, the Billing Portal for managing an existing one) and hand back a redirect URL.
+
+## Security-relevant design points
+- **Webhook authenticity**: the webhook route is `@Public()` (Stripe has no FleetOS session), but every request is verified against the `Stripe-Signature` header using the endpoint's signing secret before anything is acted on. An unsigned or wrongly-signed request is a `400`, never a state change. This is why `main.ts` passes `rawBody: true` — signature verification needs the exact received bytes, not a re-serialized body.
+- **Tenant isolation holds even here**: every `companies` read/write in `BillingService` goes through `PrismaService.withTenant`, because `companies` carries the same row-level-security policy as every other tenant table. A subscription webhook resolves *which* company it's about from the Stripe subscription's own `metadata.fleetosCompanyId` (stamped at checkout-session creation), **not** by querying `companies` for a matching Stripe customer ID — that lookup is something RLS deliberately doesn't permit before the companyId is already known. (This was found the honest way: the first cut queried by customer ID, returned nothing under RLS, and 500'd in live testing before the metadata approach replaced it.)
+- **Permissions**: two new grantable permissions under the existing "Finance" category (`14-Security/Permissions_Model.md`'s own "Manage Billing" example) — `billing:view` (see status) and `billing:manage` (start checkout / open the portal). Both auto-reconcile onto the Administrator system role via the existing seed-time mechanism.
+
+## What's built
+- **Backend** (`apps/api/src/billing/`): `GET /v1/billing/status`, `GET /v1/billing/plans`, `GET /v1/billing/entitlements`, `POST /v1/billing/checkout-session`, `POST /v1/billing/portal-session`, `POST /v1/billing/webhook`. e2e includes real Stripe-SDK signature verification exercised offline (the `stripe.webhooks.*` calls are pure local HMAC, no network), the `PAST_DUE`/`CANCELED` status mapping, the plans list + its permission gate, and the signup free-trial grant.
+- **Native free trial**: self-serve signup sets `Company.trialEndsAt = now + 14 days`. `resolvePlanTier` grants a `TRIAL_TIER` (every feature; 25 assets/operators) while the window is open, then falls back to Free — independent of Stripe's own `TRIALING` status, so no card is needed to trial. `entitlements`/`status` expose `trialActive`/`trialEndsAt`/`trialDaysLeft`.
+- **FleetHQ** (`apps/fleethq/src/features/billing/BillingPage.tsx`): the Billing page shows the subscription/trial badge, a `PAST_DUE` warning, a trial countdown, and an **in-app plan picker** — the three purchasable tiers (Starter/Pro/Enterprise) as cards with a per-tier Subscribe button (from `GET /v1/billing/plans`), the current plan marked, plus the Stripe portal for management. A persistent app-shell **trial banner** (`components/layout/TrialBanner.tsx`) nudges conversion from anywhere in the app. Gracefully shows a "billing not configured / account managed directly" message when the deployment has no Stripe keys, and hides manage actions from users without `billing:manage`.
+- **Config**: `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` (API) and `VITE_STRIPE_PRICE_ID` (FleetHQ build-time). All empty/unset is a safe no-op — the product runs, the Billing page explains billing isn't set up, and nothing errors on startup. Terraform's Secrets Manager module already has the placeholder slots for the API keys (`infra/terraform/modules/secrets/`).
+
+## What's deliberately not built (v1)
+- **No live Stripe account is created by this work** — going live requires a real Stripe account, real Products/Prices configured in the Stripe Dashboard, and the real keys set in Secrets Manager. The system is fully built and testable in Stripe **test mode**; flipping to live is a configuration step, not a code change.
+- **No graduated enforcement / lockout** — see "Billing informs" above.
+- **No usage-based / per-asset metered billing** — v1 is a flat subscription per company (whatever Price the deployment points `VITE_STRIPE_PRICE_ID` at). Per-seat or per-asset metering is a Stripe-side packaging change plus a metering feed later, not modeled now.
+- **No in-app invoice history** — the Stripe Billing Portal already provides invoice history, payment-method management, and cancellation; FleetOS links out to it rather than rebuilding it. (An in-app plan *picker* now exists — the tiers are compared and chosen in-app; only invoice history/payment-method management stays in the portal.)
+
+## Go-live checklist (for when the founder is ready to charge real money)
+1. Create a real Stripe account; complete Stripe's business verification.
+2. In the Stripe Dashboard, create the Product(s) and Price(s) for FleetOS's plan(s).
+3. Set `STRIPE_SECRET_KEY` (live key) and `STRIPE_WEBHOOK_SECRET` in Secrets Manager; set `VITE_STRIPE_PRICE_ID` to the live Price for the FleetHQ build.
+4. Register the `POST /v1/billing/webhook` endpoint in the Stripe Dashboard and subscribe it to `checkout.session.completed` and `customer.subscription.*` events.
+5. Run one real end-to-end subscribe in Stripe **test mode** first, confirm the webhook drives `subscriptionStatus` to `ACTIVE`, then switch to live keys.
+6. Have the Terms of Service / subscription terms (see `19-Billing/`'s sibling legal drafts, pending lawyer review) in place before taking real payments.
