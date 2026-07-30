@@ -53,6 +53,8 @@ import { BarcodeModule } from './barcode/barcode.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { ContactModule } from './contact/contact.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
+import { AdminOrganisationsModule } from './admin-organisations/admin-organisations.module';
+import { AdminCustomerUsersModule } from './admin-customer-users/admin-customer-users.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
@@ -175,6 +177,8 @@ import { validateEnv } from './config/env.validation';
     IntegrationsModule,
     ContactModule,
     AdminAuthModule,
+    AdminOrganisationsModule,
+    AdminCustomerUsersModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before

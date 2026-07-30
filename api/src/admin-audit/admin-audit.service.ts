@@ -12,7 +12,15 @@ export const ADMIN_AUDIT_ACTIONS = {
   ORGANISATION_SUSPENDED: 'organisations.suspended',
   ORGANISATION_RESTORED: 'organisations.restored',
   ORGANISATION_ARCHIVED: 'organisations.archived',
+  ORGANISATION_UNARCHIVED: 'organisations.unarchived',
+  ORGANISATION_TRIAL_UPDATED: 'organisations.trial_updated',
   ORGANISATION_IMPERSONATION_STARTED: 'organisations.impersonation_started',
+  CUSTOMER_USER_CREATED: 'customer_users.created',
+  CUSTOMER_USER_DISABLED: 'customer_users.disabled',
+  CUSTOMER_USER_REACTIVATED: 'customer_users.reactivated',
+  CUSTOMER_USER_UNLOCKED: 'customer_users.unlocked',
+  CUSTOMER_USER_MFA_RESET: 'customer_users.mfa_reset',
+  CUSTOMER_USER_PASSWORD_RESET_SENT: 'customer_users.password_reset_sent',
 } as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[keyof typeof ADMIN_AUDIT_ACTIONS];

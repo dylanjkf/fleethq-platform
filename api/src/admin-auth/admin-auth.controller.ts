@@ -1,9 +1,8 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
-import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
-import { AdminPermissionGuard } from './guards/admin-permission.guard';
+import { AdminGuarded } from './decorators/admin-guarded.decorator';
 import { AdminAuthenticatedOnly } from './decorators/admin-authenticated-only.decorator';
 import { CurrentAdmin } from './decorators/current-admin.decorator';
 import { AuthenticatedAdminRequestUser } from './admin-jwt-payload.interface';
@@ -26,7 +25,7 @@ const ADMIN_AUTH_THROTTLE = { default: { limit: process.env.NODE_ENV === 'test' 
  * `@Public()` makes the *customer* guards no-op uniformly here (this
  * satisfies that build-time check without pretending these are open routes),
  * while real enforcement is layered on top per-route via
- * `@UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)` plus `@AdminAuthenticatedOnly()` /
+ * `@AdminGuarded()` plus `@AdminAuthenticatedOnly()` /
  * `@RequireAdminPermission()` — a completely separate guard chain, secret,
  * and Passport strategy from the customer stack. `login` and `mfa/verify` are
  * the only two routes that skip the admin guard too — the only genuinely
@@ -60,21 +59,21 @@ export class AdminAuthController {
     });
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Get('me')
   getMe(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
     return this.adminAuth.getMe(admin.adminUserId);
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Get('sessions')
   listSessions(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
     return this.adminAuth.listSessions(admin.adminUserId, admin.sessionId);
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Delete('sessions/:sessionId')
   @HttpCode(HttpStatus.OK)
@@ -88,7 +87,7 @@ export class AdminAuthController {
     return { ok: true };
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
@@ -99,7 +98,7 @@ export class AdminAuthController {
 
   // ── MFA enrolment ─────────────────────────────────────────────────────────
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Post('mfa/setup')
   @HttpCode(HttpStatus.OK)
@@ -107,7 +106,7 @@ export class AdminAuthController {
     return this.mfa.beginEnrollment(admin.adminUserId);
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Throttle(ADMIN_AUTH_THROTTLE)
   @Post('mfa/enable')
@@ -116,7 +115,7 @@ export class AdminAuthController {
     return this.mfa.confirmEnrollment(admin.adminUserId, dto.code);
   }
 
-  @UseGuards(AdminJwtAuthGuard, AdminPermissionGuard)
+  @AdminGuarded()
   @AdminAuthenticatedOnly()
   @Throttle(ADMIN_AUTH_THROTTLE)
   @Post('mfa/disable')

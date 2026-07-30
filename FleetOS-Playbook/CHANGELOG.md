@@ -24,7 +24,14 @@ founder's decision to build the full spec.
 - Fixed a real gap in `scripts/rotate-db-role-passwords.ts`: it rotated `fleetos_app`/`fleetos_auth` but not the new `fleetos_admin` role, which would otherwise have shipped to production still on its migration's hardcoded placeholder password. Now rotates all three via `NEW_ADMIN_ROLE_PASSWORD`.
 - `test/reconcile-admin-permissions.spec.ts`: role creation, correct permission sets, drift repair, idempotency.
 
-Not yet built: organisation/customer-user administration, the executive dashboard, billing operations, support tools, feature flags, or the admin frontend — see the Overview doc's status table.
+**Phase 2 — organisation + customer-user administration:**
+- `src/admin-organisations/`: list/detail (with plan/trial/subscription status and asset/operator/attached-unit counts), suspend/restore, archive/unarchive, trial edit, impersonation (mints a real 30-minute customer session token via `AuthService.issueSessionToken`'s new `expiresIn` override — reusing the exact login signing path, refused against a suspended/archived org), and a support-scenario "add a user to this org" action.
+- `src/admin-customer-users/`: cross-tenant user detail, disable/reactivate, unlock, MFA reset, and a "send password reset" action that delegates to the customer `AuthService.forgotPassword` (same no-enumeration behaviour as self-service).
+- **Closed a real gap found while building this phase**: `Company.suspendedAt` existed since Phase 1's schema but nothing enforced it — a "suspended" organisation could still log in and use the product. `AuthService.completeLogin`/`selectCompany` now exclude a suspended company's memberships from login, and `JwtStrategy.validate()` now rejects an already-issued session token against a suspended/archived company on its very next request — the same "takes effect immediately, no re-login needed" guarantee the codebase already applies to `tokenVersion` revocation.
+- New shared pieces: `AdminGuarded()` decorator (collapses the two guards every authenticated admin route needs), `AdminActionContext` interface (shared across admin feature modules), and `test/admin-route-permission-coverage.spec.ts` (the admin-platform equivalent of the customer route-coverage build check).
+- `test/admin-organisations.e2e-spec.ts` + `test/admin-customer-users.e2e-spec.ts`: 15 tests covering every action above, including the suspension-enforcement fix, against the real HTTP API.
+
+Not yet built: the executive dashboard, billing operations, support tools/feature flags, FleetHQ staff account management (creating admins other than via the bootstrap script), or the admin frontend — see the Overview doc's status table.
 
 ## 2026-07-28 — Live map removal, configurable barcode scanning, Integration Hub foundation
 

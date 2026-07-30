@@ -162,7 +162,10 @@ export class AuthService {
   ): Promise<LoginResult> {
     const memberships = await this.prisma.withUser(user.id, (tx) =>
       tx.companyMembership.findMany({
-        where: { userId: user.id, archivedAt: null, company: { archivedAt: null } },
+        // A suspended company (FleetHQ admin action, 21-Admin-Platform/Overview.md)
+        // blocks login exactly like an archived one — suspension is meant to
+        // actually stop access, not just flip a DB column.
+        where: { userId: user.id, archivedAt: null, company: { archivedAt: null, suspendedAt: null } },
         include: { company: true },
       }),
     );
@@ -225,7 +228,7 @@ export class AuthService {
           userId: payload.sub,
           companyId,
           archivedAt: null,
-          company: { archivedAt: null },
+          company: { archivedAt: null, suspendedAt: null },
         },
         include: { company: true, user: { select: { tokenVersion: true, username: true } } },
       }),
@@ -265,11 +268,14 @@ export class AuthService {
    * Public so CompaniesService can mint an immediate session token right
    * after signup provisions a brand-new company — "10 minutes to first
    * value" (00-Company/Mission.md) means signup shouldn't require a separate
-   * login round-trip straight after creating the account.
+   * login round-trip straight after creating the account. Also used by the
+   * FleetHQ admin platform's impersonation feature (21-Admin-Platform/Overview.md),
+   * which passes a short `expiresIn` override — an impersonation session
+   * should never carry the same 12h lifetime as a real login.
    */
-  issueSessionToken(userId: string, companyId: string, membershipId: string, tokenVersion: number): string {
+  issueSessionToken(userId: string, companyId: string, membershipId: string, tokenVersion: number, expiresIn?: string): string {
     const payload: JwtPayload = { sub: userId, companyId, membershipId, tv: tokenVersion };
-    return this.jwt.sign(payload);
+    return expiresIn ? this.jwt.sign(payload, { expiresIn }) : this.jwt.sign(payload);
   }
 
   /**

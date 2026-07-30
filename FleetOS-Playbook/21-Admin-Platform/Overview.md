@@ -20,7 +20,7 @@ yet.
 |---|---|---|
 | 1 | Schema, auth (login/MFA/sessions/lockout), permission-guarded route foundation | **Done** |
 | 1b | Bootstrap script (first Super Admin) | **Done** |
-| 2 | Organisation + customer-user administration | Pending |
+| 2 | Organisation + customer-user administration | **Done** |
 | 3 | Executive dashboard (real aggregate data) | Pending |
 | 4 | Billing operations on top of the existing Stripe integration | Pending |
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | Pending |
@@ -162,8 +162,9 @@ The first real `AdminUser` is created by `npm run admin:bootstrap`
 (`scripts/bootstrap-admin.ts`) — the only way an admin account is ever
 created without an existing admin doing it, since there is no public
 admin-signup endpoint. It refuses to run if any `AdminUser` already exists
-(bootstrap only, not a general admin-creation tool — Phase 2 adds an
-authenticated endpoint for creating additional staff accounts). In
+(bootstrap only, not a general admin-creation tool — an authenticated
+endpoint for creating additional FleetHQ *staff* accounts, gated on
+`admin_users:manage`, is still unbuilt; see "Not yet built" below). In
 production every field (`ADMIN_BOOTSTRAP_USERNAME`/`_EMAIL`/`_FULL_NAME`/`_PASSWORD`)
 is required and the password must pass the same strength policy
 (`isStrongPassword`) as every other password in the codebase; outside
@@ -178,8 +179,58 @@ rotates `fleetos_admin` alongside `fleetos_app`/`fleetos_auth`, via
 otherwise have shipped to production still on its migration's hardcoded
 placeholder password.
 
+## Organisations + customer users (Phase 2)
+
+`src/admin-organisations/` and `src/admin-customer-users/` — cross-tenant
+administration, all via `AdminPrismaService`/`fleetos_admin`, all
+audit-logged.
+
+**A real gap this phase closed first:** `suspendedAt` existed on `Company`
+since Phase 1's schema, but nothing checked it — a "suspended" organisation
+could still log in and use the product normally. Fixed in two places:
+`AuthService.completeLogin`/`selectCompany` now exclude a suspended (or
+archived) company's memberships from login, and `JwtStrategy.validate()`
+now rejects a request against a suspended/archived company's `companyId`
+even from an already-issued, not-yet-expired session token — the same
+"takes effect on the very next request, not at next login" guarantee already
+applied to `tokenVersion` revocation.
+
+### Organisations (`/v1/admin/organisations/*`)
+
+| Route | Notes |
+|---|---|
+| `GET /` | Paginated/searchable list, filterable by `status` (`active`/`suspended`/`archived`/`all`) |
+| `GET /:id` | Detail: plan/trial/subscription status, asset/operator/attached-unit counts, active memberships with lockout/disabled state |
+| `POST /:id/suspend` `{reason}` | Blocks all login/access immediately (see above); refuses if the org is archived |
+| `POST /:id/restore` | Un-suspends |
+| `POST /:id/archive` / `POST /:id/unarchive` | Soft delete / restore |
+| `PATCH /:id/trial` `{trialEndsAt}` | Set/clear the native trial window (`null` clears it) |
+| `POST /:id/impersonate` `{userId}` | Mints a real, 30-minute customer session token for that user, via `AuthService.issueSessionToken`'s `expiresIn` override — reuses the exact login signing path rather than a separate implementation. Refused for a suspended/archived org: impersonation is not a backdoor around suspension in this product's design |
+| `POST /:id/users` | Support scenario: add a user on the customer's behalf (e.g. their only admin left) — same invite-without-password shape as the customer API's own user creation, but written directly via `fleetos_admin` so it lands in the admin audit log, not the tenant's own (a synthetic actor in the tenant's audit/timeline would misattribute who actually did this) |
+
+### Customer users (`/v1/admin/customer-users/*`)
+
+| Route | Notes |
+|---|---|
+| `GET /:userId` | Cross-tenant identity view — every active membership, across every organisation |
+| `POST /:userId/disable` / `reactivate` | Archives/restores the account; disable takes effect on the account's very next request, same reasoning as organisation suspension |
+| `POST /:userId/unlock` | Clears brute-force lockout |
+| `POST /:userId/reset-mfa` | Clears TOTP secret/backup codes — for a user who's lost their authenticator |
+| `POST /:userId/send-password-reset` | Delegates to the customer `AuthService.forgotPassword` — identical "silently no-ops without an email on file" behaviour as self-service; returns `{emailOnFile}` so the admin knows whether anything was actually sent |
+
+### New shared pieces
+
+- `AdminGuarded()` (`src/admin-auth/decorators/admin-guarded.decorator.ts`) — collapses the `AdminJwtAuthGuard` + `AdminPermissionGuard` pair every authenticated admin route needs into one decorator; `AdminAuthController` was retrofitted to use it too.
+- `AdminActionContext` (`src/admin-auth/admin-action-context.interface.ts`) — the `{adminUserId, ip, userAgent}` shape threaded from every admin controller into its service, shared across feature modules rather than redeclared per-module.
+- `test/admin-route-permission-coverage.spec.ts` — the admin-platform equivalent of `route-permission-coverage.spec.ts`: every `Admin*Controller` route must carry `@AdminAuthenticatedOnly()` or `@RequireAdminPermission()` (an explicit allowlist covers `login`/`mfa/verify`, the only two genuinely unauthenticated ones).
+
+### Tests
+
+`test/admin-organisations.e2e-spec.ts` and `test/admin-customer-users.e2e-spec.ts` — list/detail, suspend blocking a fresh login AND killing an already-issued session, archive/unarchive, trial updates, impersonation (including refusal against a suspended org), admin-created user login, disable/reactivate, lockout/unlock, MFA reset, and password-reset triggering — all against the real HTTP API and a live test database.
+
 ## Not yet built
 
-Organisation/customer-user administration, the executive dashboard, billing
-operations, support tools, feature flags, and the admin frontend — see the
-status table above.
+The executive dashboard, billing operations, support tools/feature flags,
+FleetHQ staff account management (`admin_users:view`/`manage` — creating
+admins other than via the one-time bootstrap script), and the admin
+frontend — see the status table above.

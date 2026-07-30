@@ -33,12 +33,25 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
    * pre-tenant-context auth role (no company context exists at this layer yet).
    */
   async validate(payload: JwtPayload): Promise<AuthenticatedRequestUser> {
-    const user = await this.systemPrisma.user.findUnique({
-      where: { id: payload.sub },
-      select: { tokenVersion: true, archivedAt: true },
-    });
+    const [user, company] = await Promise.all([
+      this.systemPrisma.user.findUnique({
+        where: { id: payload.sub },
+        select: { tokenVersion: true, archivedAt: true },
+      }),
+      this.systemPrisma.company.findUnique({
+        where: { id: payload.companyId },
+        select: { archivedAt: true, suspendedAt: true },
+      }),
+    ]);
     if (!user || user.archivedAt || user.tokenVersion !== payload.tv) {
       throw new UnauthorizedException({ code: 'TOKEN_REVOKED', message: 'This session is no longer valid. Please sign in again.' });
+    }
+    // Suspension (FleetHQ admin action, 21-Admin-Platform/Overview.md) must take
+    // effect on the very next request, not just at the next login — otherwise
+    // a session minted before the suspension keeps working for its full 12h
+    // lifetime, the same reasoning already applied to tokenVersion above.
+    if (!company || company.archivedAt || company.suspendedAt) {
+      throw new UnauthorizedException({ code: 'COMPANY_SUSPENDED', message: 'This organisation no longer has active access. Contact FleetHQ support.' });
     }
     return {
       userId: payload.sub,
