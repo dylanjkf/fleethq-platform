@@ -35,8 +35,15 @@ RUN chmod +x ./docker-entrypoint.sh
 
 # A non-root user — a compromised process inside the container shouldn't
 # have root inside it either, standard defense in depth for a container that
-# will one day handle real customer data.
-RUN addgroup -S fleetos && adduser -S fleetos -G fleetos
+# will one day handle real customer data. Everything up to this point
+# (npm ci, the copied dist/, the entrypoint script) was written as root, so
+# it must be chown'd to fleetos before switching users — otherwise
+# `prisma migrate deploy` in docker-entrypoint.sh fails at container start
+# trying to write into a root-owned node_modules/@prisma tree (the query
+# engine's own write check), the entrypoint exits under `set -e`, and the
+# app never binds to a port at all — which reads as the healthcheck timing
+# out, not as the actual permission error underneath it.
+RUN addgroup -S fleetos && adduser -S fleetos -G fleetos && chown -R fleetos:fleetos /app
 USER fleetos
 
 EXPOSE 3000
