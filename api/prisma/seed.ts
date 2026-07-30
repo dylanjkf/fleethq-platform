@@ -17,6 +17,7 @@ import { PrismaClient } from '@prisma/client';
 import { PERMISSION_CATALOG } from '../src/common/permissions/permission-catalog';
 import { provisionCompany } from '../src/companies/provision-company';
 import { reconcileSystemRolePermissions } from './reconcile-permissions';
+import { reconcileAdminPermissions } from './reconcile-admin-permissions';
 
 const prisma = new PrismaClient();
 
@@ -147,6 +148,15 @@ async function seedReferenceData() {
   const reconciled = await reconcileSystemRolePermissions(prisma);
   console.log(
     `  Reconciled ${reconciled.administratorRolesChecked} Administrator role(s) and ${reconciled.readOnlyRolesChecked} Read Only role(s); granted ${reconciled.permissionsGranted} missing permission(s).`,
+  );
+
+  // Same drift guard, for the FleetHQ internal administration platform's own
+  // Super Admin/Support system-template roles (21-Admin-Platform/Overview.md).
+  // Creates no AdminUser and holds no credentials — safe to run unattended in
+  // every environment, unlike scripts/bootstrap-admin.ts.
+  const adminReconciled = await reconcileAdminPermissions(prisma);
+  console.log(
+    `  Reconciled admin platform permissions: ${adminReconciled.permissionsUpserted} catalog entries, ${adminReconciled.permissionsGranted} missing permission(s) granted.`,
   );
 }
 

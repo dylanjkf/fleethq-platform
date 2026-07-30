@@ -19,7 +19,7 @@ yet.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Schema, auth (login/MFA/sessions/lockout), permission-guarded route foundation | **Done** |
-| 1b | Bootstrap script (first Super Admin) | Pending |
+| 1b | Bootstrap script (first Super Admin) | **Done** |
 | 2 | Organisation + customer-user administration | Pending |
 | 3 | Executive dashboard (real aggregate data) | Pending |
 | 4 | Billing operations on top of the existing Stripe integration | Pending |
@@ -145,10 +145,41 @@ the full MFA enrol → challenge → verify flow, session listing/revocation, an
 logout — all against the real HTTP API and a live test database, the same
 pattern the customer `auth.e2e-spec.ts` uses.
 
+## Bootstrap (Phase 1b)
+
+Two system-template `AdminRole`s ship, reconciled the same way the customer
+platform's Administrator/Read Only roles are (`prisma/reconcile-admin-permissions.ts`,
+called from `prisma/seed.ts`'s reference-data step and standalone via
+`npm run admin:permissions:sync`):
+
+- **Super Admin** — every permission in the catalog, always. New permissions
+  added later are granted to it automatically.
+- **Support** — a fixed, narrower subset (view organisations/billing, manage
+  customer users and support tickets, view fleet/analytics/feature flags) —
+  no billing changes, feature-flag edits, or staff management.
+
+The first real `AdminUser` is created by `npm run admin:bootstrap`
+(`scripts/bootstrap-admin.ts`) — the only way an admin account is ever
+created without an existing admin doing it, since there is no public
+admin-signup endpoint. It refuses to run if any `AdminUser` already exists
+(bootstrap only, not a general admin-creation tool — Phase 2 adds an
+authenticated endpoint for creating additional staff accounts). In
+production every field (`ADMIN_BOOTSTRAP_USERNAME`/`_EMAIL`/`_FULL_NAME`/`_PASSWORD`)
+is required and the password must pass the same strength policy
+(`isStrongPassword`) as every other password in the codebase; outside
+production it falls back to a documented dev-only default for convenience.
+Doesn't enrol MFA itself (can't render a QR code from a CLI) — enable it
+immediately after first login via `mfa/setup` + `mfa/enable`.
+
+`scripts/rotate-db-role-passwords.ts` (run once per environment right after
+first `prisma migrate deploy`, and again after any suspected leak) now
+rotates `fleetos_admin` alongside `fleetos_app`/`fleetos_auth`, via
+`NEW_ADMIN_ROLE_PASSWORD` — this closes a gap where the new role would
+otherwise have shipped to production still on its migration's hardcoded
+placeholder password.
+
 ## Not yet built
 
-Nothing past Phase 1 exists yet: no organisation/customer-user
-administration, no dashboard, no billing operations, no support tools, no
-feature flags, no admin frontend. `admin_permissions`/`admin_roles` rows and
-the first real `AdminUser` also don't exist yet outside test fixtures — that
-bootstrap step is Phase 1b, tracked separately.
+Organisation/customer-user administration, the executive dashboard, billing
+operations, support tools, feature flags, and the admin frontend — see the
+status table above.

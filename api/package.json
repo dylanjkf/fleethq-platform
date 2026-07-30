@@ -21,6 +21,8 @@
     "seed:enterprise": "ts-node scripts/seed-enterprise-company.ts",
     "seed:demo": "ts-node scripts/seed-demo-company.ts",
     "permissions:sync": "ts-node prisma/reconcile-permissions.ts",
+    "admin:permissions:sync": "ts-node prisma/reconcile-admin-permissions.ts",
+    "admin:bootstrap": "ts-node scripts/bootstrap-admin.ts",
     "db:rotate-role-passwords": "ts-node scripts/rotate-db-role-passwords.ts",
     "load-test:seed": "ts-node scripts/seed-load-test-data.ts",
     "load-test": "ts-node scripts/load-test.ts"

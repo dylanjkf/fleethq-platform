@@ -18,7 +18,13 @@ founder's decision to build the full spec.
 - Deny-by-default admin route classification (`AdminPermissionGuard`, `@AdminAuthenticatedOnly()`/`@RequireAdminPermission()`) — the same "unclassified route is denied, not silently allowed" contract as the customer API's `PermissionGuard`, enforced independently per admin route rather than via the global guard chain.
 - `test/admin-auth.e2e-spec.ts`: login, lockout, unauthenticated/garbage-token rejection, full MFA enrol→challenge→verify flow, session revocation, logout — all against the real HTTP API and a live test database.
 
-Not yet built: the bootstrap script for the first real admin account, organisation/customer-user administration, the executive dashboard, billing operations, support tools, feature flags, or the admin frontend — see the Overview doc's status table.
+**Phase 1b — bootstrap tooling:**
+- `prisma/reconcile-admin-permissions.ts`: seeds `admin_permissions` from the catalog and keeps two system-template `AdminRole`s in sync — Super Admin (every permission, always) and Support (a fixed view/support-ticket subset, never billing/feature-flag/staff management). Called from `prisma/seed.ts` (safe, credential-free, every environment) and standalone via `npm run admin:permissions:sync`.
+- `scripts/bootstrap-admin.ts` (`npm run admin:bootstrap`): one-time creation of the first real `AdminUser`. Refuses to run if any admin account already exists; production requires explicit env vars and a password meeting the codebase's standard strength policy, with a dev-only fallback outside production — mirrors `prisma/seed.ts`'s "no default account in production" discipline.
+- Fixed a real gap in `scripts/rotate-db-role-passwords.ts`: it rotated `fleetos_app`/`fleetos_auth` but not the new `fleetos_admin` role, which would otherwise have shipped to production still on its migration's hardcoded placeholder password. Now rotates all three via `NEW_ADMIN_ROLE_PASSWORD`.
+- `test/reconcile-admin-permissions.spec.ts`: role creation, correct permission sets, drift repair, idempotency.
+
+Not yet built: organisation/customer-user administration, the executive dashboard, billing operations, support tools, feature flags, or the admin frontend — see the Overview doc's status table.
 
 ## 2026-07-28 — Live map removal, configurable barcode scanning, Integration Hub foundation
 

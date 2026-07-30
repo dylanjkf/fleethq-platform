@@ -1,23 +1,26 @@
 /**
  * SECURITY-CRITICAL — read this before touching it.
  *
- * apps/api/prisma/migrations/20260713063137_row_level_security and
- * .../20260713080000_admin_entities_and_users_rls CREATE the `fleetos_app`
- * and `fleetos_auth` Postgres roles with hardcoded passwords
- * (`fleetos_app_dev_only`, `fleetos_auth_dev_only`). That's unavoidable — a
- * migration file is version-controlled and can never contain a real
- * per-environment secret — but it means every real deploy MUST immediately
- * rotate both roles to real, per-environment, random passwords, or the
- * "row-level security only holds if the app can't bypass it" guarantee
- * (11-Database/Data_Model.md) is sitting behind a password anyone who has
- * ever read this repository's git history already knows.
+ * apps/api/prisma/migrations/20260713063137_row_level_security,
+ * .../20260713080000_admin_entities_and_users_rls, and
+ * .../20260730092032_admin_platform_foundation CREATE the `fleetos_app`,
+ * `fleetos_auth`, and `fleetos_admin` Postgres roles with hardcoded passwords
+ * (`fleetos_app_dev_only`, `fleetos_auth_dev_only`, `fleetos_admin_dev_only`).
+ * That's unavoidable — a migration file is version-controlled and can never
+ * contain a real per-environment secret — but it means every real deploy MUST
+ * immediately rotate all three roles to real, per-environment, random
+ * passwords, or the "row-level security only holds if the app can't bypass
+ * it" guarantee (11-Database/Data_Model.md) — and, for `fleetos_admin`, the
+ * entire admin-platform isolation model (21-Admin-Platform/Overview.md) — is
+ * sitting behind a password anyone who has ever read this repository's git
+ * history already knows.
  *
  * Run this ONCE per environment, immediately after `prisma migrate deploy`
  * creates the roles for the first time, connected as the schema-owning role
- * (which has ALTER ROLE privilege on both). It is idempotent — re-running it
- * with the same passwords is a safe no-op, so it's also safe to run again
- * any time you want to force-rotate both passwords (e.g. after a suspected
- * leak).
+ * (which has ALTER ROLE privilege on all three). It is idempotent — re-running
+ * it with the same passwords is a safe no-op, so it's also safe to run again
+ * any time you want to force-rotate all three passwords (e.g. after a
+ * suspected leak).
  *
  * The new passwords come from environment variables that the deploy
  * pipeline populates from the environment's Secrets Manager secret (see
@@ -31,6 +34,7 @@ import { PrismaClient } from '@prisma/client';
 const ROLES = [
   { name: 'fleetos_app', envVar: 'NEW_APP_ROLE_PASSWORD' },
   { name: 'fleetos_auth', envVar: 'NEW_AUTH_ROLE_PASSWORD' },
+  { name: 'fleetos_admin', envVar: 'NEW_ADMIN_ROLE_PASSWORD' },
 ] as const;
 
 async function main() {
