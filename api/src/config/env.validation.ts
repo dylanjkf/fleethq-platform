@@ -20,8 +20,9 @@
  *    we refuse to start.
  */
 
-/** The placeholder secret shipped in `.env.example` — never valid in production. */
+/** The placeholder secrets shipped in `.env.example` — never valid in production. */
 const PLACEHOLDER_JWT_SECRET = 'local-dev-only-change-me';
+const PLACEHOLDER_ADMIN_JWT_SECRET = 'local-dev-only-change-me-admin';
 const MIN_PROD_SECRET_LENGTH = 32;
 
 /**
@@ -31,15 +32,22 @@ const MIN_PROD_SECRET_LENGTH = 32;
  * db:rotate-role-passwords from Secrets Manager) didn't take — a fail-fast here
  * is far better than serving traffic with a guessable database credential.
  */
-const DEV_ONLY_DB_PASSWORDS = ['fleetos_dev_only', 'fleetos_app_dev_only', 'fleetos_auth_dev_only'];
-const DB_URL_KEYS = ['DATABASE_URL', 'APP_DATABASE_URL', 'AUTH_DATABASE_URL'] as const;
+const DEV_ONLY_DB_PASSWORDS = [
+  'fleetos_dev_only',
+  'fleetos_app_dev_only',
+  'fleetos_auth_dev_only',
+  'fleetos_admin_dev_only',
+];
+const DB_URL_KEYS = ['DATABASE_URL', 'APP_DATABASE_URL', 'AUTH_DATABASE_URL', 'ADMIN_DATABASE_URL'] as const;
 
 /** Env vars with no safe default: absence is always a fatal misconfiguration. */
 const REQUIRED_ALWAYS = [
   'DATABASE_URL',
   'APP_DATABASE_URL',
   'AUTH_DATABASE_URL',
+  'ADMIN_DATABASE_URL',
   'JWT_SECRET',
+  'ADMIN_JWT_SECRET',
 ] as const;
 
 /** AES-256-GCM key size — see IntegrationCryptoService. */
@@ -96,6 +104,20 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
       errors.push(
         `JWT_SECRET must be at least ${MIN_PROD_SECRET_LENGTH} characters in production (got ${secret.length}).`,
       );
+    }
+
+    const adminSecret = typeof config.ADMIN_JWT_SECRET === 'string' ? config.ADMIN_JWT_SECRET : '';
+    if (adminSecret === PLACEHOLDER_ADMIN_JWT_SECRET) {
+      errors.push(
+        'ADMIN_JWT_SECRET is still the in-repo placeholder — set a unique, random secret per environment (every admin session token would otherwise be forgeable).',
+      );
+    } else if (adminSecret.length > 0 && adminSecret.length < MIN_PROD_SECRET_LENGTH) {
+      errors.push(
+        `ADMIN_JWT_SECRET must be at least ${MIN_PROD_SECRET_LENGTH} characters in production (got ${adminSecret.length}).`,
+      );
+    }
+    if (adminSecret.length > 0 && adminSecret === secret) {
+      errors.push('ADMIN_JWT_SECRET must not be the same value as JWT_SECRET — a shared secret would let a token signed for one audience be replayed against the other.');
     }
 
     // The dev-only database role passwords must never survive into production.

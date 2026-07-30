@@ -2,6 +2,24 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-30 — FleetHQ Administration Platform, Phase 1 (schema + auth)
+
+New `21-Admin-Platform/Overview.md`: FleetHQ staff's own internal tool for
+operating the SaaS business (organisations, billing, support, system health),
+completely separate from the customer-facing product — separate DB role,
+separate JWT secret/strategy, separate frontend to come. Built on explicit
+request; flagged against `00-Company/Commercial_Priority.md`'s standing
+"finish the courier vertical first" directive before starting, per the
+founder's decision to build the full spec.
+
+**Phase 1 (this entry) — schema + auth foundation:**
+- Seven new tables (`admin_permissions`, `admin_roles`, `admin_role_permissions`, `admin_users`, `admin_sessions`, `admin_trusted_devices`, `admin_login_attempts`, `admin_audit_logs`) plus a third database role, `fleetos_admin` (`BYPASSRLS`, narrowly-scoped explicit grants) alongside the existing `fleetos_app`/`fleetos_auth`.
+- `src/admin-auth/`: login, TOTP MFA (reusing the customer platform's dependency-free `totp.ts` directly), trusted-device "remember me", 5-attempt/15-minute lockout, session listing/revocation, logout — mirroring every security property of the customer `AuthService`, adapted to FleetHQ staff accounts and signed under a completely separate `ADMIN_JWT_SECRET`/`admin-jwt` Passport strategy.
+- Deny-by-default admin route classification (`AdminPermissionGuard`, `@AdminAuthenticatedOnly()`/`@RequireAdminPermission()`) — the same "unclassified route is denied, not silently allowed" contract as the customer API's `PermissionGuard`, enforced independently per admin route rather than via the global guard chain.
+- `test/admin-auth.e2e-spec.ts`: login, lockout, unauthenticated/garbage-token rejection, full MFA enrol→challenge→verify flow, session revocation, logout — all against the real HTTP API and a live test database.
+
+Not yet built: the bootstrap script for the first real admin account, organisation/customer-user administration, the executive dashboard, billing operations, support tools, feature flags, or the admin frontend — see the Overview doc's status table.
+
 ## 2026-07-28 — Live map removal, configurable barcode scanning, Integration Hub foundation
 
 **Portability + dev-experience fixes (merged separately, noted here for completeness):**

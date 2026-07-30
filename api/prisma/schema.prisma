@@ -50,6 +50,14 @@ model Company {
   /// as notification preferences) — see 01-Product/Support_Help_Pathway.md.
   supportPhone         String?            @map("support_phone")
   supportNotes         String?            @map("support_notes")
+  /// FleetHQ internal administration platform (21-Admin-Platform/Overview.md):
+  /// a distinct lifecycle state from `archivedAt` below — suspended blocks
+  /// login/access temporarily (a billing or abuse action an admin can undo),
+  /// archived is the soft-delete end state. Set/cleared only via the admin
+  /// API's own RLS-bypassing connection (fleetos_admin), never by the
+  /// customer-facing API.
+  suspendedAt          DateTime?          @map("suspended_at")
+  suspensionReason     String?            @map("suspension_reason")
   /// Billing (FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing &
   /// subscription management spec"): one Stripe Customer + Subscription per
   /// Company, mirroring the Company-level singleton shape supportPhone/Notes
@@ -2330,4 +2338,191 @@ model IntegrationWebhookDelivery {
 
   @@index([webhookId, createdAt])
   @@map("integration_webhook_deliveries")
+}
+
+// ---------------------------------------------------------------------------
+// FleetHQ Internal Administration Platform (21-Admin-Platform/Overview.md)
+//
+// Deliberately platform-level, not tenant data: no companyId, no row-level
+// security. These tables are reachable only through the isolated admin API
+// surface (its own auth module, its own JWT audience/secret, its own DB
+// role — fleetos_admin, BYPASSRLS, see the migration adding it) — never
+// through any customer-facing route, the customer JWT, or the
+// fleetos_app/fleetos_auth roles. There is no relation from `User` to
+// `AdminUser` anywhere in this schema: a customer account can never become
+// an administrator, by construction, not by a runtime check that could be
+// buggy or bypassed.
+// ---------------------------------------------------------------------------
+
+/// The admin-side permission catalog — deliberately a separate table from
+/// `Permission` (the customer permission catalog) even though the shape is
+/// identical, so a bug or migration touching one can never accidentally
+/// grant/revoke the other.
+model AdminPermission {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique
+  category    String
+  description String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions AdminRolePermission[]
+
+  @@map("admin_permissions")
+}
+
+/// Two system templates ship (Super Admin, Support) but — matching the
+/// customer Role model's philosophy (14-Security/Permissions_Model.md) —
+/// roles are just named, editable/cloneable bundles of permissions, not a
+/// hardcoded enum.
+model AdminRole {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String   @unique
+  description      String
+  isSystemTemplate Boolean  @default(false) @map("is_system_template")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  permissions AdminRolePermission[]
+  admins      AdminUser[]
+
+  @@map("admin_roles")
+}
+
+model AdminRolePermission {
+  id           String @id @default(uuid()) @db.Uuid
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       AdminRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission AdminPermission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("admin_role_permissions")
+}
+
+/// A FleetHQ staff member. Created only via the internal bootstrap script or
+/// by an existing admin with the users:create permission — there is no
+/// public admin-signup endpoint anywhere, on purpose.
+model AdminUser {
+  id                String    @id @default(uuid()) @db.Uuid
+  username          String    @unique
+  email             String    @unique
+  passwordHash      String    @map("password_hash")
+  fullName          String    @map("full_name")
+  roleId            String    @map("role_id") @db.Uuid
+  /// Same brute-force throttle shape as the customer User model.
+  failedLoginCount  Int       @default(0) @map("failed_login_count")
+  lockedUntil       DateTime? @map("locked_until")
+  /// Session-revocation counter — bumped on password reset/rotation to
+  /// invalidate every existing session immediately, same mechanism as User.
+  tokenVersion      Int       @default(0) @map("token_version")
+  mfaSecret         String?   @map("mfa_secret")
+  mfaEnabledAt      DateTime? @map("mfa_enabled_at")
+  mfaBackupCodes    String[]  @default([]) @map("mfa_backup_codes")
+  /// Forced password rotation: set true by another admin (or a rotation
+  /// policy) to require a new password on next login before anything else
+  /// is reachable.
+  mustResetPassword Boolean   @default(false) @map("must_reset_password")
+  passwordChangedAt DateTime  @default(now()) @map("password_changed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  /// Soft delete / disable. A disabled admin's sessions are also revoked
+  /// immediately (see AdminAuthService.disable).
+  archivedAt        DateTime? @map("archived_at")
+
+  role            AdminRole            @relation(fields: [roleId], references: [id])
+  sessions        AdminSession[]
+  trustedDevices  AdminTrustedDevice[]
+  auditLogEntries AdminAuditLog[]
+
+  @@map("admin_users")
+}
+
+/// One row per active login (not per request) — the "device tracking" +
+/// "session management"/"session revocation" material. The JWT itself
+/// carries this row's id; a request is rejected once `revokedAt` is set or
+/// `expiresAt` has passed, independent of the JWT's own exp claim, so a
+/// revoked session dies immediately rather than at token expiry.
+model AdminSession {
+  id          String    @id @default(uuid()) @db.Uuid
+  adminUserId String    @map("admin_user_id") @db.Uuid
+  ipAddress   String    @map("ip_address")
+  userAgent   String?   @map("user_agent")
+  deviceLabel String?   @map("device_label")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at")
+  expiresAt   DateTime  @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId])
+  @@map("admin_sessions")
+}
+
+/// "Remember trusted devices" — a longer-lived record independent of any one
+/// session's lifetime, so a recognised device can skip the MFA challenge on
+/// a fresh login for `expiresAt` (30 days), while the device's login
+/// history/sessions are still tracked normally either way.
+model AdminTrustedDevice {
+  id                String   @id @default(uuid()) @db.Uuid
+  adminUserId       String   @map("admin_user_id") @db.Uuid
+  /// A hash of client-supplied signals (User-Agent + a client-generated
+  /// device id cookie) — never raw fingerprinting data at rest.
+  deviceFingerprint String   @map("device_fingerprint")
+  label             String?
+  lastUsedAt        DateTime @default(now()) @map("last_used_at")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@unique([adminUserId, deviceFingerprint])
+  @@map("admin_trusted_devices")
+}
+
+/// Every login attempt, successful or not — "login history", "IP logging",
+/// and the source data for failed-login/brute-force and IP-anomaly
+/// detection. Kept even for a username that doesn't resolve to a real
+/// AdminUser (a stranger probing the login endpoint is exactly what this
+/// table needs to catch).
+model AdminLoginAttempt {
+  id            String   @id @default(uuid()) @db.Uuid
+  usernameTried String   @map("username_tried")
+  ipAddress     String   @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  success       Boolean
+  failureReason String?  @map("failure_reason")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([ipAddress, createdAt])
+  @@index([usernameTried, createdAt])
+  @@map("admin_login_attempts")
+}
+
+/// Every administrative mutation, no exceptions — "no destructive action
+/// without logging." `organisationId` is deliberately a plain indexed
+/// column, not a Company relation: an audit row must survive even if the
+/// organisation it refers to is later hard-deleted (never happens today,
+/// but the log's job is to outlive the data it describes).
+model AdminAuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  adminUserId    String?  @map("admin_user_id") @db.Uuid
+  ipAddress      String   @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  action         String
+  entityType     String   @map("entity_type")
+  entityId       String?  @map("entity_id")
+  organisationId String?  @map("organisation_id") @db.Uuid
+  beforeValue    Json?    @map("before_value")
+  afterValue     Json?    @map("after_value")
+  reason         String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser? @relation(fields: [adminUserId], references: [id])
+
+  @@index([adminUserId, createdAt])
+  @@index([organisationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("admin_audit_logs")
 }
