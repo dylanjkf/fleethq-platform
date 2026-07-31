@@ -2,6 +2,15 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 11 (final verify, docs, CHANGELOG — initiative complete)
+
+Closing phase of the 11-phase Authentication, Billing & Subscription Platform initiative — no new functionality, a whole-initiative verification pass plus documentation.
+
+- Backend: full `jest` suite re-run clean (553/554 — the one failure is the pre-existing `integrations.e2e-spec.ts` webhook-timeout flake, confirmed unrelated throughout the initiative); `tsc -b` and `eslint` clean.
+- Frontend: `tsc -b` clean, `oxlint` clean, `vitest` (38/38) passing, `npm run build` succeeds.
+- `22-Auth-Billing-Platform/Overview.md` gained a closing section collecting every phase's "deliberately out of scope" note into one place (step-up re-auth, refresh-token rotation, new-passkey audit event, new limit dimensions, gated Stripe Tax) so a future reader doesn't have to hunt through ten sections for the honest list of what's still missing. `19-Billing/Billing_And_Subscriptions.md` gained pointers to Phase 9's usage counters.
+- All 11 phases are now **Done**: customer session/device management, magic link + social login + WebAuthn, password/MFA policy depth, registration + named roles, full Stripe webhook coverage, billing/security emails, self-service billing portal UI, GST tax invoicing, usage & feature limit depth, security hardening depth, and this closing verification pass.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 10 (security hardening depth)
 
 Re-reviewed the auth/session layer this initiative itself built (Phases 1–3) with an attacker's checklist, closing five concrete gaps rather than re-doing the broad security work already done pre-initiative (Waves C/E, etc.).

@@ -25,7 +25,7 @@ drifts into describing features that don't exist yet.
 | 8 | GST / Australian tax invoicing | **Done** |
 | 9 | Usage & feature limit depth | **Done** |
 | 10 | Security hardening depth | **Done** |
-| 11 | Final verify, docs, CHANGELOG | Planned |
+| 11 | Final verify, docs, CHANGELOG | **Done** |
 
 ## Phase 1: Customer session & device management
 
@@ -746,3 +746,63 @@ IP+user-agent pair, rejects an unseen one). `test/admin-organisations.e2e-spec.t
 existing impersonation tests were re-run as a regression check (all still
 pass — the new email is fire-and-forget and doesn't change the endpoint's
 response). Full backend `jest` suite, `tsc`, and `eslint` re-run clean.
+
+## Phase 11: Final verify, docs, CHANGELOG
+
+The closing phase — no new functionality, a whole-initiative verification
+pass plus the documentation this file's own header promises ("tracks what's
+actually built... so it never drifts into describing features that don't
+exist yet").
+
+- **Backend** (`fleethq-platform/api`): full `jest` suite (554 tests across
+  111 suites) re-run clean — 553 pass, the one failure is the pre-existing
+  `integrations.e2e-spec.ts` webhook-timeout flake documented since Phase
+  1–3 and confirmed unrelated to this initiative by its own isolated
+  re-runs throughout. `tsc -b` and `eslint` both clean (zero errors; the
+  same pre-existing complexity/line-count warnings this repo has carried
+  throughout the initiative, none newly introduced by any of its ten
+  phases).
+- **Frontend** (`fleethq-frontend`): `tsc -b` clean, `oxlint` clean (same
+  caveat — pre-existing warnings only), `vitest` (38 tests across 8 files)
+  passing, and `npm run build` succeeds.
+- **Docs**: this file's status table and every phase section were written
+  and checked in as each phase landed, not backfilled here — Phase 11 only
+  adds this closing section and a final CHANGELOG entry.
+  `19-Billing/Billing_And_Subscriptions.md` gained pointers to this
+  initiative's Phase 8 (GST) and Phase 9 (usage counters) additions.
+
+### What this initiative did not build, and why
+
+Collected here from each phase's own "deliberately out of scope" note, so
+a future reader doesn't have to hunt through ten sections to find the honest
+list of what's still missing:
+
+- **Step-up re-authentication** before sensitive-but-not-already-self-gated
+  actions (removing a WebAuthn credential, opening the billing portal) —
+  Phase 10. A real feature, but a new frontend re-auth flow + new endpoints,
+  not a hardening tweak to what already exists.
+- **Refresh-token rotation + reuse detection** — Phase 10. This platform
+  uses one signed JWT per session, validated against a real `UserSession`
+  row on every request (so revocation is immediate, not "wait out the
+  token's remaining lifetime"). A rotating-refresh-token architecture would
+  be a genuine improvement but is a redesign of how sessions are issued and
+  renewed, not an addition to the current one.
+- **New-passkey-registered has no audit/email event** — Phase 6. Every
+  other credential-affecting action (password change, MFA enable/disable,
+  lockout) does; this one needs a new `AUDIT_ACTIONS` entry first and was
+  left for later rather than folded into that phase.
+- **New limit dimensions** (depots, customers, GPS devices, seats) — Phase
+  9. Every plan tier has only ever limited operators and assets since A3;
+  adding another dimension is a pricing/business decision, not something
+  a phase should decide unilaterally in code.
+- **Stripe Tax / automatic GST calculation is gated, not live** — Phase 8.
+  `STRIPE_TAX_ENABLED` stays off until a deployment has actually registered
+  for Stripe Tax + Australian GST in the real Stripe Dashboard — see the
+  go-live checklist in `19-Billing/Billing_And_Subscriptions.md`. The ABN
+  attachment itself (the other half of tax invoicing) is unconditional and
+  already live.
+- **No live Stripe account, ever** — true since before this initiative and
+  still true after it. Every phase here is built and e2e-tested against
+  Stripe's offline SDK surface (real HMAC signature verification, no
+  network calls) in test mode; going live is a Stripe Dashboard + Secrets
+  Manager configuration step, not a code change.
