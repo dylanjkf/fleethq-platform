@@ -9,12 +9,14 @@ import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
 import { AuthRecoveryService } from './auth-recovery.service';
+import { PasswordPolicyService } from './password-policy.service';
+import { AuthPolicyGateService } from './auth-policy-gate.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 import { MfaService } from './mfa/mfa.service';
 import { OidcVerifierService } from './oidc-verifier.service';
 import { WebauthnService } from './webauthn/webauthn.service';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
-import { JwtPayload, LoginMethod, MfaChallengePayload, PreAuthJwtPayload } from './jwt-payload.interface';
+import { LoginMethod, MfaChallengePayload, PolicyActionPayload, PreAuthJwtPayload } from './jwt-payload.interface';
 
 /** Optional request context threaded from the controller for audit records. */
 export interface AuthContext {
@@ -31,13 +33,38 @@ export interface CompanyChoice {
 export type LoginResult =
   | { status: 'authenticated'; accessToken: string; company: CompanyChoice }
   | { status: 'choose_company'; preAuthToken: string; companies: CompanyChoice[] }
-  | { status: 'mfa_required'; mfaToken: string };
+  | { status: 'mfa_required'; mfaToken: string }
+  /** This company mandates MFA (Auth/Billing Platform Phase 3) and the account doesn't have it enabled yet. */
+  | { status: 'mfa_setup_required'; setupToken: string }
+  /** This company enforces a password-expiry window and the account's password has aged past it. */
+  | { status: 'password_expired'; changeToken: string };
+
+interface LoginUser {
+  id: string;
+  username: string;
+  tokenVersion: number;
+  email: string | null;
+  fullName: string;
+  mfaEnabledAt: Date | null;
+  passwordChangedAt: Date;
+}
+
+interface LoginExtra {
+  usedBackupCode?: boolean;
+  rememberMe?: boolean;
+  isNewDeviceLogin?: boolean;
+  loginMethod?: LoginMethod;
+}
+
+/** What finishLoginForMembership needs to know about the destination company. */
+interface MembershipWithSecurity {
+  id: string;
+  companyId: string;
+  company: { id: string; name: string; securitySettings: { mfaRequired: boolean; passwordExpiryDays: number | null } | null };
+}
 
 const PRE_AUTH_EXPIRES_IN = '5m';
 const MFA_CHALLENGE_EXPIRES_IN = '5m';
-const SESSION_EXPIRES_IN_MS = 12 * 60 * 60 * 1000; // 12h — matches JWT_EXPIRES_IN's default
-const REMEMBER_ME_EXPIRES_IN = '30d';
-const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const DUMMY_HASH = '$2b$10$invalidsaltinvalidsaltinvalidsaltuz';
 
 @Injectable()
@@ -50,6 +77,8 @@ export class AuthService {
     private readonly mail: AuthMailService,
     private readonly sessions: AuthSessionsService,
     private readonly recovery: AuthRecoveryService,
+    private readonly passwordPolicy: PasswordPolicyService,
+    private readonly policyGate: AuthPolicyGateService,
     private readonly audit: AuditService,
     private readonly mfa: MfaService,
     private readonly oidc: OidcVerifierService,
@@ -255,7 +284,7 @@ export class AuthService {
    * require a second factor, or whether the login is already complete.
    */
   private async proceedPastFirstFactor(
-    user: { id: string; username: string; tokenVersion: number; email: string | null; fullName: string; mfaEnabledAt: Date | null },
+    user: LoginUser,
     deviceFingerprint: string | undefined,
     rememberMe: boolean,
     loginMethod: LoginMethod,
@@ -333,18 +362,14 @@ export class AuthService {
   }
 
   /** Resolve company access after all authentication factors have passed. */
-  private async completeLogin(
-    user: { id: string; username: string; tokenVersion: number; email: string | null; fullName: string },
-    context: AuthContext,
-    extra: { usedBackupCode?: boolean; rememberMe?: boolean; isNewDeviceLogin?: boolean; loginMethod?: LoginMethod } = {},
-  ): Promise<LoginResult> {
+  private async completeLogin(user: LoginUser, context: AuthContext, extra: LoginExtra = {}): Promise<LoginResult> {
     const memberships = await this.prisma.withUser(user.id, (tx) =>
       tx.companyMembership.findMany({
         // A suspended company (FleetHQ admin action, 21-Admin-Platform/Overview.md)
         // blocks login exactly like an archived one — suspension is meant to
         // actually stop access, not just flip a DB column.
         where: { userId: user.id, archivedAt: null, company: { archivedAt: null, suspendedAt: null } },
-        include: { company: true },
+        include: { company: { include: { securitySettings: true } } },
       }),
     );
 
@@ -359,37 +384,13 @@ export class AuthService {
       });
     }
 
-    if (extra.isNewDeviceLogin && user.email) {
-      void this.mail.sendNewDeviceLogin(user.email, user.fullName, context).catch(() => undefined);
-    }
-
     if (memberships.length === 1) {
-      const membership = memberships[0];
-      this.logger.info(
-        { event: 'auth.login_succeeded', username: user.username, userId: user.id, companyId: membership.companyId },
-        'Login succeeded',
-      );
-      const accessToken = await this.issueSessionToken(user.id, membership.companyId, membership.id, user.tokenVersion, {
-        ip: context.ip,
-        userAgent: context.userAgent,
-        rememberMe: extra.rememberMe,
-      });
-      void this.audit.recordSystem({
-        companyId: membership.companyId,
-        action: AUDIT_ACTIONS.LOGIN_SUCCEEDED,
-        actorUserId: user.id,
-        actorLabel: user.username,
-        ip: context.ip,
-        requestId: context.requestId,
-        metadata: this.loginAuditMetadata(extra),
-      });
-      return {
-        status: 'authenticated',
-        accessToken,
-        company: { id: membership.company.id, name: membership.company.name },
-      };
+      return this.finishLoginForMembership(user, memberships[0], context, extra);
     }
 
+    // Multi-company: the destination company isn't known yet, so no per-
+    // company policy (mandatory MFA, password expiry) can be checked here —
+    // it's checked once selectCompany() resolves which one was picked.
     const preAuthPayload: PreAuthJwtPayload = {
       sub: user.id,
       preAuth: true,
@@ -423,18 +424,7 @@ export class AuthService {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'Invalid or expired token.' });
     }
 
-    const membership = await this.prisma.withUser(payload.sub, (tx) =>
-      tx.companyMembership.findFirst({
-        where: {
-          userId: payload.sub,
-          companyId,
-          archivedAt: null,
-          company: { archivedAt: null, suspendedAt: null },
-        },
-        include: { company: true, user: { select: { tokenVersion: true, username: true, email: true, fullName: true } } },
-      }),
-    );
-
+    const membership = await this.resolveActiveMembership(payload.sub, companyId);
     if (!membership) {
       this.logger.warn(
         { event: 'auth.login_denied', userId: payload.sub, companyId, reason: 'no_company_access' },
@@ -445,71 +435,71 @@ export class AuthService {
         message: 'No active membership for that company.',
       });
     }
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+
+    return this.finishLoginForMembership(user, membership, context, {
+      rememberMe: payload.rememberMe,
+      isNewDeviceLogin: payload.isNewDeviceLogin,
+      loginMethod: payload.loginMethod,
+    });
+  }
+
+  /**
+   * Shared tail for every path that reaches a resolved, single company
+   * membership (a single-company login, a multi-company user's
+   * select-company step, or resuming after a policy-gate action closes) —
+   * checks that company's own security policy (Auth/Billing Platform Phase
+   * 3) before finally issuing a session, and is the one place the
+   * new-device-login alert email fires (previously duplicated between
+   * completeLogin and selectCompany for the multi-company case).
+   */
+  private async finishLoginForMembership(user: LoginUser, membership: MembershipWithSecurity, context: AuthContext, extra: LoginExtra): Promise<LoginResult> {
+    const blocked = this.policyGate.checkPolicy(user, membership, extra);
+    if (blocked) return blocked;
+
+    if (extra.isNewDeviceLogin && user.email) {
+      void this.mail.sendNewDeviceLogin(user.email, user.fullName, context).catch(() => undefined);
+    }
 
     this.logger.info(
-      { event: 'auth.login_succeeded', userId: payload.sub, companyId: membership.companyId },
-      'Login succeeded (company selected)',
+      { event: 'auth.login_succeeded', username: user.username, userId: user.id, companyId: membership.companyId },
+      'Login succeeded',
     );
-    const accessToken = await this.issueSessionToken(payload.sub, membership.companyId, membership.id, membership.user.tokenVersion, {
+    const accessToken = await this.sessions.issueSessionToken(user.id, membership.companyId, membership.id, user.tokenVersion, {
       ip: context.ip,
       userAgent: context.userAgent,
-      rememberMe: payload.rememberMe,
+      rememberMe: extra.rememberMe,
     });
     void this.audit.recordSystem({
       companyId: membership.companyId,
       action: AUDIT_ACTIONS.LOGIN_SUCCEEDED,
-      actorUserId: payload.sub,
-      actorLabel: membership.user.username,
+      actorUserId: user.id,
+      actorLabel: user.username,
       ip: context.ip,
       requestId: context.requestId,
-      metadata: this.loginAuditMetadata({ loginMethod: payload.loginMethod }),
+      metadata: this.loginAuditMetadata(extra),
     });
-
-    if (payload.isNewDeviceLogin && membership.user.email) {
-      void this.mail.sendNewDeviceLogin(membership.user.email, membership.user.fullName, context).catch(() => undefined);
-    }
-
-    return {
-      status: 'authenticated',
-      accessToken,
-      company: { id: membership.company.id, name: membership.company.name },
-    };
+    return { status: 'authenticated', accessToken, company: { id: membership.company.id, name: membership.company.name } };
   }
 
   /**
-   * Public so CompaniesService can mint an immediate session token right
-   * after signup provisions a brand-new company — "10 minutes to first
-   * value" (00-Company/Mission.md) means signup shouldn't require a separate
-   * login round-trip straight after creating the account. Also used by the
-   * FleetHQ admin platform's impersonation feature (21-Admin-Platform/Overview.md),
-   * which passes a short `expiresIn` override — an impersonation session
-   * should never carry the same 12h lifetime as a real login.
-   *
-   * Always creates a real UserSession row and embeds its id as the JWT's
-   * `sid` claim — JwtStrategy checks that row on every request (see its doc
-   * comment), so any token minted without one would be rejected on first use.
+   * A user's active membership in one specific (active, non-suspended)
+   * company, with what finishLoginForMembership needs. Deliberately doesn't
+   * join `user` here even though it lives on the same row family — this
+   * query runs inside `prisma.withUser` (only `app.current_user_id` set),
+   * and the `users` table's RLS policy has no "visible to self" branch, only
+   * a `current_company_id` one, so any join through it comes back null and
+   * trips Prisma's own required-relation consistency check. Callers fetch
+   * `User` separately via `systemPrisma`, the same pattern already used
+   * everywhere else in this file.
    */
-  async issueSessionToken(
-    userId: string,
-    companyId: string,
-    membershipId: string,
-    tokenVersion: number,
-    opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string } = {},
-  ): Promise<string> {
-    const sessionLifetimeMs = opts.rememberMe ? REMEMBER_ME_SESSION_EXPIRES_IN_MS : SESSION_EXPIRES_IN_MS;
-    const session = await this.systemPrisma.userSession.create({
-      data: {
-        userId,
-        companyId,
-        membershipId,
-        ipAddress: opts.ip ?? 'unknown',
-        userAgent: opts.userAgent ?? null,
-        expiresAt: new Date(Date.now() + sessionLifetimeMs),
-      },
-    });
-    const payload: JwtPayload = { sub: userId, companyId, membershipId, tv: tokenVersion, sid: session.id };
-    const expiresIn = opts.expiresIn ?? (opts.rememberMe ? REMEMBER_ME_EXPIRES_IN : undefined);
-    return expiresIn ? this.jwt.sign(payload, { expiresIn }) : this.jwt.sign(payload);
+  private async resolveActiveMembership(userId: string, companyId: string): Promise<MembershipWithSecurity | null> {
+    return this.prisma.withUser(userId, (tx) =>
+      tx.companyMembership.findFirst({
+        where: { userId, companyId, archivedAt: null, company: { archivedAt: null, suspendedAt: null } },
+        include: { company: { include: { securitySettings: true } } },
+      }),
+    );
   }
 
   /**
@@ -530,7 +520,7 @@ export class AuthService {
         where: { id: membershipId },
         include: {
           user: true,
-          company: true,
+          company: { include: { securitySettings: true } },
           role: { include: { permissions: { include: { permission: true } } } },
         },
       });
@@ -561,6 +551,10 @@ export class AuthService {
         email: membership.user.email,
         emailVerified: !!membership.user.emailVerifiedAt,
         mfaEnabled: !!membership.user.mfaEnabledAt,
+        // Auth/Billing Platform Phase 3: lets the Profile page disable "turn
+        // MFA off" and explain why, instead of only discovering the policy
+        // the next time this account tries to log in without it.
+        mfaRequiredByCompany: !!membership.company.securitySettings?.mfaRequired,
         company: {
           id: membership.company.id,
           name: membership.company.name,
@@ -571,6 +565,60 @@ export class AuthService {
         permissions: membership.role.permissions.map((rp) => rp.permission.key).sort(),
         operator,
       };
+    });
+  }
+
+  // ── Policy-gate actions (Auth/Billing Platform Phase 3) ─────────────────────
+  // A login blocked by finishLoginForMembership (mfa_setup_required /
+  // password_expired) hands the frontend a short-lived token instead of a
+  // session; these three endpoints close that gap and then resume issuing
+  // the session exactly where the blocked login left off.
+
+  /** Step 1 of forced MFA enrolment: issue the secret + otpauth URI, same as the normal self-service flow. */
+  async beginPolicyMfaSetup(setupToken: string) {
+    const payload = this.policyGate.verifyPolicyToken(setupToken, 'mfa_setup');
+    return this.mfa.beginEnrollment(payload.sub);
+  }
+
+  /** Step 2: confirm the code (activating MFA), then finish the login it was blocking. */
+  async confirmPolicyMfaSetup(setupToken: string, code: string, context: AuthContext = {}): Promise<LoginResult & { backupCodes: string[] }> {
+    const payload = this.policyGate.verifyPolicyToken(setupToken, 'mfa_setup');
+    const { backupCodes } = await this.mfa.confirmEnrollment(payload.sub, code);
+    const result = await this.resumeLoginAfterPolicyAction(payload, context);
+    return { ...result, backupCodes };
+  }
+
+  /**
+   * Set a new password when a login was redirected here by this company's
+   * password-expiry policy, then finish the login. Reuses the same history/
+   * reuse-prevention and "kill every other session" treatment as a
+   * self-service reset, since the account's password is genuinely changing.
+   */
+  async changeExpiredPassword(changeToken: string, newPassword: string, context: AuthContext = {}): Promise<LoginResult> {
+    const payload = this.policyGate.verifyPolicyToken(changeToken, 'password_expired');
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+    await this.passwordPolicy.assertNotReused(user.id, newPassword, user.passwordHash);
+    await this.passwordPolicy.recordPreviousHash(user.id, user.passwordHash);
+    await this.systemPrisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date(), tokenVersion: { increment: 1 } },
+    });
+    await this.sessions.revokeAllSessions(user.id);
+    void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: user.id, actorLabel: user.username, ip: context.ip, requestId: context.requestId });
+    return this.resumeLoginAfterPolicyAction(payload, context);
+  }
+
+  /** Re-resolve the membership a policy-action token was minted for and finish issuing its session. */
+  private async resumeLoginAfterPolicyAction(payload: PolicyActionPayload, context: AuthContext): Promise<LoginResult> {
+    const membership = await this.resolveActiveMembership(payload.sub, payload.companyId);
+    if (!membership || membership.id !== payload.membershipId) {
+      throw new UnauthorizedException({ code: 'NO_COMPANY_ACCESS', message: 'No active membership for that company.' });
+    }
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+    return this.finishLoginForMembership(user, membership, context, {
+      rememberMe: payload.rememberMe,
+      isNewDeviceLogin: payload.isNewDeviceLogin,
+      loginMethod: payload.loginMethod,
     });
   }
 

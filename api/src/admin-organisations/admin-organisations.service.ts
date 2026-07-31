@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
-import { AuthService } from '../auth/auth.service';
+import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
 
@@ -14,7 +14,7 @@ export class AdminOrganisationsService {
   constructor(
     private readonly adminPrisma: AdminPrismaService,
     private readonly audit: AdminAuditService,
-    private readonly authService: AuthService,
+    private readonly sessions: AuthSessionsService,
   ) {}
 
   private statusWhere(status: AdminOrganisationsQueryDto['status']): Prisma.CompanyWhereInput {
@@ -237,7 +237,7 @@ export class AdminOrganisationsService {
       throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND', message: 'No active membership for that user in this organisation.' });
     }
 
-    const accessToken = await this.authService.issueSessionToken(membership.userId, id, membership.id, membership.user.tokenVersion, {
+    const accessToken = await this.sessions.issueSessionToken(membership.userId, id, membership.id, membership.user.tokenVersion, {
       ip: context.ip,
       userAgent: context.userAgent,
       expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN,

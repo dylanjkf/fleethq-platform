@@ -3,7 +3,8 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
-import { AuthService, LoginResult } from '../auth/auth.service';
+import type { LoginResult } from '../auth/auth.service';
+import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { provisionCompany } from './provision-company';
@@ -15,7 +16,7 @@ export class CompaniesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly timeline: TimelineService,
-    private readonly authService: AuthService,
+    private readonly sessions: AuthSessionsService,
     private readonly authTokens: AuthTokensService,
     private readonly authMail: AuthMailService,
   ) {}
@@ -52,7 +53,7 @@ export class CompaniesService {
 
       return {
         status: 'authenticated',
-        accessToken: await this.authService.issueSessionToken(
+        accessToken: await this.sessions.issueSessionToken(
           result.adminUserId,
           result.companyId,
           result.adminMembershipId,

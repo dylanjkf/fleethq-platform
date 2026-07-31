@@ -8,6 +8,8 @@ import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
 import { AuthRecoveryService } from './auth-recovery.service';
+import { PasswordPolicyService } from './password-policy.service';
+import { AuthPolicyGateService } from './auth-policy-gate.service';
 import { MfaService } from './mfa/mfa.service';
 import { OidcVerifierService } from './oidc-verifier.service';
 import { WebauthnService } from './webauthn/webauthn.service';
@@ -34,11 +36,13 @@ import { NotificationsModule } from '../notifications/notifications.module';
     AuthMailService,
     AuthSessionsService,
     AuthRecoveryService,
+    PasswordPolicyService,
+    AuthPolicyGateService,
     MfaService,
     OidcVerifierService,
     WebauthnService,
     JwtStrategy,
   ],
-  exports: [AuthService, AuthTokensService, AuthMailService, AuthRecoveryService],
+  exports: [AuthService, AuthTokensService, AuthMailService, AuthRecoveryService, AuthSessionsService],
 })
 export class AuthModule {}

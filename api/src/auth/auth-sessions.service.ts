@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
+import type { JwtPayload } from './jwt-payload.interface';
 import type { AuthContext } from './auth.service';
 
 export interface UserSessionSummary {
@@ -16,22 +18,56 @@ export interface UserSessionSummary {
 }
 
 const TRUSTED_DEVICE_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_EXPIRES_IN_MS = 12 * 60 * 60 * 1000; // 12h — matches JWT_EXPIRES_IN's default
+const REMEMBER_ME_EXPIRES_IN = '30d';
+const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
- * Session listing/revocation and "remember this device" bookkeeping for
- * customer User accounts — split out of AuthService (Auth/Billing Platform
- * Phase 2) purely to keep that file under this repo's line-count lint rule;
- * this is bookkeeping around a session, not authentication itself. Session
- * *creation* (AuthService.issueSessionToken, which signs the JWT) stays on
- * AuthService, since CompaniesService/AdminOrganisationsService already
- * depend on it there.
+ * Session listing/revocation, "remember this device" bookkeeping, and session
+ * *creation* (`issueSessionToken`, which signs the JWT) for customer User
+ * accounts — split out of AuthService (Auth/Billing Platform Phase 2) purely
+ * to keep that file under this repo's line-count lint rule. `issueSessionToken`
+ * is also called directly by CompaniesService (signup) and
+ * AdminOrganisationsService (impersonation), same as when it lived on
+ * AuthService — moved here (Phase 3) so AuthService's own policy-gate helper
+ * (`finishLoginForMembership`) can call it without AuthSessionsService having
+ * to depend back on AuthService, which would be circular.
  */
 @Injectable()
 export class AuthSessionsService {
   constructor(
     private readonly systemPrisma: SystemPrismaService,
     private readonly audit: AuditService,
+    private readonly jwt: JwtService,
   ) {}
+
+  /**
+   * Always creates a real UserSession row and embeds its id as the JWT's
+   * `sid` claim — JwtStrategy checks that row on every request (see its doc
+   * comment), so any token minted without one would be rejected on first use.
+   */
+  async issueSessionToken(
+    userId: string,
+    companyId: string,
+    membershipId: string,
+    tokenVersion: number,
+    opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string } = {},
+  ): Promise<string> {
+    const sessionLifetimeMs = opts.rememberMe ? REMEMBER_ME_SESSION_EXPIRES_IN_MS : SESSION_EXPIRES_IN_MS;
+    const session = await this.systemPrisma.userSession.create({
+      data: {
+        userId,
+        companyId,
+        membershipId,
+        ipAddress: opts.ip ?? 'unknown',
+        userAgent: opts.userAgent ?? null,
+        expiresAt: new Date(Date.now() + sessionLifetimeMs),
+      },
+    });
+    const payload: JwtPayload = { sub: userId, companyId, membershipId, tv: tokenVersion, sid: session.id };
+    const expiresIn = opts.expiresIn ?? (opts.rememberMe ? REMEMBER_ME_EXPIRES_IN : undefined);
+    return expiresIn ? this.jwt.sign(payload, { expiresIn }) : this.jwt.sign(payload);
+  }
 
   async listSessions(userId: string, currentSessionId: string): Promise<UserSessionSummary[]> {
     const sessions = await this.systemPrisma.userSession.findMany({

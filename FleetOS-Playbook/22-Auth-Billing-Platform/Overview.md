@@ -17,7 +17,7 @@ drifts into describing features that don't exist yet.
 |---|---|---|
 | 1 | Customer session & device management | **Done** |
 | 2 | Magic link + social login + WebAuthn-ready architecture | **Done** |
-| 3 | Password policy depth + per-org mandatory-MFA policy | Planned |
+| 3 | Password policy depth + per-org mandatory-MFA policy | **Done** |
 | 4 | Registration depth (org intake fields) + named role templates | Planned |
 | 5 | Full Stripe webhook coverage + failed-payment handling | Planned |
 | 6 | Billing & security notification emails | Planned |
@@ -200,3 +200,104 @@ known and accepted boundary.
 
 **Not yet covered by this phase**: per-org mandatory-MFA policy (Phase 3),
 login-history browsing UI (still just audit-log rows).
+
+## Phase 3: Password policy depth + per-org mandatory-MFA policy
+
+Two independent company-level security policies, both evaluated at the one
+point a login resolves to a specific company membership — not at
+`proceedPastFirstFactor`, which runs before a company is even known for a
+multi-company user.
+
+**Data model** — `prisma/migrations/20260731080000_password_policy_mfa_policy/`:
+
+- `users.password_changed_at` — stamped on every password set (signup,
+  reset, self-service change, expiry-forced change) so a policy can measure
+  age; backfilled to `now()` for existing rows.
+- `user_password_history` — the previous password hash, inserted right
+  before it's overwritten. Not RLS-protected (fleetos_auth-only, same
+  treatment as `users`/`auth_tokens`) and capped at the 5 most recent
+  entries per user (`PasswordPolicyService`), pruned on write.
+- `company_security_settings` — one row per company: `mfaRequired boolean`,
+  `passwordExpiryDays int?` (`null` = no expiry). RLS-protected with the
+  same two-branch (`current_company_id` OR membership-based
+  `current_user_id`) policy as `companies` itself — deliberately not
+  single-branch like most per-company settings tables, because it's the one
+  settings row read *during login*, before a tenant context is chosen
+  (`AuthService.resolveActiveMembership` runs inside
+  `PrismaService.withUser`, not `withTenant`).
+
+**Password reuse prevention is a fixed global rule, not per-company** —
+`PasswordPolicyService.assertNotReused` checks the current hash plus the
+last 5 in `user_password_history`. A per-company configurable history depth
+had no non-arbitrary answer for a user who belongs to more than one company,
+so this one rule applies everywhere a password is set.
+
+**The policy gate** (`AuthPolicyGateService.checkPolicy`) runs inside a new
+shared tail, `AuthService.finishLoginForMembership` — called from
+`completeLogin`'s single-membership branch, `selectCompany` (the
+multi-company chooser's second step), and the two policy-resume endpoints
+below — so a mandatory policy is enforced identically regardless of how many
+steps a login took to reach a specific company. It checks MFA first, then
+password expiry:
+
+- **Mandatory MFA**: if the company requires it and the account doesn't have
+  TOTP enabled, blocks with `mfa_setup_required` + a short-lived
+  (15-minute) `setupToken` — unless the login method was `webauthn`, which
+  (per Phase 2's own rationale) already counts as MFA-equivalent on its own.
+- **Password expiry**: if `passwordChangedAt` is older than
+  `passwordExpiryDays`, blocks with `password_expired` + a `changeToken`.
+- The two can chain: finishing forced MFA enrolment re-runs the same policy
+  check, so an account that's *also* carrying a stale password comes back
+  `password_expired` rather than silently completing the login.
+
+Both tokens are stateless short-lived JWTs (`PolicyActionPayload`, mirroring
+the existing `MfaChallengePayload`/`PreAuthJwtPayload` pattern) — no new
+server-side session-state table, and (like those existing tokens)
+deliberately reusable within their validity window rather than single-use.
+
+**New endpoints** on `AuthController`: `POST /v1/auth/mfa-setup/begin` +
+`/confirm` (issue the TOTP secret, then confirm a code — activating MFA and
+resuming the blocked login), `POST /v1/auth/password-expired/change` (set a
+new password and resume), and `POST /v1/auth/change-password` (authenticated
+self-service change, requiring the current password — the other password-
+change path, independent of any policy gate).
+
+**Company security policy management**: a new `SecuritySettingsModule`
+(`GET`/`PUT /v1/security-settings`, gated on the new
+`security_policy:manage` permission) lets an Administrator toggle
+`mfaRequired` and set/clear `passwordExpiryDays` (7–365 days). `GET
+/v1/auth/me` gained `mfaRequiredByCompany` so the Profile page can explain
+*why* "Disable MFA" is unavailable, rather than the account only discovering
+the policy the next time it tries to log in without it.
+
+**Frontend** (`fleethq-frontend`): `LoginPage` gained `mfa_setup_required`
+and `password_expired` states — the former shows the TOTP secret and a code
+field (reusing `MfaCard`'s enrollment copy), then one-time backup codes
+before resuming; the latter is a new-password form. Both states, and the
+company chooser (`selectCompany`), now funnel through the same
+`handleResult` router instead of assuming `authenticated` is the only
+possible outcome — a real, if narrow, pre-existing gap in the multi-company
+chooser path that this phase's chaining behavior newly exercises. `MfaCard`
+disables "Disable" (with an explanation) when `mfaRequiredByCompany` is
+true. New `ChangePasswordCard` on the Profile page. New "Security" tab on
+the Administration page (`SecuritySettingsTab`) for editing the company
+policy, gated on `security_policy:manage`.
+
+**A note on due diligence**: implementing `selectCompany`'s equivalent policy
+check surfaced a genuine pre-existing bug, unrelated to this phase's own
+code — `resolveActiveMembership`'s query joined `User` through a
+`PrismaService.withUser`-scoped transaction (only `app.current_user_id` set),
+but the `users` table's RLS policy has no "visible to self" branch, only a
+`current_company_id` one (unlike `companies`/`company_memberships`, which
+got a two-branch policy fix earlier). The join silently failed RLS and
+Prisma's own consistency check raised on the missing required relation.
+Zero e2e tests had ever exercised `POST /v1/auth/select-company` before this
+phase added one. Fixed by fetching `User` via `SystemPrismaService`
+(the pattern already used everywhere else in `auth.service.ts`) instead of
+joining it through the RLS-scoped query, rather than touching the
+security-sensitive `users` RLS policy itself.
+
+**Not yet covered by this phase**: an audit-log-driven view of *when* a
+company's security policy last changed beyond the existing
+`security.settings_updated` audit action; a grace period between a password
+expiring and the account being blocked (it blocks immediately at next login).

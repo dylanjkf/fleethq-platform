@@ -92,6 +92,7 @@ export const PERMISSIONS = {
   PRIVACY_ERASE_DATA: 'privacy:erase',
 
   AUDIT_VIEW: 'audit:view',
+  SECURITY_POLICY_MANAGE: 'security_policy:manage',
 
   FLEET_GRAPH_VIEW: 'fleet_graph:view',
 
@@ -226,6 +227,7 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
   { key: PERMISSIONS.PRIVACY_EXPORT_DATA, category: 'Privacy', description: "Export an operator's personal data (Australian Privacy Act access request)" },
   { key: PERMISSIONS.PRIVACY_ERASE_DATA, category: 'Privacy', description: "Erase an archived operator's personal data (Australian Privacy Act erasure request)" },
   { key: PERMISSIONS.AUDIT_VIEW, category: 'Security', description: 'View the company security audit log' },
+  { key: PERMISSIONS.SECURITY_POLICY_MANAGE, category: 'Security', description: 'Set the company MFA-required and password-expiry policy' },
 
   { key: PERMISSIONS.FLEET_GRAPH_VIEW, category: 'Fleet Graph', description: "View an entity's Fleet Graph relationships (e.g. which operators have operated this asset)" },
 

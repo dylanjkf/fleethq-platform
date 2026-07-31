@@ -18,6 +18,7 @@ import { WarehouseModule } from './warehouse/warehouse.module';
 import { MaintenanceSchedulesModule } from './maintenance-schedules/maintenance-schedules.module';
 import { DashboardLayoutsModule } from './dashboard-layouts/dashboard-layouts.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { SecuritySettingsModule } from './security-settings/security-settings.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { ChecklistsModule } from './checklists/checklists.module';
@@ -152,6 +153,7 @@ import { validateEnv } from './config/env.validation';
     MaintenanceSchedulesModule,
     DashboardLayoutsModule,
     AnalyticsModule,
+    SecuritySettingsModule,
     ComplianceModule,
     ChecklistsModule,
     ChecklistBundlesModule,

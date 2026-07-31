@@ -6,7 +6,7 @@ import { AuthModule } from '../auth/auth.module';
 import { AdminCustomerUsersModule } from '../admin-customer-users/admin-customer-users.module';
 
 /**
- * Imports the customer-facing AuthModule for its `AuthService.issueSessionToken`
+ * Imports the customer-facing AuthModule for its `AuthSessionsService.issueSessionToken`
  * — the impersonation feature mints a real customer session token, so it
  * reuses the exact same signing path a normal login uses (short-lived, via
  * an explicit `expiresIn` override) rather than re-implementing JWT signing

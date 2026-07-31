@@ -115,6 +115,7 @@ model Company {
   utilisationSnapshots         UtilisationSnapshot[]
   analyticsSetting             AnalyticsSetting?
   analyticsOverrides           AnalyticsOverride[]
+  securitySettings             CompanySecuritySettings?
   warehouseMachines            WarehouseMachine[]
   warehouseMachineLogs         WarehouseMachineLog[]
   fatigueRuleSets              FatigueRuleSet[]
@@ -330,6 +331,11 @@ model User {
   /// invalidates every existing session for the account (not just for the
   /// token's remaining lifetime).
   tokenVersion            Int       @default(0) @map("token_version")
+  /// When the active `passwordHash` was set (creation counts as a "set").
+  /// Compared against a company's `CompanySecuritySettings.passwordExpiryDays`
+  /// at login (Auth/Billing Platform Phase 3) to decide whether a rotation is
+  /// due — see AuthService's `finishLoginForMembership`.
+  passwordChangedAt       DateTime  @default(now()) @map("password_changed_at")
   /// Multi-factor auth (TOTP). `mfaSecret` is the base32 shared secret;
   /// `mfaEnabledAt` is set only once a code is confirmed, and MFA is enforced at
   /// login iff it is non-null (a secret without it is a pending enrolment).
@@ -359,6 +365,7 @@ model User {
   operatorLink            Operator?
   formSubmissions         FormSubmission[]      @relation("FormSubmittedByUser")
   authTokens              AuthToken[]
+  passwordHistory         PasswordHistory[]
   sessions                UserSession[]
   trustedDevices          UserTrustedDevice[]
   oauthIdentities         OAuthIdentity[]
@@ -401,6 +408,27 @@ model AuthToken {
 
   @@index([userId, type])
   @@map("auth_tokens")
+}
+
+/// Hashes that were once a User's active password, per Auth/Billing Platform
+/// Phase 3 (22-Auth-Billing-Platform/Overview.md) — a row is inserted for the
+/// OLD hash right before it's overwritten by a new one, and the table is
+/// trimmed to the most recent `PasswordPolicyService.HISTORY_LIMIT` rows per
+/// user. Checked on every password *change* (reset, self-service change,
+/// expiry-forced change — never on initial account creation, which has
+/// nothing to compare against) so a rotation can't just cycle back to a
+/// recently-used password. Same treatment as `auth_tokens`: no RLS, touched
+/// only by the pre-tenant-context fleetos_auth role.
+model PasswordHistory {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("user_password_history")
 }
 
 /// One issued login for a customer User — "session management"/"logout from
@@ -1576,6 +1604,42 @@ model AnalyticsSetting {
   company Company @relation(fields: [companyId], references: [id])
 
   @@map("analytics_settings")
+}
+
+/// Per-company security policy (Auth/Billing Platform Phase 3,
+/// 22-Auth-Billing-Platform/Overview.md): absent row = platform defaults
+/// (MFA optional, no password expiry), same "no row = defaults" convention
+/// as AnalyticsSetting/BarcodeScanConfig. Unlike those two, this table must
+/// also be readable from the pre-tenant-context login path — AuthService
+/// resolves it via `PrismaService.withUser` (app.current_user_id, no company
+/// context chosen yet) right alongside the Company row itself, to decide
+/// whether *this* login needs to be redirected into forced MFA enrolment or
+/// a forced password change before a session is issued. So its RLS policy
+/// mirrors `companies`' own two-branch policy (current tenant OR a member of
+/// the company), not the plain single-branch shape every other per-company
+/// settings table uses.
+model CompanySecuritySettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @unique @map("company_id") @db.Uuid
+  /// Every member must have MFA (TOTP) enabled to finish a login. A verified
+  /// WebAuthn/passkey assertion also satisfies this — see
+  /// AuthService.completeWebauthnLogin's doc comment for why a passkey is
+  /// treated as already MFA-equivalent.
+  mfaRequired        Boolean  @default(false) @map("mfa_required")
+  /// A member's password must have been set within this many days of their
+  /// most recent login attempt, or the login is redirected into a forced
+  /// change first. `null` = no expiry (the default — most companies never
+  /// opt into this). Evaluated regardless of which first factor was used
+  /// (password, magic link, social, passkey) — the concern is a stale
+  /// password sitting there as a fallback credential, not which method this
+  /// particular login happened to use.
+  passwordExpiryDays Int?     @map("password_expiry_days")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("company_security_settings")
 }
 
 /// A manual override of a live dashboard percentage (utilisation / compliance-

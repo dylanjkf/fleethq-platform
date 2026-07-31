@@ -4,15 +4,16 @@ import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
+import { PasswordPolicyService } from './password-policy.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 
 /**
- * Account recovery — email verification and password reset — split out of
- * AuthService (Auth/Billing Platform Phase 2) purely to keep that file under
- * this repo's line-count lint rule; these are self-contained token-redemption
- * flows, not part of the login decision tree itself. Still used by AuthService
- * (login()/requestMagicLink() need `findUserByIdentifier`) and directly by
- * AuthController for the four public recovery endpoints.
+ * Account recovery — email verification, password reset, and (Auth/Billing
+ * Platform Phase 3) self-service password change — split out of AuthService
+ * (Phase 2) purely to keep that file under this repo's line-count lint rule;
+ * these are self-contained password/email flows, not part of the login
+ * decision tree itself. Still used by AuthService (login()/requestMagicLink()
+ * need `findUserByIdentifier`) and directly by AuthController.
  */
 @Injectable()
 export class AuthRecoveryService {
@@ -21,6 +22,7 @@ export class AuthRecoveryService {
     private readonly authTokens: AuthTokensService,
     private readonly mail: AuthMailService,
     private readonly sessions: AuthSessionsService,
+    private readonly passwordPolicy: PasswordPolicyService,
     private readonly audit: AuditService,
   ) {}
 
@@ -52,6 +54,9 @@ export class AuthRecoveryService {
     if (!userId) {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This reset link is invalid or has expired.' });
     }
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await this.passwordPolicy.assertNotReused(userId, newPassword, user.passwordHash);
+    await this.passwordPolicy.recordPreviousHash(userId, user.passwordHash);
     await this.systemPrisma.user.update({
       where: { id: userId },
       // A completed reset also proves control of the mailbox, so mark the email
@@ -60,6 +65,7 @@ export class AuthRecoveryService {
       // at once (a reset is exactly when you want existing sessions killed).
       data: {
         passwordHash: await bcrypt.hash(newPassword, 10),
+        passwordChangedAt: new Date(),
         emailVerifiedAt: new Date(),
         failedLoginCount: 0,
         lockedUntil: null,
@@ -72,6 +78,27 @@ export class AuthRecoveryService {
     // doesn't keep showing devices that look "active" and aren't.
     await this.sessions.revokeAllSessions(userId);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_RESET, actorUserId: userId, targetType: 'user', targetId: userId });
+  }
+
+  /**
+   * Self-service change while already logged in — requires knowledge of the
+   * current password (unlike resetPassword's emailed-token proof). Unlike a
+   * reset, this doesn't bump tokenVersion or revoke other sessions: the
+   * caller already proved they're the legitimate account holder by supplying
+   * the current password, so there's no "possible compromise" to contain.
+   */
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
+      throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'That current password is incorrect.' });
+    }
+    await this.passwordPolicy.assertNotReused(userId, newPassword, user.passwordHash);
+    await this.passwordPolicy.recordPreviousHash(userId, user.passwordHash);
+    await this.systemPrisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date() },
+    });
+    void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
   }
 
   async verifyEmail(token: string): Promise<void> {

@@ -2,6 +2,17 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 3 (password policy + per-org mandatory MFA)
+
+Two company-level security policies (`22-Auth-Billing-Platform/Overview.md`), both checked at the one point a login resolves to a specific company membership.
+
+- **Mandatory MFA + password expiry**: a new `company_security_settings` table (`mfaRequired`, `passwordExpiryDays`) checked by a new standalone, unit-tested `AuthPolicyGateService` from a shared `AuthService.finishLoginForMembership` tail — called from single-company login, the multi-company chooser, and two new policy-resume endpoints alike, so the policy applies identically no matter how many steps a login takes. A verified WebAuthn login still counts as MFA-equivalent (per Phase 2). The two checks can chain: finishing forced MFA enrolment re-runs the check, so a stale password on the same account still comes back `password_expired` rather than silently completing.
+- **Password reuse prevention**: a new `PasswordPolicyService` + `user_password_history` table (capped at the 5 most recent hashes) — a fixed global rule rather than per-company-configurable, since a multi-company user has no non-arbitrary way to pick whose depth applies.
+- **New endpoints**: `POST /v1/auth/mfa-setup/begin`+`/confirm`, `POST /v1/auth/password-expired/change` (all resume a blocked login via short-lived `PolicyActionPayload` JWTs), and `POST /v1/auth/change-password` (authenticated self-service change). New `GET`/`PUT /v1/security-settings` (gated on `security_policy:manage`) for an Administrator to set the company's own policy.
+- **A genuine pre-existing bug caught along the way**: `selectCompany`'s membership lookup joined `User` through an RLS-scoped query that silently failed — the `users` table's RLS policy has no "visible to self" branch, only `companies`/`company_memberships` got that fix previously — because zero e2e tests had ever exercised that endpoint before this phase added one. Fixed by fetching `User` via `SystemPrismaService` instead (the pattern already used everywhere else in `auth.service.ts`), without touching the security-sensitive RLS policy itself.
+- **`fleethq-frontend`**: `LoginPage` gained `mfa_setup_required`/`password_expired` states (and its `handleResult` router now also covers the multi-company chooser path, previously assuming `authenticated` was the only possible outcome). New `ChangePasswordCard` on the Profile page; `MfaCard` disables "Disable" when the company mandates MFA. New "Security" tab on the Administration page.
+- Verified: backend `jest` (520/521 — same pre-existing `integrations.e2e-spec.ts` webhook-timeout flake noted in Phase 1/2, confirmed unrelated by re-running it against the pre-Phase-3 tree) plus a new `auth-security-policy.e2e-spec.ts` and `auth-policy-gate.service.spec.ts`; frontend `tsc`/`oxlint`/`vitest` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 2 (magic link + social login + WebAuthn)
 
 Three new first-factor login methods (`22-Auth-Billing-Platform/Overview.md`), all reusing Phase 1's device-trust/MFA gate — except WebAuthn, which deliberately bypasses it.

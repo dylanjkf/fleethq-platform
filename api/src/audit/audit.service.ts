@@ -11,6 +11,8 @@ export const AUDIT_ACTIONS = {
   LOGIN_FAILED: 'auth.login_failed',
   LOGIN_LOCKED_OUT: 'auth.account_locked',
   PASSWORD_RESET: 'auth.password_reset',
+  /** Self-service (while logged in) or expiry-forced — as opposed to PASSWORD_RESET's emailed-token flow. */
+  PASSWORD_CHANGED: 'auth.password_changed',
   MFA_ENABLED: 'auth.mfa_enabled',
   MFA_DISABLED: 'auth.mfa_disabled',
   MFA_CHALLENGE_FAILED: 'auth.mfa_challenge_failed',
@@ -27,6 +29,7 @@ export const AUDIT_ACTIONS = {
   USER_ACCESS_REVOKED: 'access.user_access_revoked',
   PERMISSION_DENIED: 'access.permission_denied',
   GPS_KEY_ROTATED: 'gps.device_key_rotated',
+  SECURITY_SETTINGS_UPDATED: 'security.settings_updated',
   ANALYTICS_SETTINGS_UPDATED: 'analytics.settings_updated',
   ANALYTICS_SETTINGS_RESET: 'analytics.settings_reset',
   ANALYTICS_OVERRIDE_SET: 'analytics.override_set',
@@ -64,6 +67,7 @@ const STDOUT_MIRRORED_ACTIONS = new Set<string>([
   AUDIT_ACTIONS.USER_ACCESS_REVOKED,
   AUDIT_ACTIONS.DATA_EXPORTED,
   AUDIT_ACTIONS.DATA_ERASED,
+  AUDIT_ACTIONS.SECURITY_SETTINGS_UPDATED,
 ]);
 
 export interface AuditEventInput {

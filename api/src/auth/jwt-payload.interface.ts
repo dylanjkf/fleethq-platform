@@ -64,6 +64,27 @@ export interface MfaChallengePayload {
   loginMethod?: LoginMethod;
 }
 
+/**
+ * Short-lived token issued when a login's first factor (and second, if the
+ * account itself has MFA enabled) succeeded, but the destination company's
+ * own security policy isn't satisfied yet — mandatory MFA not yet enrolled,
+ * or the password has aged past that company's expiry window (Auth/Billing
+ * Platform Phase 3, 22-Auth-Billing-Platform/Overview.md). Only usable
+ * against the matching `POST /v1/auth/mfa-setup/*` or
+ * `/v1/auth/password-expired/change` endpoint; carries what's needed to
+ * finish issuing the session once the gap is closed — see
+ * AuthService.finishLoginForMembership / resolveActiveMembership.
+ */
+export interface PolicyActionPayload {
+  sub: string;
+  membershipId: string;
+  companyId: string;
+  purpose: 'mfa_setup' | 'password_expired';
+  rememberMe?: boolean;
+  isNewDeviceLogin?: boolean;
+  loginMethod?: LoginMethod;
+}
+
 export interface AuthenticatedRequestUser {
   userId: string;
   companyId: string;

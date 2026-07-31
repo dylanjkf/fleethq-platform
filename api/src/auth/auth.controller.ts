@@ -17,6 +17,7 @@ import { MfaCodeDto, MfaVerifyDto } from './dto/mfa.dto';
 import { MagicLinkConsumeDto, MagicLinkRequestDto } from './dto/magic-link.dto';
 import { OAuthLoginDto } from './dto/oauth-login.dto';
 import { WebauthnAuthenticateVerifyDto, WebauthnRegisterVerifyDto } from './webauthn/dto/webauthn.dto';
+import { ChangePasswordDto, PasswordExpiredChangeDto, PolicyMfaSetupBeginDto, PolicyMfaSetupConfirmDto } from './dto/security-policy.dto';
 
 const URL_PROVIDER_TO_ENUM: Record<string, OAuthProvider> = { google: OAuthProvider.GOOGLE, microsoft: OAuthProvider.MICROSOFT };
 
@@ -179,6 +180,44 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   loginWithWebauthn(@Body() dto: WebauthnAuthenticateVerifyDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
     return this.authService.loginWithWebauthn(dto.challengeToken, dto.response, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
+  }
+
+  // ── Policy-gate actions (Auth/Billing Platform Phase 3) ──────────────────
+  // Public + throttled — no session exists yet, and each carries its own
+  // short-lived, single-purpose token in place of one (same treatment as
+  // mfa/verify, magic-link/consume, and webauthn/login/verify above).
+
+  @Public()
+  @Post('mfa-setup/begin')
+  @HttpCode(HttpStatus.OK)
+  beginPolicyMfaSetup(@Body() dto: PolicyMfaSetupBeginDto) {
+    return this.authService.beginPolicyMfaSetup(dto.setupToken);
+  }
+
+  @Public()
+  @Throttle(AUTH_THROTTLE)
+  @Post('mfa-setup/confirm')
+  @HttpCode(HttpStatus.OK)
+  confirmPolicyMfaSetup(@Body() dto: PolicyMfaSetupConfirmDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
+    return this.authService.confirmPolicyMfaSetup(dto.setupToken, dto.code, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
+  }
+
+  @Public()
+  @Throttle(AUTH_THROTTLE)
+  @Post('password-expired/change')
+  @HttpCode(HttpStatus.OK)
+  changeExpiredPassword(@Body() dto: PasswordExpiredChangeDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
+    return this.authService.changeExpiredPassword(dto.changeToken, dto.newPassword, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
+  }
+
+  /** Self-service change while already logged in — requires the current password. */
+  @AuthenticatedOnly()
+  @Throttle(AUTH_THROTTLE)
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  async changePassword(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: ChangePasswordDto) {
+    await this.recovery.changePassword(user.userId, dto.currentPassword, dto.newPassword);
+    return { ok: true };
   }
 
   /**
