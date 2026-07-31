@@ -22,7 +22,7 @@ drifts into describing features that don't exist yet.
 | 5 | Full Stripe webhook coverage + failed-payment handling | **Done** |
 | 6 | Billing & security notification emails | **Done** |
 | 7 | Customer self-service billing portal UI | **Done** |
-| 8 | GST / Australian tax invoicing | Planned |
+| 8 | GST / Australian tax invoicing | **Done** |
 | 9 | Usage & feature limit depth | Planned |
 | 10 | Security hardening depth | Planned |
 | 11 | Final verify, docs, CHANGELOG | Planned |
@@ -558,3 +558,51 @@ a company was created via the real signup endpoint, moved to `PAST_DUE` with
 `paymentFailureCount=3` directly in Postgres (bypassing Stripe, which isn't
 configured in this dev environment), and the rendered `/billing` page was
 screenshotted and its text content asserted against.
+
+## Phase 8: GST / Australian tax invoicing
+
+FleetOS still never generates, stores, or emails an invoice PDF itself —
+that stays Stripe's job, unchanged from the "billing & subscription"
+design's original decision. This phase is entirely about feeding Stripe the
+two pieces of Australian-specific data it needs to produce a *compliant*
+tax invoice once it's actually generating them, plus the config gate that
+keeps this inert until a deployment is genuinely ready for it.
+
+- **The buyer's ABN**: `BillingService.createCustomer` attaches `Company.abn`
+  (Phase 4's registration-depth field, already ABR-checksum-validated by
+  `IsAbn`) as a Stripe `au_abn` tax ID whenever a *new* Stripe Customer is
+  created. This is unconditional — attaching a known tax ID to a customer
+  never requires Stripe Tax to be enabled on the account, so there's no
+  reason to gate it behind config. **Known boundary**: only covers the
+  moment the customer is first created; a company that adds its ABN to
+  FleetOS *after* its Stripe customer already exists doesn't get it
+  retroactively attached by this code — they can add one themselves via the
+  Stripe billing portal's own tax ID field.
+- **Automatic GST calculation**: a new `STRIPE_TAX_ENABLED` config flag
+  (`BillingService.isTaxEnabled()`) adds `automatic_tax: {enabled: true}`
+  and `tax_id_collection: {enabled: true}` to `createCheckoutSession`'s
+  Session params. **Deliberately gated, not unconditional**: Stripe rejects
+  `automatic_tax` as an API error unless the account has actually enabled
+  Stripe Tax and registered for Australian GST in the Dashboard first — a
+  real business/compliance step (see the go-live checklist addition in
+  `19-Billing/Billing_And_Subscriptions.md`), not something a code change
+  can satisfy. Shipping this always-on would have broken every checkout
+  session on every deployment that hasn't done that registration yet,
+  including this codebase's own dev/CI environment.
+- Once both pieces are live in a real Stripe account, Stripe's own invoices
+  carry the seller's registered ABN (from Stripe's business settings), the
+  buyer's ABN (attached here), and the GST line-item breakdown the ATO
+  requires for a tax invoice — all without FleetOS reimplementing any of
+  Stripe's own invoicing/tax-calculation logic.
+
+**Testing**: `billing.service.spec.ts` (new — the first unit spec for
+`BillingService` itself, mirroring `admin-billing.service.spec.ts`'s
+mocked-Stripe-client approach) asserts: the ABN is attached exactly when a
+new customer is created and present; no `tax_id_data` is sent when the ABN
+is absent; no customer-create call happens at all for a company that
+already has a Stripe customer (so no accidental double-attach risk); and
+`automatic_tax`/`tax_id_collection` appear on the Checkout Session only when
+`STRIPE_TAX_ENABLED=true`. `test/billing.e2e-spec.ts`'s existing 13 tests
+were re-run as a regression check (all still pass — this phase only
+extends `createCheckoutSession`/`createCustomer`'s optional params, no
+existing behavior changed).

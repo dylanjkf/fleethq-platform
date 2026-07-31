@@ -2,6 +2,15 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 8 (GST / Australian tax invoicing)
+
+FleetOS still never generates its own invoices — this phase feeds Stripe the two pieces of Australian-specific data it needs to produce a compliant tax invoice once it is generating one, plus a config gate to keep it inert until a deployment is actually ready.
+
+- `BillingService.createCustomer` attaches a company's ABN (`Company.abn`, collected since Phase 4) as a Stripe `au_abn` tax ID whenever a new Stripe Customer is created — unconditional, since attaching a known tax ID never needs Stripe Tax enabled. Known boundary: only covers customer-creation time, not retroactively for an ABN added later (the customer can add one themselves via the Stripe portal).
+- New `STRIPE_TAX_ENABLED` config flag adds `automatic_tax`/`tax_id_collection` to Checkout Sessions — **deliberately gated**, because Stripe rejects those parameters as an API error unless Stripe Tax + an Australian GST registration are already configured in the Dashboard; shipping this always-on would have broken checkout everywhere that hasn't done that registration, including this repo's own dev/CI.
+- Go-live checklist (`19-Billing/Billing_And_Subscriptions.md`) gained the GST-registration step this flag depends on.
+- Verified: new `billing.service.spec.ts` (mocked-Stripe-client unit spec, mirroring `admin-billing.service.spec.ts`'s pattern) covers ABN-attached/ABN-absent/no-double-attach-for-existing-customer/tax-flag-on-vs-off; `test/billing.e2e-spec.ts`'s existing 13 tests re-run clean as a regression check; `tsc`/`eslint` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 7 (customer self-service billing portal UI)
 
 `fleethq-frontend`'s Billing page already existed (subscription badge, plan picker, Stripe portal button) — this phase closes the gap Phase 5/6 opened: the backend computed/emailed dunning-cycle detail since Phase 5, but the frontend `BillingStatus` type never picked up the three new fields, so the UI silently had no way to show them.

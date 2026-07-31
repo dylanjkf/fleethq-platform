@@ -49,6 +49,21 @@ export class BillingService {
     return !!this.config.get<string>('STRIPE_SECRET_KEY');
   }
 
+  /**
+   * Auth/Billing Platform Phase 8 (GST / Australian tax invoicing): gates
+   * `automatic_tax`/`tax_id_collection` on Checkout Sessions. Deliberately a
+   * separate flag from `isConfigured()` — a deployment can have real Stripe
+   * keys (billing works) without yet having enabled Stripe Tax and an
+   * Australian GST registration in the Stripe Dashboard (a real business/
+   * compliance step, not a code change — see 19-Billing/Billing_And_Subscriptions.md's
+   * go-live checklist). Passing `automatic_tax: {enabled: true}` to Stripe
+   * before that registration exists is a Stripe API error, so this must stay
+   * opt-in rather than always-on.
+   */
+  isTaxEnabled(): boolean {
+    return this.config.get<string>('STRIPE_TAX_ENABLED') === 'true';
+  }
+
   private getStripe(): Stripe {
     if (!this.stripeClient) {
       const secretKey = this.config.get<string>('STRIPE_SECRET_KEY');
@@ -189,11 +204,11 @@ export class BillingService {
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({
         where: { id: companyId },
-        select: { id: true, name: true, stripeCustomerId: true },
+        select: { id: true, name: true, abn: true, stripeCustomerId: true },
       }),
     );
 
-    const customerId = company.stripeCustomerId ?? (await this.createCustomer(stripe, company.id, company.name));
+    const customerId = company.stripeCustomerId ?? (await this.createCustomer(stripe, company.id, company.name, company.abn));
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -203,6 +218,11 @@ export class BillingService {
       cancel_url: cancelUrl,
       client_reference_id: company.id,
       subscription_data: { metadata: { fleetosCompanyId: company.id } },
+      // GST/Australian tax invoicing (Phase 8) — see isTaxEnabled()'s own doc
+      // comment for why this can't be unconditional. `tax_id_collection` lets
+      // a company add/confirm its ABN at checkout even if it wasn't already
+      // on file (createCustomer already attaches one if it was).
+      ...(this.isTaxEnabled() ? { automatic_tax: { enabled: true }, tax_id_collection: { enabled: true } } : {}),
     });
 
     if (!session.url) {
@@ -233,10 +253,21 @@ export class BillingService {
     return { url: session.url };
   }
 
-  private async createCustomer(stripe: Stripe, companyId: string, companyName: string): Promise<string> {
+  /**
+   * `abn` (Phase 4's registration-depth field, already ABR-checksum-validated
+   * by `IsAbn`) is attached as a Stripe `au_abn` tax ID at Customer-creation
+   * time so it appears on Stripe's own GST tax invoices — this is independent
+   * of `isTaxEnabled()`/`automatic_tax`, since attaching a known tax ID never
+   * requires the account to have Stripe Tax enabled. Only covers the
+   * moment the customer is first created — a company that adds its ABN
+   * later doesn't get it retroactively attached here; they can add one
+   * themselves via the Stripe billing portal's own tax ID field instead.
+   */
+  private async createCustomer(stripe: Stripe, companyId: string, companyName: string, abn: string | null): Promise<string> {
     const customer = await stripe.customers.create({
       name: companyName,
       metadata: { fleetosCompanyId: companyId },
+      ...(abn ? { tax_id_data: [{ type: 'au_abn', value: abn.replace(/\s/g, '') }] } : {}),
     });
     await this.prisma.withTenant(companyId, (tx) =>
       tx.company.update({ where: { id: companyId }, data: { stripeCustomerId: customer.id } }),
