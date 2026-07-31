@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
@@ -31,7 +31,11 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
-    return this.authService.login(dto.username, dto.password, { ip, requestId: req.id });
+    return this.authService.login(dto.username, dto.password, dto.deviceFingerprint, dto.rememberMe ?? false, {
+      ip,
+      userAgent: req.get('user-agent') ?? null,
+      requestId: req.id,
+    });
   }
 
   /**
@@ -44,7 +48,11 @@ export class AuthController {
   @Post('select-company')
   @HttpCode(HttpStatus.OK)
   selectCompany(@Body() dto: SelectCompanyDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
-    return this.authService.selectCompany(dto.preAuthToken, dto.companyId, { ip, requestId: req.id });
+    return this.authService.selectCompany(dto.preAuthToken, dto.companyId, {
+      ip,
+      userAgent: req.get('user-agent') ?? null,
+      requestId: req.id,
+    });
   }
 
   /**
@@ -99,6 +107,35 @@ export class AuthController {
     return { ok: true };
   }
 
+  // ── Session & device management ──────────────────────────────────────────
+
+  @Get('sessions')
+  @AuthenticatedOnly()
+  listSessions(@CurrentUser() user: AuthenticatedRequestUser) {
+    return this.authService.listSessions(user.userId, user.sessionId);
+  }
+
+  @Delete('sessions/:sessionId')
+  @AuthenticatedOnly()
+  @HttpCode(HttpStatus.OK)
+  async revokeSession(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param('sessionId') sessionId: string,
+    @Ip() ip: string,
+    @Req() req: Request & { id?: string },
+  ) {
+    await this.authService.revokeSession(user.userId, sessionId, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
+    return { ok: true };
+  }
+
+  @Post('logout')
+  @AuthenticatedOnly()
+  @HttpCode(HttpStatus.OK)
+  async logout(@CurrentUser() user: AuthenticatedRequestUser, @Ip() ip: string, @Req() req: Request & { id?: string }) {
+    await this.authService.logout(user.userId, user.companyId, user.sessionId, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
+    return { ok: true };
+  }
+
   // ── MFA ───────────────────────────────────────────────────────────────────
 
   /**
@@ -112,7 +149,11 @@ export class AuthController {
   @Post('mfa/verify')
   @HttpCode(HttpStatus.OK)
   verifyMfa(@Body() dto: MfaVerifyDto, @Ip() ip: string, @Req() req: Request & { id?: string }) {
-    return this.authService.verifyMfaChallenge(dto.mfaToken, dto.code, { ip, requestId: req.id });
+    return this.authService.verifyMfaChallenge(dto.mfaToken, dto.code, dto.rememberDevice ?? false, {
+      ip,
+      userAgent: req.get('user-agent') ?? null,
+      requestId: req.id,
+    });
   }
 
   /** Begin enrolment (authenticated): returns the secret + otpauth URI for the authenticator app. */

@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Ip, Patch, Post, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -25,8 +26,8 @@ export class CompaniesController {
   @Public()
   @Throttle({ default: { limit: process.env.NODE_ENV === 'test' ? 100_000 : 10, ttl: 60_000 } })
   @Post()
-  signup(@Body() dto: SignupCompanyDto) {
-    return this.companiesService.signup(dto);
+  signup(@Body() dto: SignupCompanyDto, @Ip() ip: string, @Req() req: Request) {
+    return this.companiesService.signup(dto, { ip, userAgent: req.get('user-agent') ?? null });
   }
 
   @Get('me')

@@ -20,7 +20,7 @@ export class CompaniesService {
     private readonly authMail: AuthMailService,
   ) {}
 
-  async signup(dto: SignupCompanyDto): Promise<LoginResult> {
+  async signup(dto: SignupCompanyDto, context: { ip?: string | null; userAgent?: string | null } = {}): Promise<LoginResult> {
     const companyId = randomUUID();
 
     try {
@@ -52,12 +52,13 @@ export class CompaniesService {
 
       return {
         status: 'authenticated',
-        accessToken: this.authService.issueSessionToken(
+        accessToken: await this.authService.issueSessionToken(
           result.adminUserId,
           result.companyId,
           result.adminMembershipId,
           // Brand-new user — tokenVersion starts at 0.
           0,
+          { ip: context.ip, userAgent: context.userAgent },
         ),
         company: { id: result.companyId, name: result.companyName },
       };

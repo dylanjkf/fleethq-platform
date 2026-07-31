@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'crypto';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
@@ -13,12 +14,24 @@ import { JwtPayload, MfaChallengePayload, PreAuthJwtPayload } from './jwt-payloa
 /** Optional request context threaded from the controller for audit records. */
 export interface AuthContext {
   ip?: string | null;
+  userAgent?: string | null;
   requestId?: string | null;
 }
 
 export interface CompanyChoice {
   id: string;
   name: string;
+}
+
+export interface UserSessionSummary {
+  id: string;
+  ipAddress: string;
+  userAgent: string | null;
+  deviceLabel: string | null;
+  createdAt: Date;
+  lastSeenAt: Date;
+  expiresAt: Date;
+  isCurrent: boolean;
 }
 
 export type LoginResult =
@@ -28,6 +41,11 @@ export type LoginResult =
 
 const PRE_AUTH_EXPIRES_IN = '5m';
 const MFA_CHALLENGE_EXPIRES_IN = '5m';
+const SESSION_EXPIRES_IN_MS = 12 * 60 * 60 * 1000; // 12h — matches JWT_EXPIRES_IN's default
+const REMEMBER_ME_EXPIRES_IN = '30d';
+const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
+const TRUSTED_DEVICE_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
+const DUMMY_HASH = '$2b$10$invalidsaltinvalidsaltinvalidsaltuz';
 
 @Injectable()
 export class AuthService {
@@ -42,7 +60,13 @@ export class AuthService {
     @InjectPinoLogger(AuthService.name) private readonly logger: PinoLogger,
   ) {}
 
-  async login(username: string, password: string, context: AuthContext = {}): Promise<LoginResult> {
+  async login(
+    username: string,
+    password: string,
+    deviceFingerprint: string | undefined,
+    rememberMe: boolean,
+    context: AuthContext = {},
+  ): Promise<LoginResult> {
     // `users` has RLS scoped to "shares a company with the requester" (see
     // the users RLS migration) — which doesn't apply yet, since we don't know
     // who's asking. This is the one legitimate use of the narrow, SELECT-only
@@ -74,7 +98,7 @@ export class AuthService {
     if (!user || user.archivedAt) {
       // Still run a bcrypt compare against a dummy hash so response timing
       // doesn't leak whether the username exists.
-      await bcrypt.compare(password, '$2b$10$invalidsaltinvalidsaltinvalidsaltuz');
+      await bcrypt.compare(password, DUMMY_HASH);
       throw invalidCredentials(user ? 'account_archived' : 'unknown_username');
     }
 
@@ -82,7 +106,7 @@ export class AuthService {
     // password (dummy compare keeps timing flat), and the lock clears on its
     // own once the window passes.
     if (user.lockedUntil && user.lockedUntil > new Date()) {
-      await bcrypt.compare(password, '$2b$10$invalidsaltinvalidsaltinvalidsaltuz');
+      await bcrypt.compare(password, DUMMY_HASH);
       throw invalidCredentials('account_locked');
     }
 
@@ -110,14 +134,24 @@ export class AuthService {
       await this.systemPrisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
     }
 
-    // Second factor. If MFA is active, no session or company-choice token is
-    // issued until a valid code is presented to POST /v1/auth/mfa/verify.
-    if (user.mfaEnabledAt) {
-      const mfaPayload: MfaChallengePayload = { sub: user.id, mfa: true };
+    // A device this user has previously verified and asked to be remembered
+    // skips the MFA challenge. Any other device — regardless of whether MFA
+    // is even enabled on the account — is flagged for the new-device-login
+    // alert email; this is a known, accepted simplification (it fires on
+    // every login for an account that never opts into remembering a device),
+    // not a precise "have we truly never seen this device" signal.
+    const deviceTrusted = deviceFingerprint ? await this.isDeviceTrusted(user.id, deviceFingerprint) : false;
+    const isNewDeviceLogin = !!deviceFingerprint && !deviceTrusted;
+
+    // Second factor. If MFA is active and the device isn't trusted, no session
+    // or company-choice token is issued until a valid code is presented to
+    // POST /v1/auth/mfa/verify.
+    if (user.mfaEnabledAt && !deviceTrusted) {
+      const mfaPayload: MfaChallengePayload = { sub: user.id, mfa: true, deviceFingerprint, rememberMe, isNewDeviceLogin };
       return { status: 'mfa_required', mfaToken: this.jwt.sign(mfaPayload, { expiresIn: MFA_CHALLENGE_EXPIRES_IN }) };
     }
 
-    return this.completeLogin(user, context);
+    return this.completeLogin(user, context, { rememberMe, isNewDeviceLogin });
   }
 
   /**
@@ -125,7 +159,7 @@ export class AuthService {
    * a password-only login would (single company → session; multiple → company
    * chooser). The challenge token is single-purpose and short-lived.
    */
-  async verifyMfaChallenge(mfaToken: string, code: string, context: AuthContext = {}): Promise<LoginResult> {
+  async verifyMfaChallenge(mfaToken: string, code: string, rememberDevice: boolean, context: AuthContext = {}): Promise<LoginResult> {
     let payload: MfaChallengePayload;
     try {
       payload = this.jwt.verify<MfaChallengePayload>(mfaToken);
@@ -151,14 +185,30 @@ export class AuthService {
       });
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
     }
-    return this.completeLogin(user, context, { usedBackupCode: result.usedBackupCode });
+
+    if (rememberDevice && payload.deviceFingerprint) {
+      await this.trustDevice(user.id, payload.deviceFingerprint);
+      void this.audit.recordSystem({
+        action: AUDIT_ACTIONS.DEVICE_TRUSTED,
+        actorUserId: user.id,
+        actorLabel: user.username,
+        ip: context.ip,
+        requestId: context.requestId,
+      });
+    }
+
+    return this.completeLogin(user, context, {
+      usedBackupCode: result.usedBackupCode,
+      rememberMe: payload.rememberMe,
+      isNewDeviceLogin: payload.isNewDeviceLogin,
+    });
   }
 
   /** Resolve company access after all authentication factors have passed. */
   private async completeLogin(
-    user: { id: string; username: string; tokenVersion: number },
+    user: { id: string; username: string; tokenVersion: number; email: string | null; fullName: string },
     context: AuthContext,
-    extra: { usedBackupCode?: boolean } = {},
+    extra: { usedBackupCode?: boolean; rememberMe?: boolean; isNewDeviceLogin?: boolean } = {},
   ): Promise<LoginResult> {
     const memberships = await this.prisma.withUser(user.id, (tx) =>
       tx.companyMembership.findMany({
@@ -181,12 +231,21 @@ export class AuthService {
       });
     }
 
+    if (extra.isNewDeviceLogin && user.email) {
+      void this.mail.sendNewDeviceLogin(user.email, user.fullName, context).catch(() => undefined);
+    }
+
     if (memberships.length === 1) {
       const membership = memberships[0];
       this.logger.info(
         { event: 'auth.login_succeeded', username: user.username, userId: user.id, companyId: membership.companyId },
         'Login succeeded',
       );
+      const accessToken = await this.issueSessionToken(user.id, membership.companyId, membership.id, user.tokenVersion, {
+        ip: context.ip,
+        userAgent: context.userAgent,
+        rememberMe: extra.rememberMe,
+      });
       void this.audit.recordSystem({
         companyId: membership.companyId,
         action: AUDIT_ACTIONS.LOGIN_SUCCEEDED,
@@ -198,12 +257,17 @@ export class AuthService {
       });
       return {
         status: 'authenticated',
-        accessToken: this.issueSessionToken(user.id, membership.companyId, membership.id, user.tokenVersion),
+        accessToken,
         company: { id: membership.company.id, name: membership.company.name },
       };
     }
 
-    const preAuthPayload: PreAuthJwtPayload = { sub: user.id, preAuth: true };
+    const preAuthPayload: PreAuthJwtPayload = {
+      sub: user.id,
+      preAuth: true,
+      rememberMe: extra.rememberMe,
+      isNewDeviceLogin: extra.isNewDeviceLogin,
+    };
     return {
       status: 'choose_company',
       preAuthToken: this.jwt.sign(preAuthPayload, { expiresIn: PRE_AUTH_EXPIRES_IN }),
@@ -230,7 +294,7 @@ export class AuthService {
           archivedAt: null,
           company: { archivedAt: null, suspendedAt: null },
         },
-        include: { company: true, user: { select: { tokenVersion: true, username: true } } },
+        include: { company: true, user: { select: { tokenVersion: true, username: true, email: true, fullName: true } } },
       }),
     );
 
@@ -249,6 +313,11 @@ export class AuthService {
       { event: 'auth.login_succeeded', userId: payload.sub, companyId: membership.companyId },
       'Login succeeded (company selected)',
     );
+    const accessToken = await this.issueSessionToken(payload.sub, membership.companyId, membership.id, membership.user.tokenVersion, {
+      ip: context.ip,
+      userAgent: context.userAgent,
+      rememberMe: payload.rememberMe,
+    });
     void this.audit.recordSystem({
       companyId: membership.companyId,
       action: AUDIT_ACTIONS.LOGIN_SUCCEEDED,
@@ -257,9 +326,14 @@ export class AuthService {
       ip: context.ip,
       requestId: context.requestId,
     });
+
+    if (payload.isNewDeviceLogin && membership.user.email) {
+      void this.mail.sendNewDeviceLogin(membership.user.email, membership.user.fullName, context).catch(() => undefined);
+    }
+
     return {
       status: 'authenticated',
-      accessToken: this.issueSessionToken(payload.sub, membership.companyId, membership.id, membership.user.tokenVersion),
+      accessToken,
       company: { id: membership.company.id, name: membership.company.name },
     };
   }
@@ -272,9 +346,31 @@ export class AuthService {
    * FleetHQ admin platform's impersonation feature (21-Admin-Platform/Overview.md),
    * which passes a short `expiresIn` override — an impersonation session
    * should never carry the same 12h lifetime as a real login.
+   *
+   * Always creates a real UserSession row and embeds its id as the JWT's
+   * `sid` claim — JwtStrategy checks that row on every request (see its doc
+   * comment), so any token minted without one would be rejected on first use.
    */
-  issueSessionToken(userId: string, companyId: string, membershipId: string, tokenVersion: number, expiresIn?: string): string {
-    const payload: JwtPayload = { sub: userId, companyId, membershipId, tv: tokenVersion };
+  async issueSessionToken(
+    userId: string,
+    companyId: string,
+    membershipId: string,
+    tokenVersion: number,
+    opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string } = {},
+  ): Promise<string> {
+    const sessionLifetimeMs = opts.rememberMe ? REMEMBER_ME_SESSION_EXPIRES_IN_MS : SESSION_EXPIRES_IN_MS;
+    const session = await this.systemPrisma.userSession.create({
+      data: {
+        userId,
+        companyId,
+        membershipId,
+        ipAddress: opts.ip ?? 'unknown',
+        userAgent: opts.userAgent ?? null,
+        expiresAt: new Date(Date.now() + sessionLifetimeMs),
+      },
+    });
+    const payload: JwtPayload = { sub: userId, companyId, membershipId, tv: tokenVersion, sid: session.id };
+    const expiresIn = opts.expiresIn ?? (opts.rememberMe ? REMEMBER_ME_EXPIRES_IN : undefined);
     return expiresIn ? this.jwt.sign(payload, { expiresIn }) : this.jwt.sign(payload);
   }
 
@@ -340,6 +436,80 @@ export class AuthService {
     });
   }
 
+  // ── Session & device management (Auth/Billing Platform Phase 1) ─────────────
+
+  async listSessions(userId: string, currentSessionId: string): Promise<UserSessionSummary[]> {
+    const sessions = await this.systemPrisma.userSession.findMany({
+      where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { lastSeenAt: 'desc' },
+    });
+    return sessions.map((s) => ({
+      id: s.id,
+      ipAddress: s.ipAddress,
+      userAgent: s.userAgent,
+      deviceLabel: s.deviceLabel,
+      createdAt: s.createdAt,
+      lastSeenAt: s.lastSeenAt,
+      expiresAt: s.expiresAt,
+      isCurrent: s.id === currentSessionId,
+    }));
+  }
+
+  /** Self-service session revocation — a user killing one of their own other devices. */
+  async revokeSession(userId: string, sessionId: string, context: AuthContext = {}): Promise<void> {
+    const session = await this.systemPrisma.userSession.findFirst({ where: { id: sessionId, userId } });
+    if (!session || session.revokedAt) return;
+    await this.systemPrisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date() } });
+    void this.audit.recordSystem({
+      companyId: session.companyId,
+      action: AUDIT_ACTIONS.SESSION_REVOKED,
+      actorUserId: userId,
+      targetType: 'user_session',
+      targetId: sessionId,
+      ip: context.ip,
+      requestId: context.requestId,
+    });
+  }
+
+  async logout(userId: string, companyId: string, sessionId: string, context: AuthContext = {}): Promise<void> {
+    await this.systemPrisma.userSession.updateMany({ where: { id: sessionId, userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    void this.audit.recordSystem({
+      companyId,
+      action: AUDIT_ACTIONS.LOGOUT,
+      actorUserId: userId,
+      targetType: 'user_session',
+      targetId: sessionId,
+      ip: context.ip,
+      requestId: context.requestId,
+    });
+  }
+
+  private async isDeviceTrusted(userId: string, deviceFingerprint: string): Promise<boolean> {
+    const device = await this.systemPrisma.userTrustedDevice.findUnique({
+      where: { userId_deviceFingerprint: { userId, deviceFingerprint: this.hashFingerprint(deviceFingerprint) } },
+    });
+    return !!device && device.expiresAt > new Date();
+  }
+
+  private async trustDevice(userId: string, deviceFingerprint: string): Promise<void> {
+    const hashed = this.hashFingerprint(deviceFingerprint);
+    await this.systemPrisma.userTrustedDevice.upsert({
+      where: { userId_deviceFingerprint: { userId, deviceFingerprint: hashed } },
+      create: { userId, deviceFingerprint: hashed, expiresAt: new Date(Date.now() + TRUSTED_DEVICE_EXPIRES_IN_MS) },
+      update: { lastUsedAt: new Date(), expiresAt: new Date(Date.now() + TRUSTED_DEVICE_EXPIRES_IN_MS) },
+    });
+  }
+
+  /** Never store a client-supplied identifier verbatim, even though it isn't a credential. */
+  private hashFingerprint(raw: string): string {
+    return createHash('sha256').update(raw).digest('hex');
+  }
+
+  /** Random device id the frontend generates and persists client-side (e.g. localStorage). */
+  static generateDeviceFingerprint(): string {
+    return randomUUID();
+  }
+
   // ── A2 auth completeness: lockout + verification + reset ────────────────────
 
   // Lock the account for LOCK_WINDOW after this many consecutive failures.
@@ -403,6 +573,10 @@ export class AuthService {
       },
     });
     await this.authTokens.invalidateAll(userId, 'PASSWORD_RESET');
+    // tokenVersion alone already blocks every existing JWT (JwtStrategy
+    // rejects a stale `tv`), but revoke the session rows too so listSessions
+    // doesn't keep showing devices that look "active" and aren't.
+    await this.systemPrisma.userSession.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_RESET, actorUserId: userId, targetType: 'user', targetId: userId });
   }
 

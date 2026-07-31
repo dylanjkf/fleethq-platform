@@ -237,13 +237,11 @@ export class AdminOrganisationsService {
       throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND', message: 'No active membership for that user in this organisation.' });
     }
 
-    const accessToken = this.authService.issueSessionToken(
-      membership.userId,
-      id,
-      membership.id,
-      membership.user.tokenVersion,
-      IMPERSONATION_TOKEN_EXPIRES_IN,
-    );
+    const accessToken = await this.authService.issueSessionToken(membership.userId, id, membership.id, membership.user.tokenVersion, {
+      ip: context.ip,
+      userAgent: context.userAgent,
+      expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN,
+    });
 
     await this.audit.record({
       adminUserId: context.adminUserId,

@@ -38,6 +38,16 @@ export class AuthMailService {
     });
   }
 
+  /** Best-effort security alert — fires when a login presents a device
+   *  fingerprint that isn't yet a recognised trusted device for that user. */
+  async sendNewDeviceLogin(to: string, fullName: string, context: { ip?: string | null; userAgent?: string | null }): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: 'New sign-in to your FleetOS account',
+      body: `Hi ${fullName},\n\nWe noticed a sign-in to your FleetOS account from a device we haven't seen before.\n\nIP address: ${context.ip ?? 'unknown'}${context.userAgent ? `\nDevice: ${context.userAgent}` : ''}\n\nIf this was you, no action is needed. If you don't recognise this activity, reset your password immediately from the sign-in page.`,
+    });
+  }
+
   async sendInvite(to: string, fullName: string, companyName: string, token: string): Promise<void> {
     const link = `${this.baseUrl()}/reset-password?token=${encodeURIComponent(token)}&invite=1`;
     await this.channel.sendEmail({

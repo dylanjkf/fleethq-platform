@@ -1,4 +1,4 @@
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class LoginDto {
   @IsString()
@@ -13,4 +13,16 @@ export class LoginDto {
   // huge string is pure DoS surface (hashing/CPU) with no legitimate use.
   @MaxLength(200)
   password!: string;
+
+  /** Client-generated, persisted device id — lets the server recognise a
+   *  returning device (skip MFA if trusted) and detect a genuinely new one. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  deviceFingerprint?: string;
+
+  /** Extends the session/JWT lifetime from 12h to 30 days. */
+  @IsOptional()
+  @IsBoolean()
+  rememberMe?: boolean;
 }

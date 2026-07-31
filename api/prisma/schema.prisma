@@ -359,6 +359,8 @@ model User {
   operatorLink            Operator?
   formSubmissions         FormSubmission[]      @relation("FormSubmittedByUser")
   authTokens              AuthToken[]
+  sessions                UserSession[]
+  trustedDevices          UserTrustedDevice[]
   documentsUploaded       Document[]            @relation("DocumentUploader")
   knowledgeArticles       KnowledgeArticle[]    @relation("KnowledgeAuthor")
   warehouseMachineLogs    WarehouseMachineLog[] @relation("WarehouseLogAuthor")
@@ -392,6 +394,56 @@ model AuthToken {
 
   @@index([userId, type])
   @@map("auth_tokens")
+}
+
+/// One issued login for a customer User — "session management"/"logout from
+/// all devices"/"session revocation". Mirrors AdminSession's shape exactly
+/// (see 21-Admin-Platform/Overview.md), but for customer accounts: the JWT
+/// carries this row's id (`sid`), and `revokedAt`/`expiresAt` are checked on
+/// every request independent of the JWT's own signed expiry, so revoking one
+/// device takes effect on its very next request rather than waiting out the
+/// token's remaining lifetime. `companyId`/`membershipId` pin the company
+/// context this session was issued for — a multi-company user's token (and
+/// so its session) is only ever valid for one company at a time
+/// (12-API/API_Architecture.md), the same rule the JWT payload itself
+/// already enforces. No RLS: touched only by the pre-tenant-context
+/// fleetos_auth role, the same treatment `users`/`auth_tokens` already get.
+model UserSession {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  companyId    String    @map("company_id") @db.Uuid
+  membershipId String    @map("membership_id") @db.Uuid
+  ipAddress    String    @map("ip_address")
+  userAgent    String?   @map("user_agent")
+  deviceLabel  String?   @map("device_label")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastSeenAt   DateTime  @default(now()) @map("last_seen_at")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_sessions")
+}
+
+/// "Remember this device" — skips the MFA challenge on a recognised device
+/// for `expiresAt` (30 days), independent of any one session's lifetime.
+/// Mirrors AdminTrustedDevice's shape/reasoning exactly.
+model UserTrustedDevice {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  /// A hash of a client-generated device id (never raw fingerprinting data at rest).
+  deviceFingerprint String   @map("device_fingerprint")
+  label             String?
+  lastUsedAt        DateTime @default(now()) @map("last_used_at")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceFingerprint])
+  @@map("user_trusted_devices")
 }
 
 /// One browser/device's Web Push registration (04-DriverOS/DriverOS_Overview.md

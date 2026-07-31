@@ -2,6 +2,20 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 1 (customer session & device management)
+
+First phase of an 11-phase initiative (`22-Auth-Billing-Platform/Overview.md`) closing gaps toward a full enterprise-grade auth/billing/subscription platform. This phase mirrors the admin platform's own session model for customer `User` accounts.
+
+- **New tables** `user_sessions` / `user_trusted_devices` (`prisma/migrations/20260731062654_customer_sessions_devices/`), granted only to the narrow `fleetos_auth` role, matching `users`/`auth_tokens`'s existing treatment.
+- **`JwtPayload` gained a `sid` claim** naming the `UserSession` row backing the token; `JwtStrategy.validate()` now checks that row's `revokedAt`/`expiresAt` on every request, independent of the JWT's own signed expiry — the piece that makes "log out" or "revoke this session" take effect immediately instead of waiting out the token's lifetime.
+- **`login()`** accepts an optional `deviceFingerprint` (skips the MFA challenge for a previously-trusted device; triggers a best-effort "new device" email otherwise) and `rememberMe` (extends the session/JWT lifetime from 12h to 30 days, threaded through the MFA-challenge and multi-company pre-auth tokens so it survives however many steps a login takes).
+- **`verifyMfaChallenge()`** accepts `rememberDevice`, upserting a SHA-256-hashed `UserTrustedDevice` row on success.
+- **New endpoints**: `GET /v1/auth/sessions`, `DELETE /v1/auth/sessions/:id` (ownership-checked self-revoke), `POST /v1/auth/logout` (revokes the current token's session row).
+- **`resetPassword()`** now also revokes every session row for that user, so `listSessions` doesn't keep showing devices that look active but can't actually be used (the `tokenVersion` bump already blocked them; this just keeps the UI honest).
+- **`issueSessionToken()`** (shared with `CompaniesService.signup()` and `AdminOrganisationsService.impersonate()`) always creates a real session row now — a token minted without one would be rejected by `JwtStrategy` on first use.
+- **`fleethq-frontend`**: `AuthProvider`/`api/auth.ts` gained a persisted per-browser device fingerprint, a "remember me" login checkbox, a "remember this device" MFA checkbox, a real `logout()` API call, and a new `SessionsCard` on the Profile page (list + revoke), mirroring the admin SPA's own equivalents.
+- Verified: `tsc`/`eslint` clean on every touched file; full backend `jest` suite (494/495 passing — the one failure, `integrations.e2e-spec.ts`'s webhook-delivery test timing out, reproduces identically against the pre-change baseline in an isolated worktree, confirming it's a pre-existing flake unrelated to this change) plus targeted `vitest` runs on the frontend.
+
 ## 2026-07-31 — Repo split: admin/ → fleethq-frontend, driveros/ → fleethq-driveros (Phase 8)
 
 On explicit direction: `driveros/` and `admin/` no longer live in this repo.

@@ -1,4 +1,4 @@
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 /** A submitted second-factor value — a 6-digit TOTP or a backup code. */
 export class MfaCodeDto {
@@ -19,4 +19,9 @@ export class MfaVerifyDto {
   @MinLength(6)
   @MaxLength(20)
   code!: string;
+
+  /** Trust the device this challenge was issued from — skips MFA on it going forward. */
+  @IsOptional()
+  @IsBoolean()
+  rememberDevice?: boolean;
 }

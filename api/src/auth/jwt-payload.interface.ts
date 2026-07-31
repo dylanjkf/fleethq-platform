@@ -18,6 +18,10 @@ export interface JwtPayload {
    *  rejects the token if the user's current version has moved past this
    *  (e.g. after a password reset), giving prompt session revocation. */
   tv: number;
+  /** The UserSession row this token belongs to — checked on every request
+   *  (revokedAt/expiresAt) independent of the JWT's own signed expiry, which
+   *  is what makes per-device session revocation/logout actually work. */
+  sid: string;
 }
 
 /**
@@ -28,6 +32,12 @@ export interface JwtPayload {
 export interface PreAuthJwtPayload {
   sub: string;
   preAuth: true;
+  /** Carried through from the original login() call so the eventual session
+   *  (minted once a company is chosen) still honours "remember me" and the
+   *  new-device-login alert, even though those were decided before the
+   *  company-choice step. */
+  rememberMe?: boolean;
+  isNewDeviceLogin?: boolean;
 }
 
 /**
@@ -38,10 +48,17 @@ export interface PreAuthJwtPayload {
 export interface MfaChallengePayload {
   sub: string;
   mfa: true;
+  /** Client-supplied device fingerprint, carried through so a verified
+   *  challenge can register/refresh a trusted device in one round trip. */
+  deviceFingerprint?: string;
+  rememberMe?: boolean;
+  isNewDeviceLogin?: boolean;
 }
 
 export interface AuthenticatedRequestUser {
   userId: string;
   companyId: string;
   membershipId: string;
+  /** The UserSession row backing this request's JWT — see JwtPayload.sid. */
+  sessionId: string;
 }
