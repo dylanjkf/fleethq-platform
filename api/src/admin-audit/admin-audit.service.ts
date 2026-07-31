@@ -21,6 +21,13 @@ export const ADMIN_AUDIT_ACTIONS = {
   CUSTOMER_USER_UNLOCKED: 'customer_users.unlocked',
   CUSTOMER_USER_MFA_RESET: 'customer_users.mfa_reset',
   CUSTOMER_USER_PASSWORD_RESET_SENT: 'customer_users.password_reset_sent',
+  BILLING_REFUND_ISSUED: 'billing.refund_issued',
+  BILLING_COUPON_APPLIED: 'billing.coupon_applied',
+  BILLING_MANUAL_INVOICE_CREATED: 'billing.manual_invoice_created',
+  BILLING_CREDIT_NOTE_ISSUED: 'billing.credit_note_issued',
+  BILLING_PAYMENT_RETRIED: 'billing.payment_retried',
+  BILLING_SUBSCRIPTION_CANCELED: 'billing.subscription_canceled',
+  BILLING_SUBSCRIPTION_REINSTATED: 'billing.subscription_reinstated',
 } as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[keyof typeof ADMIN_AUDIT_ACTIONS];

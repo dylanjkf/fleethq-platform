@@ -58,6 +58,20 @@ export class BillingService {
     return this.stripeClient;
   }
 
+  /**
+   * Public accessor for the same lazily-initialised Stripe client — used by
+   * the FleetHQ admin platform's billing operations (21-Admin-Platform/Overview.md,
+   * Phase 4: refunds, coupons, manual invoices, credit notes, payment retry,
+   * cancel/reinstate), which need broader Stripe API surface than this
+   * service's own customer-facing methods expose. Centralising client
+   * creation/error-handling here (rather than a second Stripe SDK instance
+   * in the admin module) keeps "billing not configured" behaving identically
+   * everywhere it's checked.
+   */
+  getStripeClient(): Stripe {
+    return this.getStripe();
+  }
+
   async getStatus(companyId: string) {
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({

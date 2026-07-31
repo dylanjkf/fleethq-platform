@@ -22,7 +22,7 @@ yet.
 | 1b | Bootstrap script (first Super Admin) | **Done** |
 | 2 | Organisation + customer-user administration | **Done** |
 | 3 | Executive dashboard (real aggregate data) | **Done** |
-| 4 | Billing operations on top of the existing Stripe integration | Pending |
+| 4 | Billing operations on top of the existing Stripe integration | **Done** |
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | Pending |
 | 6 | Admin frontend SPA | Pending |
 | 7 | Audit-log wiring across every phase, hardening, docs, tests | Pending |
@@ -279,10 +279,77 @@ HTTP API path: auth rejection, real aggregate counts, the
 `billingConfigured: false` path (no Stripe key in this test environment),
 the signups time series, trials-expiring, and query validation.
 
+## Billing operations (Phase 4)
+
+`src/admin-billing/` (`/v1/admin/organisations/:companyId/billing/*`, nested
+under organisations to match the Phase 2 company-scoped-action convention) —
+FleetHQ staff billing operations layered directly on the existing customer
+Stripe integration (`BillingService`), not a second Stripe SDK instance or a
+separate billing data model.
+
+**"Stripe is the source of truth" holds for admin writes too.** Every method
+in `AdminBillingService` only ever reads/acts on Stripe objects and the two
+Stripe id columns on `Company` (`stripeCustomerId`/`stripeSubscriptionId`).
+`Company.subscriptionStatus`/`planPriceId` remain exclusively
+`BillingService.handleWebhookEvent`'s responsibility — an admin refunding an
+invoice or cancelling a subscription changes Stripe's state, and the next
+webhook delivery is what reflects that back onto the `Company` row, exactly
+as it would for a customer-initiated change. No admin billing method writes
+those two columns directly.
+
+| Route | Permission | Notes |
+|---|---|---|
+| `GET /` | `billing:view` | Status: DB subscription status/plan/trial plus, if a live subscription exists and Stripe is configured, a real-time Stripe read (status, `cancelAtPeriodEnd`, current period end, active discounts) |
+| `GET /invoices` | `billing:view` | Stripe's own cursor-paginated invoice list for this company's customer |
+| `POST /refund` `{invoiceId, amountCents?, reason?}` | `billing:manage` | Full or partial refund; resolves the invoice's payment reference itself (see below) |
+| `POST /coupon` `{couponId}` | `billing:manage` | Applies an existing Stripe coupon (created in the Stripe Dashboard/API — this platform doesn't create coupons) to the subscription via `discounts: [{coupon}]`, the current (non-deprecated) Stripe API shape |
+| `POST /manual-invoice` `{description, amountCents, currency?}` | `billing:manage` | Ad hoc one-off charge — an invoice item plus a `send_invoice` (not auto-charged) invoice, finalized immediately. For charges outside the normal subscription cycle, not for changing what the subscription itself bills |
+| `POST /credit-note` `{invoiceId, amountCents, reason?}` | `billing:manage` | Stripe requires an explicit amount — no implicit "full remaining balance" |
+| `POST /retry-payment` `{invoiceId}` | `billing:manage` | `stripe.invoices.pay(...)` |
+| `POST /cancel` `{atPeriodEnd?}` | `billing:manage` | `atPeriodEnd: true` sets `cancel_at_period_end`; omitted/false cancels immediately |
+| `POST /reinstate` | `billing:manage` | Undoes a pending `cancel_at_period_end`. Refuses (409) if the subscription has already fully transitioned to `canceled` — Stripe can't resume a fully-canceled subscription, only unset the flag before that happens, so this errors clearly instead of silently no-op-ing |
+
+**Cross-tenant safety on invoice-scoped actions:** refund/credit-note/
+retry-payment all resolve the invoice via Stripe first, then verify its
+`customer` matches the target company's `stripeCustomerId` before acting —
+the route only scopes by `companyId` in the URL, so without this check an
+admin permitted to act on Company A could pass an arbitrary invoice id
+belonging to Company B.
+
+**Refund payment-reference resolution:** this Stripe SDK version (22.3.2)
+moved `payment_intent` off `Invoice` itself onto the invoice's `payments`
+list (`Stripe.InvoicePayment[]`, each wrapping either a `payment_intent` or
+an out-of-band `charge`) — a real API-shape difference verified directly
+against the vendored `.d.ts` files rather than assumed from older Stripe
+documentation. `AdminBillingService.resolvePaymentReference` reads the
+invoice's paid (or default) `InvoicePayment` entry to find the id a refund
+actually needs.
+
+**Every mutation is audit-logged** (`BILLING_REFUND_ISSUED`,
+`BILLING_COUPON_APPLIED`, `BILLING_MANUAL_INVOICE_CREATED`,
+`BILLING_CREDIT_NOTE_ISSUED`, `BILLING_PAYMENT_RETRIED`,
+`BILLING_SUBSCRIPTION_CANCELED`, `BILLING_SUBSCRIPTION_REINSTATED`), and
+every unconfigured/missing-Stripe-object case fails with a specific error
+code (`NO_STRIPE_CUSTOMER`, `NO_STRIPE_SUBSCRIPTION`,
+`BILLING_NOT_CONFIGURED`, `INVOICE_NOT_FOUND`, `INVOICE_NOT_PAID`,
+`SUBSCRIPTION_ALREADY_CANCELED`, `SUBSCRIPTION_NOT_PENDING_CANCELLATION`)
+rather than a generic 500 or a silent no-op.
+
+### Tests
+
+`test/admin-billing.e2e-spec.ts` — auth rejection, `billing:view`-only admin
+rejected from a `billing:manage` route, 404 for a non-existent organisation,
+DTO validation, and the `NO_STRIPE_CUSTOMER`/`NO_STRIPE_SUBSCRIPTION` refusal
+path for every mutating route against a fresh tenant with no Stripe objects
+yet. Exercising a real Stripe API call (an actual refund, coupon application,
+or invoice creation against a live customer) needs a live Stripe test
+account this offline suite doesn't have — the same documented constraint
+`test/billing.e2e-spec.ts` already carries for the customer-facing
+checkout/portal-session tests.
+
 ## Not yet built
 
-Billing operations, support tools/feature flags, FleetHQ staff account
-management (`admin_users:view`/`manage` — creating admins other than via
-the one-time bootstrap script), real system/infrastructure health (DB
-connectivity, deploy info — Phase 5), and the admin frontend — see the
-status table above.
+Support tools/feature flags, FleetHQ staff account management
+(`admin_users:view`/`manage` — creating admins other than via the one-time
+bootstrap script), real system/infrastructure health (DB connectivity,
+deploy info — Phase 5), and the admin frontend — see the status table above.
