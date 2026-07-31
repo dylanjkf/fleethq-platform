@@ -34,6 +34,20 @@ model SchedulerLease {
   @@map("scheduler_leases")
 }
 
+/// Idempotency ledger for processed Stripe webhook events. Stripe explicitly
+/// documents that a webhook can be delivered more than once, so every event id
+/// is recorded here before its handler runs and a duplicate delivery is
+/// skipped. Not tenant data (an event is resolved to a company only inside its
+/// handler) — no RLS, written only via the privileged SystemPrismaService /
+/// fleetos_auth role, same treatment as scheduler_leases / audit_logs.
+model StripeWebhookEvent {
+  id         String   @id
+  type       String
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  @@map("stripe_webhook_events")
+}
+
 model Company {
   id                   String             @id @default(uuid()) @db.Uuid
   name                 String
@@ -113,6 +127,13 @@ model Company {
   /// the billing settings page can tell a customer exactly when the next
   /// charge attempt will happen, not just "your payment failed."
   nextPaymentAttemptAt DateTime?          @map("next_payment_attempt_at")
+  /// `created` timestamp of the most recent Stripe subscription-state webhook
+  /// event applied to this company. Guards against out-of-order delivery
+  /// (Stripe explicitly documents webhooks can arrive out of order): a
+  /// `customer.subscription.updated` older than this is ignored so a retried,
+  /// stale event can't revert subscriptionStatus/planPriceId after a newer one
+  /// already landed.
+  lastStripeEventAt    DateTime?          @map("last_stripe_event_at")
   /// Self-serve free-trial window. Set at signup (14 days) so a new company
   /// experiences the full product before subscribing; entitlements grant the
   /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
