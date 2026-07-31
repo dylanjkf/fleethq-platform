@@ -104,4 +104,45 @@ describe('MFA (TOTP)', () => {
     const after = await login(tenant.username).expect(200);
     expect(after.body.status).toBe('authenticated'); // single factor again
   });
+
+  it('enabling MFA revokes other active sessions (Auth/Billing Platform Phase 10), but not the one enrolling', async () => {
+    const tenant = await createTestTenant([]);
+    const deviceA = await login(tenant.username).expect(200);
+    const deviceB = await login(tenant.username).expect(200);
+    const tokenA = deviceA.body.accessToken as string;
+    const tokenB = deviceB.body.accessToken as string;
+
+    await enrol(tokenA);
+
+    // The enrolling session still works; the other device is signed out.
+    await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenA}`).expect(200);
+    await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenB}`).expect(401);
+  });
+
+  it('disabling MFA revokes other active sessions, but not the one disabling it', async () => {
+    const tenant = await createTestTenant([]);
+    const initial = await login(tenant.username).expect(200);
+    const { secret } = await enrol(initial.body.accessToken);
+
+    // A second device completes the MFA challenge to get its own session.
+    const challengeB = await login(tenant.username).expect(200);
+    const deviceB = await http()
+      .post('/v1/auth/mfa/verify')
+      .send({ mfaToken: challengeB.body.mfaToken, code: totp(secret) })
+      .expect(200);
+    const tokenB = deviceB.body.accessToken as string;
+
+    // A third device (the one that will disable MFA).
+    const challengeC = await login(tenant.username).expect(200);
+    const deviceC = await http()
+      .post('/v1/auth/mfa/verify')
+      .send({ mfaToken: challengeC.body.mfaToken, code: totp(secret) })
+      .expect(200);
+    const tokenC = deviceC.body.accessToken as string;
+
+    await http().post('/v1/auth/mfa/disable').set('Authorization', `Bearer ${tokenC}`).send({ code: totp(secret) }).expect(200);
+
+    await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenC}`).expect(200);
+    await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenB}`).expect(401);
+  });
 });

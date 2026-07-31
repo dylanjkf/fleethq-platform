@@ -84,11 +84,18 @@ export class AuthRecoveryService {
   /**
    * Self-service change while already logged in — requires knowledge of the
    * current password (unlike resetPassword's emailed-token proof). Unlike a
-   * reset, this doesn't bump tokenVersion or revoke other sessions: the
-   * caller already proved they're the legitimate account holder by supplying
-   * the current password, so there's no "possible compromise" to contain.
+   * reset, this doesn't bump tokenVersion — the caller already proved
+   * they're the legitimate account holder on *this* device by supplying the
+   * current password. Auth/Billing Platform Phase 10: it does still revoke
+   * every *other* active session, though — the classic reason a real user
+   * changes their password voluntarily is having noticed something's wrong
+   * (a shared device, a suspicious login-history entry), and if an attacker
+   * is holding a live session elsewhere, this is exactly the moment that
+   * session should die rather than keep working untouched until it expires.
+   * The current session is deliberately kept alive so the caller isn't
+   * logged out of the device they're using right now.
    */
-  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+  async changePassword(userId: string, currentPassword: string, newPassword: string, currentSessionId: string): Promise<void> {
     const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
     if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
       throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'That current password is incorrect.' });
@@ -99,6 +106,7 @@ export class AuthRecoveryService {
       where: { id: userId },
       data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date() },
     });
+    await this.sessions.revokeOtherSessions(userId, currentSessionId);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
     if (user.email) void this.mail.sendPasswordChanged(user.email, user.fullName).catch(() => undefined);
   }

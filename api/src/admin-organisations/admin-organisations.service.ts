@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
 import { AuthSessionsService } from '../auth/auth-sessions.service';
+import { AuthMailService } from '../auth/auth-mail.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
 
@@ -15,6 +16,7 @@ export class AdminOrganisationsService {
     private readonly adminPrisma: AdminPrismaService,
     private readonly audit: AdminAuditService,
     private readonly sessions: AuthSessionsService,
+    private readonly mail: AuthMailService,
   ) {}
 
   private statusWhere(status: AdminOrganisationsQueryDto['status']): Prisma.CompanyWhereInput {
@@ -231,7 +233,7 @@ export class AdminOrganisationsService {
     }
     const membership = await this.adminPrisma.companyMembership.findFirst({
       where: { companyId: id, userId, archivedAt: null },
-      include: { user: { select: { id: true, username: true, tokenVersion: true, archivedAt: true } } },
+      include: { user: { select: { id: true, username: true, fullName: true, email: true, tokenVersion: true, archivedAt: true } } },
     });
     if (!membership || membership.user.archivedAt) {
       throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND', message: 'No active membership for that user in this organisation.' });
@@ -253,6 +255,12 @@ export class AdminOrganisationsService {
       userAgent: context.userAgent,
       afterValue: { username: membership.user.username, expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN },
     });
+    // Auth/Billing Platform Phase 10: the audit trail above already records
+    // this for FleetOS's own side — this is the customer-facing half, so the
+    // account holder isn't the only party in this action left uninformed.
+    if (membership.user.email) {
+      void this.mail.sendAdminSupportAccess(membership.user.email, membership.user.fullName).catch(() => undefined);
+    }
 
     return { accessToken, expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN, company: { id: company.id, name: company.name } };
   }

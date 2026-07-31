@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt';
 import { SystemPrismaService } from '../../prisma/system-prisma.service';
 import { AuditService, AUDIT_ACTIONS } from '../../audit/audit.service';
 import { AuthMailService } from '../auth-mail.service';
+import { AuthSessionsService } from '../auth-sessions.service';
 import { generateSecret, otpauthUrl, verifyTotp } from './totp';
 
 /** Recovery codes: readable, unambiguous alphabet (no 0/O/1/I), grouped 4-4. */
@@ -34,6 +35,7 @@ export class MfaService {
     private readonly systemPrisma: SystemPrismaService,
     private readonly audit: AuditService,
     private readonly mail: AuthMailService,
+    private readonly sessions: AuthSessionsService,
   ) {}
 
   private async requireUser(userId: string): Promise<MfaUser> {
@@ -57,8 +59,20 @@ export class MfaService {
     return { secret, otpauthUrl: otpauthUrl(secret, user.username) };
   }
 
-  /** Step 2: verify a code from the pending secret, activate MFA, return one-time backup codes. */
-  async confirmEnrollment(userId: string, code: string): Promise<{ backupCodes: string[] }> {
+  /**
+   * Step 2: verify a code from the pending secret, activate MFA, return
+   * one-time backup codes. Auth/Billing Platform Phase 10: also revokes
+   * other sessions — enabling MFA is exactly the moment an attacker holding
+   * a stale, MFA-free session should be forced to re-authenticate (now
+   * against the new second factor), not left alone until that token happens
+   * to expire. `currentSessionId` is omitted when this runs mid-login (a
+   * company's mandatory-MFA policy forcing enrolment before any session for
+   * *this* login attempt exists yet — AuthService.confirmPolicyMfaSetup) —
+   * in that case there's no "this device's session" to except, so every
+   * existing session is revoked, same treatment as a forced password change
+   * in that same policy-gate flow.
+   */
+  async confirmEnrollment(userId: string, code: string, currentSessionId?: string): Promise<{ backupCodes: string[] }> {
     const user = await this.requireUser(userId);
     if (user.mfaEnabledAt) {
       throw new ConflictException({ code: 'MFA_ALREADY_ENABLED', message: 'MFA is already enabled.' });
@@ -75,13 +89,26 @@ export class MfaService {
       where: { id: userId },
       data: { mfaEnabledAt: new Date(), mfaBackupCodes: hashes },
     });
+    if (currentSessionId) {
+      await this.sessions.revokeOtherSessions(userId, currentSessionId);
+    } else {
+      await this.sessions.revokeAllSessions(userId);
+    }
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.MFA_ENABLED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
     if (user.email) void this.mail.sendMfaEnabled(user.email, user.fullName).catch(() => undefined);
     return { backupCodes };
   }
 
-  /** Turn MFA off — requires a current TOTP or a backup code, so a hijacked session can't silently disable it. */
-  async disable(userId: string, code: string): Promise<void> {
+  /**
+   * Turn MFA off — requires a current TOTP or a backup code, so a hijacked
+   * session can't silently disable it. Auth/Billing Platform Phase 10: also
+   * revokes every other active session — the code check already proves the
+   * caller holds a live second factor, but disabling MFA is a high-value
+   * target for an attacker (e.g. via a leaked backup code), so every *other*
+   * session gets forced back through login rather than silently continuing
+   * to enjoy the now-weaker account.
+   */
+  async disable(userId: string, code: string, currentSessionId: string): Promise<void> {
     const user = await this.requireUser(userId);
     if (!user.mfaEnabledAt) return; // already off — idempotent
     const result = await this.verifyChallenge(user, code);
@@ -92,6 +119,7 @@ export class MfaService {
       where: { id: userId },
       data: { mfaSecret: null, mfaEnabledAt: null, mfaBackupCodes: [] },
     });
+    await this.sessions.revokeOtherSessions(userId, currentSessionId);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.MFA_DISABLED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
     if (user.email) void this.mail.sendMfaDisabled(user.email, user.fullName).catch(() => undefined);
   }

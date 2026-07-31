@@ -285,7 +285,17 @@ export class AuthService {
     // every login for an account that never opts into remembering a device),
     // not a precise "have we truly never seen this device" signal.
     const deviceTrusted = deviceFingerprint ? await this.sessions.isDeviceTrusted(user.id, deviceFingerprint) : false;
-    const isNewDeviceLogin = !!deviceFingerprint && !deviceTrusted;
+    // Auth/Billing Platform Phase 10: a client-supplied deviceFingerprint is
+    // the strong signal above, but it's `@IsOptional()` on LoginDto — any
+    // client that simply doesn't send one (or an attacker who omits it on
+    // purpose) previously skipped the new-device alert entirely, silently.
+    // When there's no fingerprint to check, fall back to "have we seen this
+    // IP + user-agent for this user before" from actual session history —
+    // deliberately independent of deviceTrusted/MFA-skip, this only decides
+    // whether the alert email is worth sending.
+    const isNewDeviceLogin = deviceFingerprint
+      ? !deviceTrusted
+      : !(await this.sessions.hasKnownIpUserAgent(user.id, context.ip, context.userAgent));
 
     // Second factor. If MFA is active and the device isn't trusted, no session
     // or company-choice token is issued until a valid code is presented to

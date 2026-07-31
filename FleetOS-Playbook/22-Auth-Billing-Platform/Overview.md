@@ -24,7 +24,7 @@ drifts into describing features that don't exist yet.
 | 7 | Customer self-service billing portal UI | **Done** |
 | 8 | GST / Australian tax invoicing | **Done** |
 | 9 | Usage & feature limit depth | **Done** |
-| 10 | Security hardening depth | Planned |
+| 10 | Security hardening depth | **Done** |
 | 11 | Final verify, docs, CHANGELOG | Planned |
 
 ## Phase 1: Customer session & device management
@@ -665,3 +665,84 @@ browser: a company on the Starter plan with 9 of 10 assets used shows
 "You're using 9 of 10 assets on your plan — approaching the limit." on
 `/billing`, and the Starter plan card reads "9 of 10 assets · 0 of 10
 operators".
+
+## Phase 10: Security hardening depth
+
+A broad security pass across the whole platform already happened well
+before this initiative (Waves C/E, "Audit 10 security controls", etc.) —
+password strength + JWT revocation, audit logging of security events,
+deny-by-default authorization, per-route throttling, infra hardening. This
+phase specifically targets the auth/session layer this initiative itself
+built (Phases 1–3), closing five concrete gaps identified by re-reviewing
+that layer with an attacker's checklist rather than re-doing prior work.
+
+- **Self-service password change now revokes every *other* active
+  session.** Previously (`AuthRecoveryService.changePassword`) a voluntary
+  change deliberately left every other session alone, on the reasoning that
+  supplying the current password already proved legitimacy. The real
+  failure mode that reasoning missed: the single most common reason someone
+  *voluntarily* changes their password is having noticed something's
+  wrong — and if an attacker is holding a live session elsewhere at that
+  moment, leaving it untouched defeats the point of changing the password
+  at all. The session performing the change is deliberately kept alive
+  (Phase 3's `test/auth-security-policy.e2e-spec.ts` already asserts this),
+  everything else is revoked immediately via
+  `AuthSessionsService.revokeOtherSessions`.
+- **Enabling or disabling MFA now revokes every other active session,**
+  same mechanism (`MfaService.confirmEnrollment`/`disable`). MFA disable in
+  particular is a classic account-takeover step (e.g. via a leaked backup
+  code) — every other session should be forced back through login (now
+  against the account's real current MFA state) rather than continuing
+  unaffected. When MFA enrolment is completed mid-login as part of a
+  company's mandatory-MFA policy (`AuthService.confirmPolicyMfaSetup`),
+  there's no "this device's session" yet to except, so that path revokes
+  every session instead — the same treatment `changeExpiredPassword`
+  already gives a policy-forced password change in that same flow.
+- **New-device-login detection no longer silently no-ops when the client
+  omits a device fingerprint.** `deviceFingerprint` is `@IsOptional()` on
+  `LoginDto`, and the alert previously only fired when one was actually
+  sent — any client (or an attacker) that simply doesn't send one skipped
+  the alert every time, unconditionally. `AuthSessionsService.hasKnownIpUserAgent`
+  is now a fallback signal used only when no fingerprint is present: has
+  this exact IP + user-agent pair shown up in this user's session history
+  before? Deliberately independent of `isDeviceTrusted`/`trustDevice` — it
+  never skips an MFA challenge, it only decides whether the email is worth
+  sending.
+- **A concurrent-session cap** (`MAX_ACTIVE_SESSIONS_PER_USER = 10` in
+  `AuthSessionsService`) — previously an account could accumulate unlimited
+  simultaneous sessions with nothing forcing old, likely-abandoned ones to
+  ever go away. `issueSessionToken` now evicts the least-recently-active
+  session(s) first whenever a new login would push the count past the cap.
+- **Admin impersonation now notifies the impersonated customer by email.**
+  FleetHQ Admin Platform impersonation (`AdminOrganisationsService.impersonate`)
+  was already permission-gated, throttled, and recorded to the admin audit
+  log — but entirely invisible to the account holder whose account was
+  accessed. `AuthMailService.sendAdminSupportAccess` closes that with the
+  same transparency principle as every other security email in this
+  initiative: the account holder should always know, even though the
+  action itself is a legitimate support tool. Deliberately doesn't name the
+  individual support staff member, only that FleetOS support accessed the
+  account and that access is time-limited.
+- **Deliberately out of scope, and why**: step-up re-authentication (a
+  fresh password/MFA prompt before sensitive-but-not-already-self-gated
+  actions like removing a WebAuthn credential or opening the billing
+  portal) and a real refresh-token architecture (rotation + reuse
+  detection) are both genuine hardening opportunities the research for this
+  phase surfaced, but both are architectural changes — new endpoints, new
+  frontend re-auth flows, or a redesign of how sessions are issued/renewed
+  — not something that fits "harden the existing layer" scope. Noted here
+  so they aren't silently forgotten, not treated as this phase's job.
+
+**Testing**: `test/auth-security-policy.e2e-spec.ts` gained a test proving
+change-password revokes every other session while keeping the acting one
+alive (and its pre-existing test's stale "doesn't revoke other sessions"
+comment/title were corrected to reflect the new behavior — that pre-existing
+test's own assertions were already about the *acting* session, which still
+holds). `test/mfa.e2e-spec.ts` gained two tests (enable and disable) with
+the same shape. New `test/auth-session-hardening.e2e-spec.ts` covers the
+concurrent-session cap (11 logins → the oldest is evicted, the rest stay
+valid) and `hasKnownIpUserAgent` directly (recognises a previously-seen
+IP+user-agent pair, rejects an unseen one). `test/admin-organisations.e2e-spec.ts`'s
+existing impersonation tests were re-run as a regression check (all still
+pass — the new email is fire-and-forget and doesn't change the endpoint's
+response). Full backend `jest` suite, `tsc`, and `eslint` re-run clean.

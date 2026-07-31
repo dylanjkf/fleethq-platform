@@ -2,6 +2,17 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 10 (security hardening depth)
+
+Re-reviewed the auth/session layer this initiative itself built (Phases 1–3) with an attacker's checklist, closing five concrete gaps rather than re-doing the broad security work already done pre-initiative (Waves C/E, etc.).
+
+- Self-service password change (`AuthRecoveryService.changePassword`) and MFA enable/disable (`MfaService.confirmEnrollment`/`disable`) now revoke every *other* active session via a new `AuthSessionsService.revokeOtherSessions` — the acting session stays alive, everything else dies immediately instead of surviving on its own leftover lifetime. When MFA enrolment completes mid-login as part of a mandatory-MFA policy, there's no "this device's session" yet to except, so that path revokes every session, matching how `changeExpiredPassword` already treats that same flow.
+- New-device-login detection no longer silently no-ops when a client omits `deviceFingerprint` (it's `@IsOptional()` on `LoginDto`, and previously any client — or attacker — that didn't send one skipped the alert every time). New `AuthSessionsService.hasKnownIpUserAgent` is a fallback signal used only when there's no fingerprint: has this IP+user-agent pair shown up in this user's session history before? Deliberately independent of `isDeviceTrusted` — never skips MFA, only decides whether the alert email fires.
+- New concurrent-session cap (`MAX_ACTIVE_SESSIONS_PER_USER = 10`) — `issueSessionToken` now evicts the least-recently-active session(s) first whenever a login would push the account over the cap, bounding how many sessions a slowly-leaked credential can accumulate.
+- Admin impersonation (`AdminOrganisationsService.impersonate`) now emails the impersonated customer (`AuthMailService.sendAdminSupportAccess`) — already permission-gated, throttled, and audit-logged on FleetOS's side, but previously invisible to the account holder. Deliberately doesn't name the individual support staff member.
+- **Deliberately out of scope**: step-up re-authentication before sensitive actions, and a real refresh-token architecture (rotation + reuse detection) — both genuine opportunities surfaced by this review, both architectural changes beyond "harden the existing layer," noted rather than silently dropped.
+- Verified: `test/auth-security-policy.e2e-spec.ts` and `test/mfa.e2e-spec.ts` each gained session-revocation coverage; new `test/auth-session-hardening.e2e-spec.ts` covers the concurrent-session cap and `hasKnownIpUserAgent`; `test/admin-organisations.e2e-spec.ts`'s impersonation tests re-run clean as a regression check; full backend `jest`/`tsc`/`eslint` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 9 (usage & feature limit depth)
 
 A3 already resolved a company's plan tier and enforced its operator/asset count limits, but the entitlements response never reported *usage*, and two plan features declared since A3 — `forms`, `intelligence` — were never actually enforced at the API (only `warehouse` was).

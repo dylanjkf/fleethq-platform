@@ -107,4 +107,24 @@ export class AuthMailService {
       body: `Hi ${fullName},\n\nYour FleetOS account was temporarily locked after several failed sign-in attempts. It will unlock automatically at ${unlockAt.toLocaleTimeString('en-AU')} on ${unlockAt.toLocaleDateString('en-AU')}, or you can reset your password to unlock it sooner.\n\nIf this wasn't you, someone may be trying to guess your password — consider resetting it once the lock clears.`,
     });
   }
+
+  /**
+   * Auth/Billing Platform Phase 10: FleetHQ Admin Platform impersonation
+   * (`AdminOrganisationsService.impersonate`) was already permission-gated,
+   * throttled, and recorded to the admin audit log — but entirely invisible
+   * to the customer whose account was accessed. This closes that gap with
+   * the same transparency principle as every other security email here: the
+   * account holder should always know when something like this happens,
+   * even though the action itself is a legitimate support tool, not a
+   * suspected compromise. Deliberately doesn't name the individual support
+   * staff member — only that FleetOS support accessed the account, and that
+   * the access is short-lived.
+   */
+  async sendAdminSupportAccess(to: string, fullName: string): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: 'FleetOS support accessed your account',
+      body: `Hi ${fullName},\n\nA member of the FleetOS support team signed in as you to help investigate or resolve a support request. This access is logged and time-limited (30 minutes).\n\nIf you weren't expecting support to be involved, contact your company administrator to confirm.`,
+    });
+  }
 }

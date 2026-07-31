@@ -216,7 +216,7 @@ export class AuthController {
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   async changePassword(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: ChangePasswordDto) {
-    await this.recovery.changePassword(user.userId, dto.currentPassword, dto.newPassword);
+    await this.recovery.changePassword(user.userId, dto.currentPassword, dto.newPassword, user.sessionId);
     return { ok: true };
   }
 
@@ -324,7 +324,7 @@ export class AuthController {
   @Post('mfa/enable')
   @HttpCode(HttpStatus.OK)
   enableMfa(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: MfaCodeDto) {
-    return this.mfa.confirmEnrollment(user.userId, dto.code);
+    return this.mfa.confirmEnrollment(user.userId, dto.code, user.sessionId);
   }
 
   /** Disable MFA — requires a current TOTP or backup code. */
@@ -333,7 +333,7 @@ export class AuthController {
   @Post('mfa/disable')
   @HttpCode(HttpStatus.OK)
   async disableMfa(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: MfaCodeDto) {
-    await this.mfa.disable(user.userId, dto.code);
+    await this.mfa.disable(user.userId, dto.code, user.sessionId);
     return { ok: true };
   }
 }

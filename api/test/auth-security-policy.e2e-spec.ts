@@ -158,7 +158,7 @@ describe('Auth/Billing Platform Phase 3: security policy', () => {
   });
 
   describe('self-service change-password', () => {
-    it('changes the password without revoking the current session, and rejects a reused password', async () => {
+    it('changes the password, keeps the acting session alive, and rejects a reused password', async () => {
       const tenant = await createTestTenant([]);
       const first = await login(tenant.username).expect(200);
       const token = first.body.accessToken as string;
@@ -171,7 +171,7 @@ describe('Auth/Billing Platform Phase 3: security policy', () => {
         .send({ currentPassword: TEST_PASSWORD, newPassword: 'BrandNewPass1!' })
         .expect(200);
 
-      // The pre-change session is still valid — a voluntary change doesn't revoke other sessions.
+      // The session that performed the change is still valid.
       await http().get('/v1/auth/me').set('Authorization', `Bearer ${token}`).expect(200);
 
       await login(tenant.username, TEST_PASSWORD).expect(401);
@@ -184,6 +184,28 @@ describe('Auth/Billing Platform Phase 3: security policy', () => {
         .set('Authorization', `Bearer ${relogged.body.accessToken}`)
         .send({ currentPassword: 'BrandNewPass1!', newPassword: TEST_PASSWORD })
         .expect(400);
+    });
+
+    it('revokes every other active session (Auth/Billing Platform Phase 10), but not the one making the change', async () => {
+      const tenant = await createTestTenant([]);
+      const deviceA = await login(tenant.username).expect(200);
+      const deviceB = await login(tenant.username).expect(200);
+      const tokenA = deviceA.body.accessToken as string;
+      const tokenB = deviceB.body.accessToken as string;
+
+      // Both sessions work before the change.
+      await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenA}`).expect(200);
+      await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenB}`).expect(200);
+
+      await http()
+        .post('/v1/auth/change-password')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ currentPassword: TEST_PASSWORD, newPassword: 'AnotherDeviceLoggedOut1!' })
+        .expect(200);
+
+      // The device that made the change keeps working; the other device is signed out.
+      await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenA}`).expect(200);
+      await http().get('/v1/auth/me').set('Authorization', `Bearer ${tokenB}`).expect(401);
     });
   });
 });

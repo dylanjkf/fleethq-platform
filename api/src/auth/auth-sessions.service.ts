@@ -23,6 +23,17 @@ const REMEMBER_ME_EXPIRES_IN = '30d';
 const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * Auth/Billing Platform Phase 10 (security hardening depth): a cap on how
+ * many sessions one account can hold at once. Without this, a slowly-leaked
+ * or repeatedly-phished credential accumulates unlimited concurrent
+ * sessions — `listSessions` would just get longer, with nothing forcing the
+ * oldest, most-likely-abandoned ones to ever go away. Generous enough not to
+ * bother a real user signed in across several devices; bounded enough to cap
+ * the blast radius of a leaked credential.
+ */
+const MAX_ACTIVE_SESSIONS_PER_USER = 10;
+
+/**
  * Session listing/revocation, "remember this device" bookkeeping, and session
  * *creation* (`issueSessionToken`, which signs the JWT) for customer User
  * accounts — split out of AuthService (Auth/Billing Platform Phase 2) purely
@@ -53,6 +64,7 @@ export class AuthSessionsService {
     tokenVersion: number,
     opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string } = {},
   ): Promise<string> {
+    await this.enforceSessionCap(userId);
     const sessionLifetimeMs = opts.rememberMe ? REMEMBER_ME_SESSION_EXPIRES_IN_MS : SESSION_EXPIRES_IN_MS;
     const session = await this.systemPrisma.userSession.create({
       data: {
@@ -118,6 +130,59 @@ export class AuthSessionsService {
   /** Revoke every active session for a user — used when a password reset should kill all existing sessions. */
   async revokeAllSessions(userId: string): Promise<void> {
     await this.systemPrisma.userSession.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+  }
+
+  /**
+   * Auth/Billing Platform Phase 10: revoke every *other* active session,
+   * keeping `exceptSessionId` alive — used after a self-service password
+   * change or MFA enable/disable, where the caller has just proved they're
+   * the legitimate account holder on *this* device and shouldn't be logged
+   * out of it, but any session an attacker may be holding elsewhere should
+   * die immediately rather than survive until it happens to expire.
+   */
+  async revokeOtherSessions(userId: string, exceptSessionId: string): Promise<void> {
+    await this.systemPrisma.userSession.updateMany({
+      where: { userId, revokedAt: null, id: { not: exceptSessionId } },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  /**
+   * Auth/Billing Platform Phase 10: oldest-session eviction so one account
+   * can never accumulate unbounded concurrent sessions. Counts only
+   * non-revoked, non-expired sessions (an already-dead row doesn't count
+   * against the cap), and evicts the least-recently-active ones first —
+   * the ones most likely to be a forgotten/abandoned device rather than
+   * one in active use right now.
+   */
+  private async enforceSessionCap(userId: string): Promise<void> {
+    const active = await this.systemPrisma.userSession.findMany({
+      where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { lastSeenAt: 'desc' },
+      select: { id: true },
+    });
+    if (active.length < MAX_ACTIVE_SESSIONS_PER_USER) return;
+    const toEvict = active.slice(MAX_ACTIVE_SESSIONS_PER_USER - 1).map((s) => s.id);
+    await this.systemPrisma.userSession.updateMany({ where: { id: { in: toEvict } }, data: { revokedAt: new Date() } });
+  }
+
+  /**
+   * Auth/Billing Platform Phase 10: a best-effort "have we seen this
+   * IP + user-agent combination for this user before" check, used as a
+   * fallback new-device signal for clients that don't send a
+   * `deviceFingerprint` at all (the primary signal simply skips the alert
+   * entirely when the field is omitted — see AuthService.proceedPastFirstFactor).
+   * Deliberately independent of `isDeviceTrusted`/`trustDevice`: this never
+   * skips an MFA challenge, it only decides whether the new-device-login
+   * email is worth sending.
+   */
+  async hasKnownIpUserAgent(userId: string, ip: string | null | undefined, userAgent: string | null | undefined): Promise<boolean> {
+    if (!ip || ip === 'unknown') return false;
+    const existing = await this.systemPrisma.userSession.findFirst({
+      where: { userId, ipAddress: ip, userAgent: userAgent ?? null },
+      select: { id: true },
+    });
+    return !!existing;
   }
 
   async isDeviceTrusted(userId: string, deviceFingerprint: string): Promise<boolean> {
