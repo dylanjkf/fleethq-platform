@@ -1,15 +1,20 @@
-import { createHash, randomUUID } from 'crypto';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
+import { OAuthProvider, type User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
+import { AuthSessionsService } from './auth-sessions.service';
+import { AuthRecoveryService } from './auth-recovery.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 import { MfaService } from './mfa/mfa.service';
-import { JwtPayload, MfaChallengePayload, PreAuthJwtPayload } from './jwt-payload.interface';
+import { OidcVerifierService } from './oidc-verifier.service';
+import { WebauthnService } from './webauthn/webauthn.service';
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
+import { JwtPayload, LoginMethod, MfaChallengePayload, PreAuthJwtPayload } from './jwt-payload.interface';
 
 /** Optional request context threaded from the controller for audit records. */
 export interface AuthContext {
@@ -23,17 +28,6 @@ export interface CompanyChoice {
   name: string;
 }
 
-export interface UserSessionSummary {
-  id: string;
-  ipAddress: string;
-  userAgent: string | null;
-  deviceLabel: string | null;
-  createdAt: Date;
-  lastSeenAt: Date;
-  expiresAt: Date;
-  isCurrent: boolean;
-}
-
 export type LoginResult =
   | { status: 'authenticated'; accessToken: string; company: CompanyChoice }
   | { status: 'choose_company'; preAuthToken: string; companies: CompanyChoice[] }
@@ -44,7 +38,6 @@ const MFA_CHALLENGE_EXPIRES_IN = '5m';
 const SESSION_EXPIRES_IN_MS = 12 * 60 * 60 * 1000; // 12h — matches JWT_EXPIRES_IN's default
 const REMEMBER_ME_EXPIRES_IN = '30d';
 const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
-const TRUSTED_DEVICE_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const DUMMY_HASH = '$2b$10$invalidsaltinvalidsaltinvalidsaltuz';
 
 @Injectable()
@@ -55,10 +48,24 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly authTokens: AuthTokensService,
     private readonly mail: AuthMailService,
+    private readonly sessions: AuthSessionsService,
+    private readonly recovery: AuthRecoveryService,
     private readonly audit: AuditService,
     private readonly mfa: MfaService,
+    private readonly oidc: OidcVerifierService,
+    private readonly webauthn: WebauthnService,
     @InjectPinoLogger(AuthService.name) private readonly logger: PinoLogger,
   ) {}
+
+  /** Which passwordless/social sign-in methods are actually usable right now — drives the login page's UI. */
+  getAuthProviders(): { magicLink: true; webauthn: true; google: boolean; microsoft: boolean } {
+    return {
+      magicLink: true,
+      webauthn: true,
+      google: this.oidc.isConfigured(OAuthProvider.GOOGLE),
+      microsoft: this.oidc.isConfigured(OAuthProvider.MICROSOFT),
+    };
+  }
 
   async login(
     username: string,
@@ -134,24 +141,144 @@ export class AuthService {
       await this.systemPrisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
     }
 
+    return this.proceedPastFirstFactor(user, deviceFingerprint, rememberMe, 'password', context);
+  }
+
+  /**
+   * Always resolves to `{ ok: true }` at the controller regardless of whether
+   * the account exists or has an email — enumeration-safe, same pattern as
+   * forgotPassword/resendVerification.
+   */
+  async requestMagicLink(identifier: string): Promise<void> {
+    const user = await this.recovery.findUserByIdentifier(identifier);
+    if (!user || user.archivedAt || !user.email) return;
+    const token = await this.authTokens.issue(user.id, 'MAGIC_LINK');
+    await this.mail.sendMagicLink(user.email, user.fullName, token);
+  }
+
+  /** Passwordless login: a clicked magic link stands in for the password check. */
+  async consumeMagicLink(
+    token: string,
+    deviceFingerprint: string | undefined,
+    rememberMe: boolean,
+    context: AuthContext = {},
+  ): Promise<LoginResult> {
+    const userId = await this.authTokens.consume(token, 'MAGIC_LINK');
+    if (!userId) {
+      throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This sign-in link is invalid or has expired.' });
+    }
+    const user = await this.systemPrisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.archivedAt) {
+      throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This sign-in link is invalid or has expired.' });
+    }
+    return this.proceedPastFirstFactor(user, deviceFingerprint, rememberMe, 'magic_link', context);
+  }
+
+  /**
+   * Social login. Sign-IN only — this product has no self-service signup path
+   * (CompaniesController's doc comment), so a verified identity with no
+   * existing link and no matching account is refused, never used to
+   * provision one. First successful login by a given external account
+   * auto-links it (by verified email, which must resolve to exactly one
+   * active account); every login after that resolves by the stored
+   * provider+subject pairing instead, so it keeps working even if the
+   * person's email address later changes at the provider.
+   */
+  async loginWithOAuth(
+    provider: OAuthProvider,
+    idToken: string,
+    deviceFingerprint: string | undefined,
+    rememberMe: boolean,
+    context: AuthContext = {},
+  ): Promise<LoginResult> {
+    const identity = await this.oidc.verify(provider, idToken);
+    if (!identity.emailVerified) {
+      throw new UnauthorizedException({ code: 'EMAIL_NOT_VERIFIED', message: "That account's email address is not verified." });
+    }
+
+    const existingLink = await this.systemPrisma.oAuthIdentity.findUnique({
+      where: { provider_providerSubject: { provider, providerSubject: identity.subject } },
+    });
+
+    let user: User | null;
+    if (existingLink) {
+      user = await this.systemPrisma.user.findUnique({ where: { id: existingLink.userId } });
+      void this.systemPrisma.oAuthIdentity.update({ where: { id: existingLink.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);
+    } else {
+      const candidates = await this.systemPrisma.user.findMany({ where: { email: identity.email, archivedAt: null } });
+      if (candidates.length === 0) {
+        throw new UnauthorizedException({
+          code: 'NO_LINKED_ACCOUNT',
+          message: 'No FleetHQ account is linked to this email. Sign in with your username and password, or contact your fleet administrator.',
+        });
+      }
+      if (candidates.length > 1) {
+        // Email isn't unique in this schema (see findUserByIdentifier's doc
+        // comment) — vanishingly rare, but auto-linking to the wrong one of
+        // several accounts sharing an address would be a real account-
+        // takeover risk, so this is refused rather than guessed at.
+        throw new UnauthorizedException({ code: 'AMBIGUOUS_ACCOUNT', message: 'More than one account matches this email. Contact support.' });
+      }
+      user = candidates[0];
+      await this.systemPrisma.oAuthIdentity.create({ data: { userId: user.id, provider, providerSubject: identity.subject, email: identity.email } });
+    }
+
+    if (!user || user.archivedAt) {
+      throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'Invalid or expired sign-in.' });
+    }
+
+    const loginMethod: LoginMethod = provider === 'GOOGLE' ? 'oauth_google' : 'oauth_microsoft';
+    return this.proceedPastFirstFactor(user, deviceFingerprint, rememberMe, loginMethod, context);
+  }
+
+  /**
+   * Completes a login already fully authenticated by a verified WebAuthn/
+   * passkey assertion (WebauthnService.verifyAuthentication). Deliberately
+   * bypasses this account's own MFA policy — a passkey combines possession
+   * of the authenticator with the platform's own biometric/PIN presence
+   * check, which is itself multi-factor-equivalent, so re-challenging with
+   * TOTP on top would add friction without adding real assurance. Unlike
+   * password/magic-link/OAuth, it also isn't gated by device-trust (a
+   * passkey ceremony is inherently device-bound already).
+   */
+  async completeWebauthnLogin(userId: string, context: AuthContext = {}): Promise<LoginResult> {
+    const user = await this.systemPrisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.archivedAt) {
+      throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'Invalid or expired sign-in.' });
+    }
+    return this.completeLogin(user, context, { loginMethod: 'webauthn' });
+  }
+
+  /**
+   * Shared tail for every first-factor method (password, magic link, linked
+   * social account): decide whether this account's MFA policy + device trust
+   * require a second factor, or whether the login is already complete.
+   */
+  private async proceedPastFirstFactor(
+    user: { id: string; username: string; tokenVersion: number; email: string | null; fullName: string; mfaEnabledAt: Date | null },
+    deviceFingerprint: string | undefined,
+    rememberMe: boolean,
+    loginMethod: LoginMethod,
+    context: AuthContext,
+  ): Promise<LoginResult> {
     // A device this user has previously verified and asked to be remembered
     // skips the MFA challenge. Any other device — regardless of whether MFA
     // is even enabled on the account — is flagged for the new-device-login
     // alert email; this is a known, accepted simplification (it fires on
     // every login for an account that never opts into remembering a device),
     // not a precise "have we truly never seen this device" signal.
-    const deviceTrusted = deviceFingerprint ? await this.isDeviceTrusted(user.id, deviceFingerprint) : false;
+    const deviceTrusted = deviceFingerprint ? await this.sessions.isDeviceTrusted(user.id, deviceFingerprint) : false;
     const isNewDeviceLogin = !!deviceFingerprint && !deviceTrusted;
 
     // Second factor. If MFA is active and the device isn't trusted, no session
     // or company-choice token is issued until a valid code is presented to
     // POST /v1/auth/mfa/verify.
     if (user.mfaEnabledAt && !deviceTrusted) {
-      const mfaPayload: MfaChallengePayload = { sub: user.id, mfa: true, deviceFingerprint, rememberMe, isNewDeviceLogin };
+      const mfaPayload: MfaChallengePayload = { sub: user.id, mfa: true, deviceFingerprint, rememberMe, isNewDeviceLogin, loginMethod };
       return { status: 'mfa_required', mfaToken: this.jwt.sign(mfaPayload, { expiresIn: MFA_CHALLENGE_EXPIRES_IN }) };
     }
 
-    return this.completeLogin(user, context, { rememberMe, isNewDeviceLogin });
+    return this.completeLogin(user, context, { rememberMe, isNewDeviceLogin, loginMethod });
   }
 
   /**
@@ -187,7 +314,7 @@ export class AuthService {
     }
 
     if (rememberDevice && payload.deviceFingerprint) {
-      await this.trustDevice(user.id, payload.deviceFingerprint);
+      await this.sessions.trustDevice(user.id, payload.deviceFingerprint);
       void this.audit.recordSystem({
         action: AUDIT_ACTIONS.DEVICE_TRUSTED,
         actorUserId: user.id,
@@ -201,6 +328,7 @@ export class AuthService {
       usedBackupCode: result.usedBackupCode,
       rememberMe: payload.rememberMe,
       isNewDeviceLogin: payload.isNewDeviceLogin,
+      loginMethod: payload.loginMethod,
     });
   }
 
@@ -208,7 +336,7 @@ export class AuthService {
   private async completeLogin(
     user: { id: string; username: string; tokenVersion: number; email: string | null; fullName: string },
     context: AuthContext,
-    extra: { usedBackupCode?: boolean; rememberMe?: boolean; isNewDeviceLogin?: boolean } = {},
+    extra: { usedBackupCode?: boolean; rememberMe?: boolean; isNewDeviceLogin?: boolean; loginMethod?: LoginMethod } = {},
   ): Promise<LoginResult> {
     const memberships = await this.prisma.withUser(user.id, (tx) =>
       tx.companyMembership.findMany({
@@ -253,7 +381,7 @@ export class AuthService {
         actorLabel: user.username,
         ip: context.ip,
         requestId: context.requestId,
-        metadata: extra.usedBackupCode ? { mfa: 'backup_code' } : undefined,
+        metadata: this.loginAuditMetadata(extra),
       });
       return {
         status: 'authenticated',
@@ -267,12 +395,21 @@ export class AuthService {
       preAuth: true,
       rememberMe: extra.rememberMe,
       isNewDeviceLogin: extra.isNewDeviceLogin,
+      loginMethod: extra.loginMethod,
     };
     return {
       status: 'choose_company',
       preAuthToken: this.jwt.sign(preAuthPayload, { expiresIn: PRE_AUTH_EXPIRES_IN }),
       companies: memberships.map((m) => ({ id: m.company.id, name: m.company.name })),
     };
+  }
+
+  /** `undefined` (not `{}`) when there's nothing to record, matching every other audit call's convention here. */
+  private loginAuditMetadata(extra: { usedBackupCode?: boolean; loginMethod?: LoginMethod }): Record<string, unknown> | undefined {
+    const metadata: Record<string, unknown> = {};
+    if (extra.usedBackupCode) metadata.mfa = 'backup_code';
+    if (extra.loginMethod && extra.loginMethod !== 'password') metadata.method = extra.loginMethod;
+    return Object.keys(metadata).length > 0 ? metadata : undefined;
   }
 
   async selectCompany(preAuthToken: string, companyId: string, context: AuthContext = {}): Promise<LoginResult> {
@@ -325,6 +462,7 @@ export class AuthService {
       actorLabel: membership.user.username,
       ip: context.ip,
       requestId: context.requestId,
+      metadata: this.loginAuditMetadata({ loginMethod: payload.loginMethod }),
     });
 
     if (payload.isNewDeviceLogin && membership.user.email) {
@@ -436,81 +574,40 @@ export class AuthService {
     });
   }
 
-  // ── Session & device management (Auth/Billing Platform Phase 1) ─────────────
+  // ── WebAuthn / passkeys (Auth/Billing Platform Phase 2) ─────────────────────
 
-  async listSessions(userId: string, currentSessionId: string): Promise<UserSessionSummary[]> {
-    const sessions = await this.systemPrisma.userSession.findMany({
-      where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
-      orderBy: { lastSeenAt: 'desc' },
-    });
-    return sessions.map((s) => ({
-      id: s.id,
-      ipAddress: s.ipAddress,
-      userAgent: s.userAgent,
-      deviceLabel: s.deviceLabel,
-      createdAt: s.createdAt,
-      lastSeenAt: s.lastSeenAt,
-      expiresAt: s.expiresAt,
-      isCurrent: s.id === currentSessionId,
-    }));
+  async beginWebauthnRegistration(userId: string) {
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
+    return this.webauthn.generateRegistrationOptionsFor(user.id, user.username, user.fullName);
   }
 
-  /** Self-service session revocation — a user killing one of their own other devices. */
-  async revokeSession(userId: string, sessionId: string, context: AuthContext = {}): Promise<void> {
-    const session = await this.systemPrisma.userSession.findFirst({ where: { id: sessionId, userId } });
-    if (!session || session.revokedAt) return;
-    await this.systemPrisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date() } });
-    void this.audit.recordSystem({
-      companyId: session.companyId,
-      action: AUDIT_ACTIONS.SESSION_REVOKED,
-      actorUserId: userId,
-      targetType: 'user_session',
-      targetId: sessionId,
-      ip: context.ip,
-      requestId: context.requestId,
-    });
+  async completeWebauthnRegistration(userId: string, challengeToken: string, response: RegistrationResponseJSON, deviceLabel?: string): Promise<void> {
+    await this.webauthn.verifyRegistration(userId, challengeToken, response, deviceLabel);
   }
 
-  async logout(userId: string, companyId: string, sessionId: string, context: AuthContext = {}): Promise<void> {
-    await this.systemPrisma.userSession.updateMany({ where: { id: sessionId, userId, revokedAt: null }, data: { revokedAt: new Date() } });
-    void this.audit.recordSystem({
-      companyId,
-      action: AUDIT_ACTIONS.LOGOUT,
-      actorUserId: userId,
-      targetType: 'user_session',
-      targetId: sessionId,
-      ip: context.ip,
-      requestId: context.requestId,
-    });
+  async beginWebauthnLogin() {
+    return this.webauthn.generateAuthenticationOptionsForLogin();
   }
 
-  private async isDeviceTrusted(userId: string, deviceFingerprint: string): Promise<boolean> {
-    const device = await this.systemPrisma.userTrustedDevice.findUnique({
-      where: { userId_deviceFingerprint: { userId, deviceFingerprint: this.hashFingerprint(deviceFingerprint) } },
-    });
-    return !!device && device.expiresAt > new Date();
+  /** Usernameless passkey login: verify the assertion, then complete the login it authenticated. */
+  async loginWithWebauthn(challengeToken: string, response: AuthenticationResponseJSON, context: AuthContext = {}): Promise<LoginResult> {
+    const userId = await this.webauthn.verifyAuthentication(challengeToken, response);
+    if (!userId) {
+      throw new UnauthorizedException({ code: 'WEBAUTHN_VERIFICATION_FAILED', message: 'Could not verify that passkey.' });
+    }
+    return this.completeWebauthnLogin(userId, context);
   }
 
-  private async trustDevice(userId: string, deviceFingerprint: string): Promise<void> {
-    const hashed = this.hashFingerprint(deviceFingerprint);
-    await this.systemPrisma.userTrustedDevice.upsert({
-      where: { userId_deviceFingerprint: { userId, deviceFingerprint: hashed } },
-      create: { userId, deviceFingerprint: hashed, expiresAt: new Date(Date.now() + TRUSTED_DEVICE_EXPIRES_IN_MS) },
-      update: { lastUsedAt: new Date(), expiresAt: new Date(Date.now() + TRUSTED_DEVICE_EXPIRES_IN_MS) },
-    });
+  listWebauthnCredentials(userId: string) {
+    return this.webauthn.listCredentials(userId);
   }
 
-  /** Never store a client-supplied identifier verbatim, even though it isn't a credential. */
-  private hashFingerprint(raw: string): string {
-    return createHash('sha256').update(raw).digest('hex');
+  removeWebauthnCredential(userId: string, credentialId: string): Promise<void> {
+    return this.webauthn.removeCredential(userId, credentialId);
   }
 
-  /** Random device id the frontend generates and persists client-side (e.g. localStorage). */
-  static generateDeviceFingerprint(): string {
-    return randomUUID();
-  }
-
-  // ── A2 auth completeness: lockout + verification + reset ────────────────────
+  // ── A2 auth completeness: lockout ────────────────────────────────────────────
+  // (Email verification / password reset / resend live on AuthRecoveryService.)
 
   // Lock the account for LOCK_WINDOW after this many consecutive failures.
   private static readonly MAX_FAILED_LOGINS = 5;
@@ -527,71 +624,5 @@ export class AuthService {
       },
     });
     return locked;
-  }
-
-  private async findUserByIdentifier(identifier: string) {
-    // Username is unique; email is not (nullable, shared-family addresses), so
-    // an email match takes the most recently active account for it.
-    const byUsername = await this.systemPrisma.user.findUnique({ where: { username: identifier } });
-    if (byUsername) return byUsername;
-    return this.systemPrisma.user.findFirst({
-      where: { email: identifier, archivedAt: null },
-      orderBy: { updatedAt: 'desc' },
-    });
-  }
-
-  /**
-   * Always resolves to the same shape regardless of whether the account exists
-   * or has an email — so this endpoint can't be used to probe who has an
-   * account. The email is only sent when there's a real, non-archived account
-   * with an address on file.
-   */
-  async forgotPassword(identifier: string): Promise<void> {
-    const user = await this.findUserByIdentifier(identifier);
-    if (!user || user.archivedAt || !user.email) return;
-    const token = await this.authTokens.issue(user.id, 'PASSWORD_RESET');
-    await this.mail.sendPasswordReset(user.email, user.fullName, token);
-  }
-
-  async resetPassword(token: string, newPassword: string): Promise<void> {
-    const userId = await this.authTokens.consume(token, 'PASSWORD_RESET');
-    if (!userId) {
-      throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This reset link is invalid or has expired.' });
-    }
-    await this.systemPrisma.user.update({
-      where: { id: userId },
-      // A completed reset also proves control of the mailbox, so mark the email
-      // verified, and clear any lockout so the user can sign in immediately.
-      // Bump tokenVersion so every session issued before the reset is revoked
-      // at once (a reset is exactly when you want existing sessions killed).
-      data: {
-        passwordHash: await bcrypt.hash(newPassword, 10),
-        emailVerifiedAt: new Date(),
-        failedLoginCount: 0,
-        lockedUntil: null,
-        tokenVersion: { increment: 1 },
-      },
-    });
-    await this.authTokens.invalidateAll(userId, 'PASSWORD_RESET');
-    // tokenVersion alone already blocks every existing JWT (JwtStrategy
-    // rejects a stale `tv`), but revoke the session rows too so listSessions
-    // doesn't keep showing devices that look "active" and aren't.
-    await this.systemPrisma.userSession.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
-    void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_RESET, actorUserId: userId, targetType: 'user', targetId: userId });
-  }
-
-  async verifyEmail(token: string): Promise<void> {
-    const userId = await this.authTokens.consume(token, 'EMAIL_VERIFY');
-    if (!userId) {
-      throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This verification link is invalid or has expired.' });
-    }
-    await this.systemPrisma.user.update({ where: { id: userId }, data: { emailVerifiedAt: new Date() } });
-  }
-
-  async resendVerification(identifier: string): Promise<void> {
-    const user = await this.findUserByIdentifier(identifier);
-    if (!user || user.archivedAt || !user.email || user.emailVerifiedAt) return;
-    const token = await this.authTokens.issue(user.id, 'EMAIL_VERIFY');
-    await this.mail.sendVerification(user.email, user.fullName, token);
   }
 }

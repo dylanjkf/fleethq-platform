@@ -2,6 +2,17 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 2 (magic link + social login + WebAuthn)
+
+Three new first-factor login methods (`22-Auth-Billing-Platform/Overview.md`), all reusing Phase 1's device-trust/MFA gate — except WebAuthn, which deliberately bypasses it.
+
+- **Magic link**: passwordless email login reusing the existing single-use `AuthToken` machinery with a new 15-minute `MAGIC_LINK` type. Still subject to the account's own MFA policy.
+- **Social login (Google/Microsoft)**: sign-in only, never provisions accounts. `OidcVerifierService` does real cryptographic verification against each provider's live JWKS (`jose`) — never trusts a client-supplied claim. First login from a given external identity auto-links it by verified email; later logins resolve through a new `user_oauth_identities` table. Config-gated per provider — unconfigured providers are absent from `GET /v1/auth/providers` and refuse cleanly.
+- **WebAuthn/passkeys**: usernameless (discoverable-credential) login via `@simplewebauthn/server`, backed by a new `user_webauthn_credentials` table. A verified passkey login is treated as already satisfying MFA and bypasses the account's TOTP policy — possession of the authenticator plus its own biometric/PIN check is itself multi-factor-equivalent.
+- **`auth.service.ts`** (over the repo's 500-line lint ceiling after this work) split into `AuthService` + new `AuthSessionsService`/`AuthRecoveryService`, mirroring the earlier `JobStopsService` split. A new `LoginMethod` type threads through the MFA-challenge/pre-auth tokens into `LOGIN_SUCCEEDED` audit metadata.
+- **`fleethq-frontend`**: `LoginPage` gained a provider-conditional button stack and a magic-link sub-form; new dependency-free `signInWithOidcPopup` helper (`src/lib/oauth-popup.ts`) drives both Google and Microsoft through one OIDC-implicit-flow popup code path rather than bespoke SDKs; new `MagicLinkPage`/`OAuthCallbackPage` routes; new `PasskeysCard` on the Profile page.
+- Verified: backend `jest` (503/504 — same pre-existing `integrations.e2e-spec.ts` webhook-timeout flake as Phase 1, unrelated) including a from-scratch `VirtualAuthenticator` test helper that drives real ECDSA/CBOR through `@simplewebauthn/server`'s actual verification code; frontend `tsc`/`oxlint`/`vitest` clean; the full password → passkey-enrollment → passkey-login → magic-link-request round trip re-verified in a real headless Chrome session via CDP's `WebAuthn.addVirtualAuthenticator`. OAuth's positive path isn't covered by an automated test (would need a live IdP sandbox) — a known, documented boundary.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 1 (customer session & device management)
 
 First phase of an 11-phase initiative (`22-Auth-Billing-Platform/Overview.md`) closing gaps toward a full enterprise-grade auth/billing/subscription platform. This phase mirrors the admin platform's own session model for customer `User` accounts.

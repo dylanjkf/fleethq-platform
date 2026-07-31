@@ -9,6 +9,10 @@
  * for the company context it was issued for" — hence companyId/membershipId
  * are part of the signed payload, not a client-supplied header.
  */
+/** How this login's first factor was satisfied — carried through to
+ *  AUDIT_ACTIONS.LOGIN_SUCCEEDED's metadata for a real login-history record. */
+export type LoginMethod = 'password' | 'magic_link' | 'oauth_google' | 'oauth_microsoft' | 'webauthn';
+
 export interface JwtPayload {
   /** Subject — the User id. */
   sub: string;
@@ -38,12 +42,16 @@ export interface PreAuthJwtPayload {
    *  company-choice step. */
   rememberMe?: boolean;
   isNewDeviceLogin?: boolean;
+  loginMethod?: LoginMethod;
 }
 
 /**
- * Short-lived token issued after a correct password when the account has MFA
- * enabled but before the second factor has been verified. Only usable against
- * POST /v1/auth/mfa/verify — it grants no access on its own.
+ * Short-lived token issued after a correct first factor (password, magic
+ * link, or a linked social account) when the account has MFA enabled but the
+ * second factor hasn't been verified yet. Only usable against
+ * POST /v1/auth/mfa/verify — it grants no access on its own. A verified
+ * WebAuthn/passkey login never reaches this — see AuthService.completeWebauthnLogin's
+ * doc comment for why.
  */
 export interface MfaChallengePayload {
   sub: string;
@@ -53,6 +61,7 @@ export interface MfaChallengePayload {
   deviceFingerprint?: string;
   rememberMe?: boolean;
   isNewDeviceLogin?: boolean;
+  loginMethod?: LoginMethod;
 }
 
 export interface AuthenticatedRequestUser {

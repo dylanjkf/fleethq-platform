@@ -361,6 +361,8 @@ model User {
   authTokens              AuthToken[]
   sessions                UserSession[]
   trustedDevices          UserTrustedDevice[]
+  oauthIdentities         OAuthIdentity[]
+  webauthnCredentials     WebauthnCredential[]
   documentsUploaded       Document[]            @relation("DocumentUploader")
   knowledgeArticles       KnowledgeArticle[]    @relation("KnowledgeAuthor")
   warehouseMachineLogs    WarehouseMachineLog[] @relation("WarehouseLogAuthor")
@@ -373,6 +375,11 @@ model User {
 enum AuthTokenType {
   EMAIL_VERIFY
   PASSWORD_RESET
+  /// A single-use passwordless-login link, per Auth/Billing Platform Phase 2
+  /// (22-Auth-Billing-Platform/Overview.md). Short-lived (15 minutes), unlike
+  /// EMAIL_VERIFY/PASSWORD_RESET's longer windows — it's a live login attempt,
+  /// not a link someone might reasonably open a day later.
+  MAGIC_LINK
 }
 
 /// Single-use, expiring tokens for email verification, password reset, and
@@ -444,6 +451,64 @@ model UserTrustedDevice {
 
   @@unique([userId, deviceFingerprint])
   @@map("user_trusted_devices")
+}
+
+enum OAuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+/// Links a customer User to an external identity provider account, per Auth/
+/// Billing Platform Phase 2 (22-Auth-Billing-Platform/Overview.md). Social
+/// login is sign-IN only in this product — there is no self-service signup
+/// path (00-Legal/Commercial_Priority.md's decision, see CompaniesController's
+/// doc comment), so a callback with no matching row and no matching verified
+/// email on an existing User is refused, never used to provision an account.
+/// `providerSubject` is the IdP's stable `sub` claim, not the (mutable,
+/// occasionally-shared) email address — the unique constraint is what makes a
+/// second login by the same external account resolve to the same User even if
+/// their email address changes at the provider.
+model OAuthIdentity {
+  id              String        @id @default(uuid()) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  provider        OAuthProvider
+  providerSubject String        @map("provider_subject")
+  /// The verified email at the time of linking — kept for support/audit
+  /// visibility only, never re-used to re-resolve the identity.
+  email           String
+  createdAt       DateTime      @default(now()) @map("created_at")
+  lastUsedAt      DateTime      @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([userId])
+  @@map("user_oauth_identities")
+}
+
+/// A registered WebAuthn/passkey credential (Auth/Billing Platform Phase 2).
+/// `credentialId` and `publicKey` are exactly what a WebAuthn RP must persist
+/// per the spec (webauthn.guide) to verify future authentication assertions;
+/// `signCount` is the authenticator's own replay counter — a future
+/// assertion whose counter doesn't strictly increase indicates a cloned
+/// authenticator and is rejected (see WebauthnService).
+model WebauthnCredential {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// Base64url, per @simplewebauthn/server — unique across all users since a
+  /// physical authenticator's credential id is globally unique by construction.
+  credentialId String    @unique @map("credential_id")
+  publicKey    Bytes     @map("public_key")
+  signCount    BigInt    @default(0) @map("sign_count")
+  transports   String[]  @default([])
+  deviceLabel  String?   @map("device_label")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastUsedAt   DateTime  @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_webauthn_credentials")
 }
 
 /// One browser/device's Web Push registration (04-DriverOS/DriverOS_Overview.md

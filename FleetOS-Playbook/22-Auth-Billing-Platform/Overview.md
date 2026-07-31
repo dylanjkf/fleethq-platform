@@ -16,7 +16,7 @@ drifts into describing features that don't exist yet.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Customer session & device management | **Done** |
-| 2 | Magic link + social login + WebAuthn-ready architecture | Planned |
+| 2 | Magic link + social login + WebAuthn-ready architecture | **Done** |
 | 3 | Password policy depth + per-org mandatory-MFA policy | Planned |
 | 4 | Registration depth (org intake fields) + named role templates | Planned |
 | 5 | Full Stripe webhook coverage + failed-payment handling | Planned |
@@ -95,3 +95,108 @@ SPA's own `SessionsCard`.
 `audit_logs` table already records `auth.login_succeeded`/`auth.login_failed`
 per company; no dedicated endpoint/UI surfaces it yet), WebAuthn/passkeys
 (Phase 2), per-org mandatory-MFA policy (Phase 3).
+
+## Phase 2: Magic link + social login + WebAuthn-ready architecture
+
+Three independent first-factor login methods, all landing on the same
+device-trust/MFA gate (or, for WebAuthn, deliberately bypassing it — see
+below) that password login already used.
+
+**Data model** — `prisma/migrations/20260731070000_magic_link_oauth_webauthn/`:
+
+- `AuthTokenType` gained `MAGIC_LINK` (15-minute TTL — a live login attempt,
+  not a link meant to sit in an inbox, unlike `EMAIL_VERIFY`'s 24h or
+  `PASSWORD_RESET`'s 1h). Reuses the existing single-use, SHA-256-hashed
+  `AuthToken`/`AuthTokensService` machinery — no new token infrastructure.
+- `user_oauth_identities` — `(provider, providerSubject)` unique pair per
+  user, `provider` restricted to `GOOGLE`/`MICROSOFT`. First successful login
+  from a given external identity auto-links it by verified email (refusing
+  ambiguity if more than one account shares that email); every later login
+  resolves through this table instead.
+- `user_webauthn_credentials` — one row per passkey: `credentialId` (unique),
+  `publicKey` (COSE, raw bytes), `signCount`, `transports`, optional
+  `deviceLabel`. Both tables are granted only to the narrow `fleetos_auth`
+  role, matching `users`/`auth_tokens`/`user_sessions`.
+
+**Social login is sign-in only** — consistent with the product's
+no-self-service-signup decision, a Google/Microsoft login can attach to an
+existing account but never creates one. `OidcVerifierService`
+(`src/auth/oidc-verifier.service.ts`) does real cryptographic verification
+against each provider's live, rotating JWKS (`jose`'s `createRemoteJWKSet` +
+`jwtVerify`) — never trusts a client-supplied claim. Google's issuer is a
+fixed string; Microsoft's varies per tenant for the multi-tenant
+`common`/`organizations`/`consumers` endpoints, so a regex checks the issuer
+shape unless a specific tenant GUID is configured. `isConfigured(provider)`
+gates everything else — with no client ID configured for a provider, it's
+simply absent from `GET /v1/auth/providers` and the login endpoint refuses
+cleanly with `PROVIDER_NOT_CONFIGURED`, mirroring `NotificationsModule`'s
+SES-vs-logging-channel config gating.
+
+**WebAuthn/passkeys are usernameless (discoverable-credential) login** — no
+identifier needed; the browser/OS credential picker resolves the account via
+the credential's own stored user handle (`src/auth/webauthn/webauthn.service.ts`,
+built on `@simplewebauthn/server`). Registration/authentication challenges are
+short-lived (2-minute) signed JWTs carrying the challenge string, mirroring
+the existing `PreAuthJwtPayload`/`MfaChallengePayload` pattern — no new
+server-side session-state table. **A verified passkey login is treated as
+already satisfying MFA and bypasses the account's own TOTP policy entirely**
+(`AuthService.completeWebauthnLogin`) — a deliberate product decision:
+possession of the authenticator plus the platform's own biometric/PIN
+presence check is itself multi-factor-equivalent.
+
+**Login-method tracking**: a new `LoginMethod` type
+(`'password' | 'magic_link' | 'oauth_google' | 'oauth_microsoft' | 'webauthn'`)
+threads through `MfaChallengePayload`/`PreAuthJwtPayload` so it survives the
+MFA-challenge and multi-company-chooser hops, ultimately recorded in
+`LOGIN_SUCCEEDED` audit metadata — the start of real login-method visibility
+in the audit trail, not just "a login happened."
+
+**Service split**: `auth.service.ts` was growing past the repo's 500-line
+lint ceiling, so session/device methods extracted into `AuthSessionsService`
+and account-recovery methods (`forgotPassword`/`resetPassword`/`verifyEmail`/
+`resendVerification`) into `AuthRecoveryService` — the same god-service-split
+pattern used earlier for `JobStopsService`. `AuthService` itself now
+orchestrates: password/magic-link/OAuth logins all share one private
+`proceedPastFirstFactor()` tail (device-trust check → MFA challenge or
+straight through), while WebAuthn calls `completeLogin()` directly since it
+skips that gate by design.
+
+**New endpoints**: `GET /v1/auth/providers` (which passwordless/social
+options to offer), `POST /v1/auth/magic-link/request` + `/consume`, `POST
+/v1/auth/oauth/:provider/login`, and six WebAuthn endpoints (registration
+options/verify, list/revoke credentials — all authenticated; login
+options/verify — public, since there's no identifier yet to authenticate).
+
+**Frontend** (`fleethq-frontend`): `LoginPage` gained a provider-conditional
+button stack ("Email me a sign-in link", "Continue with a passkey", and
+"Continue with Google"/"Continue with Microsoft" only when
+`GET /v1/auth/providers` reports them configured) plus its own magic-link
+sub-form. `signInWithOidcPopup` (`src/lib/oauth-popup.ts`) is a
+dependency-free OpenID Connect implicit-flow popup helper — both providers
+share one code path rather than each getting a bespoke SDK integration
+(GSI/MSAL.js), trading a slightly less polished button for a simpler,
+single, auditable flow; it requests only an `id_token` (this app never needs
+an access token) and validates a `state` value against the popup's redirect
+to guard the handoff — the backend's own signature/issuer/audience check is
+what actually establishes trust in the token. New `MagicLinkPage`
+(consume-on-mount, same pattern as `VerifyEmailPage`) and a minimal
+`OAuthCallbackPage` (the popup does all the real work; this page only needs
+to exist so the provider has somewhere to land). New `PasskeysCard` on the
+Profile page (enroll via `startRegistration`, list/revoke), mirroring
+`SessionsCard`'s structure.
+
+**Testing note**: WebAuthn's backend test (`test/auth-passwordless.e2e-spec.ts`)
+drives a from-scratch `VirtualAuthenticator` — a real P-256 keypair, hand-built
+CBOR attestation objects, real ECDSA signatures — through the actual
+`@simplewebauthn/server` verification code, rather than mocking it. The full
+password → passkey-enrollment → passkey-login → magic-link-request round
+trip was also verified in a real headless browser (Chrome DevTools Protocol's
+`WebAuthn.addVirtualAuthenticator`), not just at the API layer. OAuth's
+positive path (a real Google/Microsoft `id_token`) is not covered by an
+automated test — that would need a live IdP sandbox or a DI-override hook
+`buildTestApp()` doesn't currently expose — so coverage is scoped to the
+negative/gating paths (unconfigured provider, unknown provider name), a
+known and accepted boundary.
+
+**Not yet covered by this phase**: per-org mandatory-MFA policy (Phase 3),
+login-history browsing UI (still just audit-log rows).

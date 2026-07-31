@@ -6,7 +6,11 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
+import { AuthSessionsService } from './auth-sessions.service';
+import { AuthRecoveryService } from './auth-recovery.service';
 import { MfaService } from './mfa/mfa.service';
+import { OidcVerifierService } from './oidc-verifier.service';
+import { WebauthnService } from './webauthn/webauthn.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { NotificationsModule } from '../notifications/notifications.module';
 
@@ -24,7 +28,17 @@ import { NotificationsModule } from '../notifications/notifications.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AuthTokensService, AuthMailService, MfaService, JwtStrategy],
-  exports: [AuthService, AuthTokensService, AuthMailService],
+  providers: [
+    AuthService,
+    AuthTokensService,
+    AuthMailService,
+    AuthSessionsService,
+    AuthRecoveryService,
+    MfaService,
+    OidcVerifierService,
+    WebauthnService,
+    JwtStrategy,
+  ],
+  exports: [AuthService, AuthTokensService, AuthMailService, AuthRecoveryService],
 })
 export class AuthModule {}

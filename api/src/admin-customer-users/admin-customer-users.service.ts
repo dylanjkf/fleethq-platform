@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
-import { AuthService } from '../auth/auth.service';
+import { AuthRecoveryService } from '../auth/auth-recovery.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { CreateCustomerUserDto } from './dto/create-customer-user.dto';
@@ -15,7 +15,7 @@ export class AdminCustomerUsersService {
   constructor(
     private readonly adminPrisma: AdminPrismaService,
     private readonly audit: AdminAuditService,
-    private readonly authService: AuthService,
+    private readonly authRecovery: AuthRecoveryService,
     private readonly authTokens: AuthTokensService,
     private readonly authMail: AuthMailService,
   ) {}
@@ -72,23 +72,23 @@ export class AdminCustomerUsersService {
     await this.recordAction(userId, ADMIN_AUDIT_ACTIONS.CUSTOMER_USER_MFA_RESET, context);
   }
 
-  /** Delegates to the customer AuthService's own forgot-password flow — same "no-op if no email on file" behaviour as self-service. */
+  /** Delegates to the customer AuthRecoveryService's own forgot-password flow — same "no-op if no email on file" behaviour as self-service. */
   async sendPasswordReset(userId: string, context: AdminActionContext): Promise<{ emailOnFile: boolean }> {
     const user = await this.requireUser(userId);
-    await this.authService.forgotPassword(user.username);
+    await this.authRecovery.forgotPassword(user.username);
     await this.recordAction(userId, ADMIN_AUDIT_ACTIONS.CUSTOMER_USER_PASSWORD_RESET_SENT, context);
     return { emailOnFile: !!user.email };
   }
 
   /**
-   * Delegates to the customer AuthService's own resend-verification flow —
-   * same "no-op if no email on file, or already verified" behaviour as
-   * self-service. Support scenario: a customer says they never got (or lost)
-   * their verification email.
+   * Delegates to the customer AuthRecoveryService's own resend-verification
+   * flow — same "no-op if no email on file, or already verified" behaviour
+   * as self-service. Support scenario: a customer says they never got (or
+   * lost) their verification email.
    */
   async resendVerification(userId: string, context: AdminActionContext): Promise<{ emailOnFile: boolean }> {
     const user = await this.requireUser(userId);
-    await this.authService.resendVerification(user.username);
+    await this.authRecovery.resendVerification(user.username);
     await this.recordAction(userId, ADMIN_AUDIT_ACTIONS.CUSTOMER_USER_VERIFICATION_RESENT, context);
     return { emailOnFile: !!user.email && !user.emailVerifiedAt };
   }

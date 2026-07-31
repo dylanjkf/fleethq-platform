@@ -29,6 +29,15 @@ export class AuthMailService {
     });
   }
 
+  async sendMagicLink(to: string, fullName: string, token: string): Promise<void> {
+    const link = `${this.baseUrl()}/magic-link?token=${encodeURIComponent(token)}`;
+    await this.channel.sendEmail({
+      to,
+      subject: 'Your FleetOS sign-in link',
+      body: `Hi ${fullName},\n\nClick this link to sign in to FleetOS — no password needed:\n\n${link}\n\nThis link expires in 15 minutes and can only be used once. If you didn't request this, you can ignore this email.`,
+    });
+  }
+
   async sendPasswordReset(to: string, fullName: string, token: string): Promise<void> {
     const link = `${this.baseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
     await this.channel.sendEmail({
