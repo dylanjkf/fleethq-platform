@@ -78,6 +78,7 @@ export class AuthRecoveryService {
     // doesn't keep showing devices that look "active" and aren't.
     await this.sessions.revokeAllSessions(userId);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_RESET, actorUserId: userId, targetType: 'user', targetId: userId });
+    if (user.email) void this.mail.sendPasswordChanged(user.email, user.fullName).catch(() => undefined);
   }
 
   /**
@@ -99,6 +100,7 @@ export class AuthRecoveryService {
       data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date() },
     });
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
+    if (user.email) void this.mail.sendPasswordChanged(user.email, user.fullName).catch(() => undefined);
   }
 
   async verifyEmail(token: string): Promise<void> {

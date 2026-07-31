@@ -3,6 +3,7 @@ import { BadRequestException, ConflictException, Injectable, UnauthorizedExcepti
 import * as bcrypt from 'bcrypt';
 import { SystemPrismaService } from '../../prisma/system-prisma.service';
 import { AuditService, AUDIT_ACTIONS } from '../../audit/audit.service';
+import { AuthMailService } from '../auth-mail.service';
 import { generateSecret, otpauthUrl, verifyTotp } from './totp';
 
 /** Recovery codes: readable, unambiguous alphabet (no 0/O/1/I), grouped 4-4. */
@@ -12,6 +13,8 @@ const BACKUP_CODE_COUNT = 10;
 interface MfaUser {
   id: string;
   username: string;
+  fullName: string;
+  email: string | null;
   mfaSecret: string | null;
   mfaEnabledAt: Date | null;
   mfaBackupCodes: string[];
@@ -30,12 +33,13 @@ export class MfaService {
   constructor(
     private readonly systemPrisma: SystemPrismaService,
     private readonly audit: AuditService,
+    private readonly mail: AuthMailService,
   ) {}
 
   private async requireUser(userId: string): Promise<MfaUser> {
     const user = await this.systemPrisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, username: true, mfaSecret: true, mfaEnabledAt: true, mfaBackupCodes: true },
+      select: { id: true, username: true, fullName: true, email: true, mfaSecret: true, mfaEnabledAt: true, mfaBackupCodes: true },
     });
     if (!user) throw new UnauthorizedException({ code: 'USER_NOT_FOUND', message: 'User not found.' });
     return user;
@@ -72,6 +76,7 @@ export class MfaService {
       data: { mfaEnabledAt: new Date(), mfaBackupCodes: hashes },
     });
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.MFA_ENABLED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
+    if (user.email) void this.mail.sendMfaEnabled(user.email, user.fullName).catch(() => undefined);
     return { backupCodes };
   }
 
@@ -88,6 +93,7 @@ export class MfaService {
       data: { mfaSecret: null, mfaEnabledAt: null, mfaBackupCodes: [] },
     });
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.MFA_DISABLED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });
+    if (user.email) void this.mail.sendMfaDisabled(user.email, user.fullName).catch(() => undefined);
   }
 
   /**

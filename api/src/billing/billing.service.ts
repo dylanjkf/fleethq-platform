@@ -5,6 +5,7 @@ import { SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
+import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isTrialActive } from './plans';
 
 /**
@@ -41,6 +42,7 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
+    private readonly billingMail: BillingMailService,
   ) {}
 
   isConfigured(): boolean {
@@ -331,7 +333,7 @@ export class BillingService {
     }
     const nextAttempt = invoice.next_payment_attempt ? new Date(invoice.next_payment_attempt * 1000) : null;
 
-    await this.prisma.withTenant(companyId, async (tx) => {
+    const { companyName, holders } = await this.prisma.withTenant(companyId, async (tx) => {
       await tx.company.update({
         where: { id: companyId },
         data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: new Date(), nextPaymentAttemptAt: nextAttempt },
@@ -344,7 +346,17 @@ export class BillingService {
           : 'Stripe was unable to charge your payment method and will not retry automatically. Update your payment method to keep your subscription active.',
         linkPath: '/settings/billing',
       });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, holders };
     });
+
+    // Emails are sent after the transaction commits, best-effort — mirroring
+    // AuthMailService.sendNewDeviceLogin's call site: a slow/failed email
+    // provider must never roll back the state change that raised it.
+    this.sendBillingEmails(holders, (email, fullName) =>
+      this.billingMail.sendPaymentFailed(email, fullName, companyName, nextAttempt),
+    );
   }
 
   /**
@@ -357,19 +369,37 @@ export class BillingService {
     const companyId = invoice.parent?.subscription_details?.metadata?.fleetosCompanyId;
     if (!companyId) return;
 
-    await this.prisma.withTenant(companyId, async (tx) => {
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true } });
+    const result = await this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true, name: true } });
       const wasRecovering = company.paymentFailureCount > 0;
       await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null } });
-      if (wasRecovering) {
-        await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
-          type: 'billing.payment_recovered',
-          title: 'Payment received — your subscription is back in good standing',
-          body: 'Your most recent payment succeeded and your subscription is no longer past due.',
-          linkPath: '/settings/billing',
-        });
-      }
+      if (!wasRecovering) return null;
+
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.payment_recovered',
+        title: 'Payment received — your subscription is back in good standing',
+        body: 'Your most recent payment succeeded and your subscription is no longer past due.',
+        linkPath: '/settings/billing',
+      });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, holders };
     });
+    if (!result) return;
+
+    this.sendBillingEmails(result.holders, (email, fullName) => this.billingMail.sendPaymentRecovered(email, fullName, result.companyName));
+  }
+
+  /** Fire-and-forget email fan-out to every billing:manage holder with an email address, skipping those without one (username is a login handle, not an inbox — same convention as the notification digest). */
+  private sendBillingEmails(
+    holders: { fullName: string; email: string | null }[],
+    send: (email: string, fullName: string) => Promise<void>,
+  ): void {
+    for (const holder of holders) {
+      if (!holder.email) continue;
+      void send(holder.email, holder.fullName).catch((err) =>
+        this.logger.warn(`Failed to send a billing notification email: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
   }
 
   private async syncSubscription(companyId: string, stripeCustomerId: string, subscription: Stripe.Subscription): Promise<void> {

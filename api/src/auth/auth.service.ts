@@ -149,19 +149,7 @@ export class AuthService {
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) {
       const locked = await this.recordFailedLogin(user.id, user.failedLoginCount);
-      if (locked) {
-        // Structured event so a CloudWatch metric filter can alarm on a burst of
-        // lockouts (credential-stuffing) — see infra/terraform/modules/monitoring.
-        this.logger.warn({ event: 'auth.account_locked', username, userId: user.id }, 'Account locked after repeated failures');
-        void this.audit.recordSystem({
-          action: AUDIT_ACTIONS.LOGIN_LOCKED_OUT,
-          outcome: 'failure',
-          actorUserId: user.id,
-          actorLabel: user.username,
-          ip: context.ip,
-          requestId: context.requestId,
-        });
-      }
+      if (locked) await this.handleAccountLocked(user, context);
       throw invalidCredentials('wrong_password');
     }
 
@@ -605,6 +593,7 @@ export class AuthService {
     });
     await this.sessions.revokeAllSessions(user.id);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: user.id, actorLabel: user.username, ip: context.ip, requestId: context.requestId });
+    if (user.email) void this.mail.sendPasswordChanged(user.email, user.fullName).catch(() => undefined);
     return this.resumeLoginAfterPolicyAction(payload, context);
   }
 
@@ -672,5 +661,23 @@ export class AuthService {
       },
     });
     return locked;
+  }
+
+  /** Records the audit event and (Auth/Billing Platform Phase 6) sends the account-locked security alert, once `recordFailedLogin` has actually flipped the account to locked. */
+  private async handleAccountLocked(user: User, context: AuthContext): Promise<void> {
+    // Structured event so a CloudWatch metric filter can alarm on a burst of
+    // lockouts (credential-stuffing) — see infra/terraform/modules/monitoring.
+    this.logger.warn({ event: 'auth.account_locked', username: user.username, userId: user.id }, 'Account locked after repeated failures');
+    void this.audit.recordSystem({
+      action: AUDIT_ACTIONS.LOGIN_LOCKED_OUT,
+      outcome: 'failure',
+      actorUserId: user.id,
+      actorLabel: user.username,
+      ip: context.ip,
+      requestId: context.requestId,
+    });
+    if (user.email) {
+      void this.mail.sendAccountLocked(user.email, user.fullName, new Date(Date.now() + AuthService.LOCK_WINDOW_MS)).catch(() => undefined);
+    }
   }
 }

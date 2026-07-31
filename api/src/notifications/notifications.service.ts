@@ -95,6 +95,29 @@ export class NotificationsService {
     }
   }
 
+  /**
+   * The users a `notifyPermissionInTx` call for the same `permissionKey` would
+   * reach, with the profile fields a caller needs to also send a companion
+   * email (`fullName`/`email`) — kept as a separate query rather than having
+   * `notifyPermissionInTx` return this itself, so a caller that only wants
+   * the in-app fan-out (the common case) doesn't pay for `fullName`/`email`
+   * it never uses. Relies on `tx` already being tenant-scoped (via
+   * `PrismaService.withTenant`) rather than filtering on companyId itself,
+   * matching `notifyPermissionInTx`'s own membership query.
+   */
+  async getPermissionHolders(
+    tx: Prisma.TransactionClient,
+    permissionKey: PermissionKey,
+  ): Promise<{ id: string; fullName: string; email: string | null }[]> {
+    const memberships = await tx.companyMembership.findMany({
+      where: { archivedAt: null, role: { archivedAt: null, permissions: { some: { permission: { key: permissionKey } } } } },
+      select: { userId: true },
+    });
+    const userIds = [...new Set(memberships.map((m) => m.userId))];
+    if (userIds.length === 0) return [];
+    return tx.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true, email: true } });
+  }
+
   async listForUser(companyId: string, userId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       const [items, unreadCount, user] = await Promise.all([

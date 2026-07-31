@@ -2,6 +2,16 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 6 (billing & security notification emails)
+
+Two sets of transactional emails (`22-Auth-Billing-Platform/Overview.md`), both through the existing `NotificationChannel` abstraction — no new email infrastructure.
+
+- **Billing**: new `BillingMailService` (`sendPaymentFailed`/`sendPaymentRecovered`), wired into Phase 5's `invoice.payment_failed`/`invoice.paid` webhook handlers — fires after the DB update/in-app notification commits, fire-and-forget, to every `billing:manage` holder with an email on file. A new `NotificationsService.getPermissionHolders()` helper supplies the recipient list without duplicating `notifyPermissionInTx`'s membership query.
+- **Security**: audited every security-relevant account event for whether it already emailed anyone, found four genuine gaps (all already had audit-log coverage — email was the only missing piece): password changed (fires from all three paths that end in a new hash — self-service change, completed reset, policy-forced expiry change), MFA enabled, MFA disabled (the higher-value alert — a classic takeover step), and account locked (reports the real computed unlock time).
+- **Deliberately deferred**: new-passkey-registered has neither audit nor email today — closing it cleanly needs a new `AUDIT_ACTIONS` entry first, left for a later phase rather than folded in here. Admin-forced session revocation has no email hook because the feature itself doesn't exist (revocation is always self-service).
+- **Complexity cleanup**: adding the lockout email pushed `AuthService.login()` over this repo's lint ceiling, so the lockout-handling block (audit record + email) was extracted into its own `handleAccountLocked` method.
+- Verified: new unit specs (`auth-mail.service.spec.ts`, `billing-mail.service.spec.ts`) assert each email's recipient/subject/body against a stub channel — matching this codebase's existing boundary of unit-testing email content rather than asserting on it inside e2e; full backend `jest` suite re-run (542/543 — the one failure is the pre-existing `integrations.e2e-spec.ts` webhook-timeout flake, unrelated); `tsc`/`eslint` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 5 (full Stripe webhook coverage + failed-payment handling)
 
 `BillingService.handleWebhookEvent` (`22-Auth-Billing-Platform/Overview.md`) previously only handled `checkout.session.completed` and the three `customer.subscription.*` events — every invoice/payment event fell into a no-op default branch.

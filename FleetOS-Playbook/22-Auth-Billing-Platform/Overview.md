@@ -20,7 +20,7 @@ drifts into describing features that don't exist yet.
 | 3 | Password policy depth + per-org mandatory-MFA policy | **Done** |
 | 4 | Registration depth (org intake fields) + named role templates | **Done** |
 | 5 | Full Stripe webhook coverage + failed-payment handling | **Done** |
-| 6 | Billing & security notification emails | Planned |
+| 6 | Billing & security notification emails | **Done** |
 | 7 | Customer self-service billing portal UI | Planned |
 | 8 | GST / Australian tax invoicing | Planned |
 | 9 | Usage & feature limit depth | Planned |
@@ -438,3 +438,70 @@ governed entirely by `subscriptionStatus`, unchanged by this phase); and any
 UI surfacing `paymentFailureCount`/`nextPaymentAttemptAt` on a billing
 settings page (Phase 7, "Customer self-service billing portal UI" — the data
 is there now, plumbing it into a UI is that phase's job).
+
+## Phase 6: Billing & security notification emails
+
+Two independent sets of transactional emails, both riding the existing
+`NotificationChannel` abstraction (real SES when configured, log-only
+otherwise) — no new email infrastructure anywhere in this phase.
+
+**Billing emails** — a new `BillingMailService` (`src/billing/billing-mail.service.ts`),
+mirroring `AuthMailService`'s one-method-per-email shape: `sendPaymentFailed`
+and `sendPaymentRecovered`. Wired into the exact two webhook handlers Phase 5
+built (`handleInvoicePaymentFailed`/`handleInvoicePaymentSucceeded`), which
+already computed everything the emails need (next retry date, whether this
+was a genuine recovery) while raising the in-app notification — the DB
+update/in-app-notification/recipient-lookup all happen inside the existing
+`withTenant` transaction, and the emails fire *after* it commits, fire-and-
+forget (a slow/failed email provider must never roll back billing state).
+Recipients are every `billing:manage` holder with an email on file — a new
+`NotificationsService.getPermissionHolders(tx, permissionKey)` helper
+returns `{id, fullName, email}` for exactly the same audience
+`notifyPermissionInTx` would reach, kept as a separate query so the common
+in-app-only callers don't pay for profile fields they never use.
+
+**Security emails** — four gaps found by auditing every security-relevant
+account event for whether it already emailed anyone (all four already had
+audit-log coverage; email was the only missing piece):
+
+- **Password changed** (`AuthMailService.sendPasswordChanged`) — fires from
+  all three paths that end in a new password hash: self-service
+  `changePassword`, a completed `resetPassword`, and the policy-forced
+  `changeExpiredPassword`. Distinct from the existing `sendPasswordReset`,
+  which only sends the *link* that starts a reset — this is the "it actually
+  happened" confirmation, the one signal an account holder has if a password
+  changed without them requesting it.
+- **MFA enabled** (`sendMfaEnabled`) / **MFA disabled** (`sendMfaDisabled`)
+  — fire from `MfaService.confirmEnrollment`/`disable`. MFA being turned
+  *off* is the higher-value alert of the two (a classic account-takeover
+  step); both emails say so plainly.
+- **Account locked** (`sendAccountLocked`) — fires from `AuthService.login()`
+  once `recordFailedLogin` actually flips the account to locked, reporting
+  the real computed unlock time. The lockout-handling block (audit record +
+  new email call) was extracted into a private `handleAccountLocked` method
+  — adding the email call pushed `login()` over this repo's line-count/
+  complexity lint ceiling, and login's control flow doesn't benefit from
+  three more inline statements from a different concern (security alerting)
+  living directly in the credential-check branch.
+
+**Deliberately out of scope**: a new-passkey-registered email — the research
+for this phase found `WebauthnService.verifyRegistration` has **no** audit
+trail either (the one security event genuinely uncovered on both counts,
+not just email), and closing that gap cleanly would mean adding a new
+`AUDIT_ACTIONS` entry first — a small enough change to be worth doing
+deliberately in a later phase rather than folding into this one's scope.
+Also out of scope: admin-forced session revocation has no email hook simply
+because the feature itself doesn't exist in this codebase — revocation is
+always self-service (confirmed by reading every call site of
+`AuthSessionsService.revokeSession`/`revokeAllSessions`).
+
+**Testing**: unit specs (`auth-mail.service.spec.ts`, `billing-mail.service.spec.ts`)
+verify each new email's recipient/subject/body against a stub
+`NotificationChannel` — the codebase's own established boundary is that
+outbound email *content* is unit-tested against the channel abstraction, not
+asserted on inside the e2e suite (no e2e spec anywhere overrides
+`NOTIFICATION_CHANNEL` to capture what was sent); the e2e suites already
+covering password change/reset, MFA enable/disable, and lockout
+(`auth-completeness`, `auth-security-policy`, `mfa`) continued passing
+unchanged, confirming the new fire-and-forget calls don't throw or otherwise
+disrupt those flows.
