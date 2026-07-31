@@ -458,7 +458,11 @@ model AuthToken {
   id        String        @id @default(uuid()) @db.Uuid
   userId    String        @map("user_id") @db.Uuid
   type      AuthTokenType
-  tokenHash String        @map("token_hash")
+  // Unique: a token hash is derived from a cryptographically random secret, so
+  // it identifies exactly one issued token. A unique constraint (not just an
+  // index) both documents that invariant and lets the DB reject an impossible
+  // collision, consistent with the other hash-keyed columns in the schema.
+  tokenHash String        @unique @map("token_hash")
   expiresAt DateTime      @map("expires_at")
   usedAt    DateTime?     @map("used_at")
   createdAt DateTime      @default(now()) @map("created_at")
@@ -1865,7 +1869,11 @@ model ComplianceDocument {
   archivedAt        DateTime?              @map("archived_at")
 
   company        Company     @relation(fields: [companyId], references: [id])
-  asset          Asset?      @relation(fields: [assetId], references: [id])
+  // RESTRICT (not SET NULL): a CHECK constraint requires exactly one of
+  // asset/operator to be set, so nulling asset_id on an asset delete would
+  // violate it and surface an opaque constraint error. RESTRICT instead gives
+  // a clean "still referenced" failure, matching the pattern used elsewhere.
+  asset          Asset?      @relation(fields: [assetId], references: [id], onDelete: Restrict)
   operator       Operator?   @relation(fields: [operatorId], references: [id])
   fileAttachment Attachment? @relation("ComplianceDocumentFile", fields: [fileAttachmentId], references: [id])
 
@@ -2201,7 +2209,12 @@ model FuelEntry {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  company           Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  // RESTRICT (not CASCADE): fuel_entries are financial/expense records, so a
+  // company delete must not silently destroy them — same protective default as
+  // maintenance jobs and checklist submissions. Companies are soft-deleted
+  // (archivedAt) in practice, so this never fires in normal operation; it's a
+  // guard against an accidental hard delete taking spend history with it.
+  company           Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
   asset             Asset?      @relation(fields: [assetId], references: [id])
   operator          Operator?   @relation(fields: [operatorId], references: [id])
   receiptAttachment Attachment? @relation(fields: [receiptAttachmentId], references: [id])

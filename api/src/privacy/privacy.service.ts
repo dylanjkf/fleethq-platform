@@ -96,7 +96,15 @@ export class PrivacyService {
   }
 
   async eraseOperatorData(companyId: string, actorUserId: string, operatorId: string) {
-    return this.prisma.withTenant(companyId, async (tx) => {
+    // Storage keys of S3-backed attachments to purge from object storage. The
+    // actual S3 delete is deferred until AFTER the DB transaction commits: if
+    // the transaction rolled back, deleting the object first would leave the
+    // still-referenced DB row pointing at bytes that no longer exist — a
+    // Privacy Act erasure that instead corrupted live records. On rollback this
+    // list is simply never used.
+    let storageKeysToPurge: string[] = [];
+
+    const result = await this.prisma.withTenant(companyId, async (tx) => {
       const operator = await tx.operator.findUnique({ where: { id: operatorId } });
       if (!operator || operator.companyId !== companyId) {
         throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
@@ -121,6 +129,16 @@ export class PrivacyService {
         where: { id: operatorId },
         // Last-known GPS position is personal information too — clear it along
         // with name/contact, or an erased operator's whereabouts would linger.
+        // (The gps_pings breadcrumb table is deliberately NOT touched here: it
+        // is per-*device* asset telemetry — a GpsPing references a GpsDevice on
+        // an Asset, with no operator link, and neither the device nor the shift
+        // model carries the asset↔operator↔time-window association that would be
+        // needed to attribute a ping to one operator. A vehicle's trail is the
+        // company's record of that asset, contributed to by every operator who
+        // ever drove it; bulk-deleting it on one operator's request would
+        // destroy other data subjects' movements and the asset's operational
+        // history. The operator's own personal position is the denormalised
+        // last-known fields cleared here.)
         data: { fullName: ERASED_NAME, email: null, phone: null, lastLat: null, lastLng: null, lastLocationAt: null },
       });
 
@@ -129,18 +147,14 @@ export class PrivacyService {
       }
 
       if (attachmentIds.length > 0) {
-        // Delete the actual bytes wherever they live. For S3-stored scans,
-        // zeroing the (null) `data` column would leave the real file in the
-        // bucket — a Privacy Act erasure that didn't erase — so the S3 object
-        // is deleted and storageKey cleared too. Inline rows just get their
-        // bytes zeroed as before.
+        // Zero the DB-side bytes for every attachment. For S3-stored scans the
+        // real object also has to go — capture its storage key now (before the
+        // updateMany nulls it) and purge it after commit; see storageKeysToPurge.
         const stored = await tx.attachment.findMany({
           where: { id: { in: attachmentIds }, storageKey: { not: null } },
           select: { storageKey: true },
         });
-        for (const row of stored) {
-          if (row.storageKey) await this.attachmentStorage.remove(row.storageKey);
-        }
+        storageKeysToPurge = stored.map((row) => row.storageKey).filter((k): k is string => !!k);
         await tx.attachment.updateMany({
           where: { id: { in: attachmentIds } },
           data: { filename: 'erased', contentType: 'application/octet-stream', byteSize: 0, data: Buffer.alloc(0), storageKey: null },
@@ -165,5 +179,13 @@ export class PrivacyService {
 
       return { erased: true };
     });
+
+    // Post-commit: the DB rows no longer reference these objects, so purging
+    // them now can't orphan a live reference even if a single remove() fails.
+    for (const storageKey of storageKeysToPurge) {
+      await this.attachmentStorage.remove(storageKey);
+    }
+
+    return result;
   }
 }
