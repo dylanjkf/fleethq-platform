@@ -2,6 +2,16 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 9 (usage & feature limit depth)
+
+A3 already resolved a company's plan tier and enforced its operator/asset count limits, but the entitlements response never reported *usage*, and two plan features declared since A3 — `forms`, `intelligence` — were never actually enforced at the API (only `warehouse` was).
+
+- `Entitlements.usage` (`{operators, assets}`) is now always computed by `EntitlementsService.getUsage()` inside the same transaction that resolves the plan, regardless of whether `BILLING_ENFORCED` is even on; `assertWithinLimit` now reads from this same resolved usage instead of running its own separate count query.
+- `FormTemplatesController`, `FormSubmissionsController`, `PredictiveMaintenanceController`, and `OperationalRecommendationsController` all gained `@RequireFeature(...)` — the same controller-level gate that has enforced `warehouse` since its own paywall phase. `OperationalRecommendationsController` stacks this alongside its pre-existing `@RequireFeatureFlag('operational_recommendations')` ops kill-switch. Verified first that both intelligence endpoints' frontend consumers already degrade gracefully on a 402 (an isolated Maintenance-page tab with its own retry; `AssignJobDialog` falling back to an empty recommendations list).
+- **Deliberately out of scope**: no new limit dimensions (depots, customers, GPS devices, seats, …) — every plan tier has only ever limited operators and assets, and adding another dimension is a pricing decision, not a code decision.
+- `fleethq-frontend`'s `BillingPage` now shows a proactive warning banner once a resource crosses 80% of its plan limit (`usage-warning.ts`'s `getUsageWarnings`/`usageWarningMessage`, kept out of the component file for the fast-refresh lint rule), and each plan card shows the company's own usage against that plan's limit (e.g. "9 of 10 assets") instead of only the bare limit.
+- Verified: `test/entitlements.e2e-spec.ts` gained an asset-limit test (parity with the pre-existing operator-limit test) and a feature-gate test across Free/Starter/Pro tenants for both `forms` and `predictive-maintenance`; new `usage-warning.spec.ts` (6 tests) covers the warning threshold, unlimited/null limits, the `atLimit` boundary, and message phrasing; `tsc`/`eslint`/oxlint clean both repos. Browser-verified live: a Starter-plan company with 9 of 10 assets used shows "You're using 9 of 10 assets on your plan — approaching the limit." on `/billing`, with the Starter plan card reading "9 of 10 assets · 0 of 10 operators".
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 8 (GST / Australian tax invoicing)
 
 FleetOS still never generates its own invoices — this phase feeds Stripe the two pieces of Australian-specific data it needs to produce a compliant tax invoice once it is generating one, plus a config gate to keep it inert until a deployment is actually ready.

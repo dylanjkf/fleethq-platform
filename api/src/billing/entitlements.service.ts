@@ -10,6 +10,14 @@ export interface Entitlements {
   enforced: boolean;
   features: FeatureKey[];
   limits: { maxOperators: number | null; maxAssets: number | null };
+  /**
+   * Auth/Billing Platform Phase 9 (usage & feature limit depth): live counts,
+   * always reported regardless of `enforced` — a company can see its own
+   * usage even before enforcement is switched on. This is what lets the
+   * client show "8 of 10 assets" (or warn as a limit approaches) instead of
+   * the only signal being a failed create request's 402.
+   */
+  usage: { operators: number; assets: number };
   /** Native free-trial state, for the countdown/conversion UI. */
   trialEndsAt: string | null;
   trialActive: boolean;
@@ -43,7 +51,7 @@ export class EntitlementsService {
     };
   }
 
-  private toEntitlements(plan: PlanTier, trialEndsAt: Date | null): Entitlements {
+  private toEntitlements(plan: PlanTier, trialEndsAt: Date | null, usage: { operators: number; assets: number }): Entitlements {
     const enforced = this.isEnforced();
     const effective = enforced ? plan : UNLIMITED_TIER;
     const trialActive = isTrialActive(trialEndsAt);
@@ -54,6 +62,7 @@ export class EntitlementsService {
       enforced,
       features: effective.features,
       limits: effective.limits,
+      usage,
       trialEndsAt: trialEndsAt ? trialEndsAt.toISOString() : null,
       trialActive,
       trialDaysLeft,
@@ -64,27 +73,35 @@ export class EntitlementsService {
     return this.prisma.withTenant(companyId, async (tx) => this.resolve(tx, companyId));
   }
 
+  private async getUsage(tx: Prisma.TransactionClient): Promise<{ operators: number; assets: number }> {
+    const [operators, assets] = await Promise.all([
+      tx.operator.count({ where: { archivedAt: null } }),
+      tx.asset.count({ where: { archivedAt: null } }),
+    ]);
+    return { operators, assets };
+  }
+
   private async resolve(tx: Prisma.TransactionClient, companyId: string): Promise<Entitlements> {
     const company = await tx.company.findUniqueOrThrow({
       where: { id: companyId },
       select: { subscriptionStatus: true, planPriceId: true, trialEndsAt: true },
     });
     const plan = resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
-    return this.toEntitlements(plan, company.trialEndsAt);
+    const usage = await this.getUsage(tx);
+    return this.toEntitlements(plan, company.trialEndsAt, usage);
   }
 
   /**
    * Blocks creating another operator/asset past the plan limit (402). No-op
    * when enforcement is off or the plan's limit is unlimited, so it's safe to
-   * call unconditionally from the create paths.
+   * call unconditionally from the create paths. Reuses `resolve()`'s own live
+   * usage count rather than querying twice.
    */
   async assertWithinLimit(tx: Prisma.TransactionClient, companyId: string, resource: 'operators' | 'assets'): Promise<void> {
     const entitlements = await this.resolve(tx, companyId);
     const limit = resource === 'operators' ? entitlements.limits.maxOperators : entitlements.limits.maxAssets;
     if (limit == null) return;
-    const current = resource === 'operators'
-      ? await tx.operator.count({ where: { archivedAt: null } })
-      : await tx.asset.count({ where: { archivedAt: null } });
+    const current = entitlements.usage[resource];
     if (current >= limit) {
       throw new HttpException(
         {

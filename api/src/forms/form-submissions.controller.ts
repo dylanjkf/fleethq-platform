@@ -1,12 +1,15 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { RequireFeature } from '../common/decorators/require-feature.decorator';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
 import { FormsService } from './forms.service';
 import { SubmitFormDto } from './dto/submit-form.dto';
 import { ListFormSubmissionsDto } from './dto/list-form-submissions.dto';
 
+/** See FormTemplatesController's own doc comment — same `forms` feature gate. */
+@RequireFeature('forms')
 @Controller({ path: 'form-submissions', version: '1' })
 export class FormSubmissionsController {
   constructor(private readonly forms: FormsService) {}

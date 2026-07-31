@@ -23,7 +23,7 @@ drifts into describing features that don't exist yet.
 | 6 | Billing & security notification emails | **Done** |
 | 7 | Customer self-service billing portal UI | **Done** |
 | 8 | GST / Australian tax invoicing | **Done** |
-| 9 | Usage & feature limit depth | Planned |
+| 9 | Usage & feature limit depth | **Done** |
 | 10 | Security hardening depth | Planned |
 | 11 | Final verify, docs, CHANGELOG | Planned |
 
@@ -606,3 +606,62 @@ already has a Stripe customer (so no accidental double-attach risk); and
 were re-run as a regression check (all still pass — this phase only
 extends `createCheckoutSession`/`createCustomer`'s optional params, no
 existing behavior changed).
+
+## Phase 9: Usage & feature limit depth
+
+A3 (`19-Billing/Billing_And_Subscriptions.md`) already resolved each company
+to a plan tier and enforced its operator/asset count limits, but two gaps
+remained: the entitlements response never told a company how close it was
+to a limit until a create request actually failed with a 402, and two of
+the four plan features declared since A3 — `forms` and `intelligence` — were
+never actually gated at the API, only `warehouse` was. This phase closes
+both gaps using the existing mechanisms rather than inventing new ones.
+
+- **Live usage counters**: `EntitlementsService.getUsage()` runs
+  `tx.operator.count()`/`tx.asset.count()` (both `archivedAt: null`) inside
+  the same transaction that already resolves the plan, and the result is
+  always included on `Entitlements.usage` — regardless of whether
+  enforcement is even switched on, so a company can see "8 of 10 assets"
+  before `BILLING_ENFORCED` is ever turned on for its deployment.
+  `assertWithinLimit` now reads from this same resolved usage instead of
+  running its own separate count query, so there's exactly one code path
+  computing a company's usage.
+- **`forms`/`intelligence` feature gates**: `FormTemplatesController`,
+  `FormSubmissionsController`, `PredictiveMaintenanceController`, and
+  `OperationalRecommendationsController` all gained `@RequireFeature(...)`
+  — the same controller-level decorator + `FeatureGuard` that has enforced
+  `warehouse` since its own paywall phase, returning 402
+  `FEATURE_NOT_IN_PLAN` for a company whose plan doesn't declare the
+  feature. `OperationalRecommendationsController` stacks this alongside its
+  pre-existing `@RequireFeatureFlag('operational_recommendations')` ops
+  kill-switch — the two gates answer different questions (does the plan
+  include this vs. is this rolled out at all) and both still apply.
+  Verified before gating that both intelligence endpoints' frontend
+  consumers already degrade gracefully on a failed request (an isolated
+  Maintenance-page tab with its own retry; `AssignJobDialog` treating a
+  failed recommendations call as an empty list) — a 402 here doesn't block
+  any core dispatch/maintenance workflow.
+- **Deliberately out of scope**: no new limit dimensions (depots,
+  customers, GPS devices, seats, …) were introduced. Every plan tier since
+  A3 has only ever limited operators and assets; adding another dimension
+  is a pricing/business decision, not something this phase should decide
+  unilaterally in code.
+- **Frontend**: `BillingPage` now shows a proactive warning banner once a
+  resource crosses 80% of its plan limit (`getUsageWarnings`/
+  `usageWarningMessage` in `usage-warning.ts`, kept out of the component
+  file per the fast-refresh lint rule), and each plan card shows the
+  company's own current usage against that plan's limit (e.g. "9 of 10
+  assets") instead of only the bare limit.
+
+**Testing**: `test/entitlements.e2e-spec.ts` gained an asset-limit test
+(parity with the pre-existing operator-limit test) and a feature-gate test
+covering Free/Starter/Pro tenants against both `forms` and
+`predictive-maintenance` endpoints; the existing operator-limit test now
+also asserts `usage.operators` before and after filling the plan. All 4
+tests pass. `usage-warning.spec.ts` (new, 6 tests) covers the warning
+threshold, the unlimited/null-limit case, the `atLimit` boundary, both
+resources reported independently, and message phrasing. Verified live in a
+browser: a company on the Starter plan with 9 of 10 assets used shows
+"You're using 9 of 10 assets on your plan — approaching the limit." on
+`/billing`, and the Starter plan card reads "9 of 10 assets · 0 of 10
+operators".
