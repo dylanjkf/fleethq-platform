@@ -17,6 +17,9 @@
 import './load-env';
 import { PrismaClient, JobStatus, StopOutcome, StopFailureReason, ComplianceDocumentType, MaintenanceJobStatus } from '@prisma/client';
 import { provisionCompany } from '../src/companies/provision-company';
+import { assertSafeToSeed } from './seed-guard';
+
+assertSafeToSeed('seed-demo-company');
 
 const prisma = new PrismaClient();
 

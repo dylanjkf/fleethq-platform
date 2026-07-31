@@ -108,6 +108,36 @@ describe('validateEnv', () => {
     ).not.toThrow();
   });
 
+  it('rejects the in-repo INTEGRATION_CREDENTIAL_KEY placeholder in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a'.repeat(48),
+        ADMIN_JWT_SECRET: 'b'.repeat(48),
+        INTEGRATION_CREDENTIAL_KEY: 'Q0hBTkdFLU1FLWRldi1vbmx5LW5vdC1mb3ItcHJvZCE=',
+      }),
+    ).toThrow(/INTEGRATION_CREDENTIAL_KEY is still the in-repo example key/);
+  });
+
+  it('also rejects the historically-committed INTEGRATION_CREDENTIAL_KEY in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a'.repeat(48),
+        ADMIN_JWT_SECRET: 'b'.repeat(48),
+        INTEGRATION_CREDENTIAL_KEY: 'JdKT12mhp2Qmo/Hh9ml7kOgmb6CZsMeSe+wW6ViXam0=',
+      }),
+    ).toThrow(/INTEGRATION_CREDENTIAL_KEY is still the in-repo example key/);
+  });
+
+  it('allows the placeholder INTEGRATION_CREDENTIAL_KEY outside production (dev/CI)', () => {
+    expect(() =>
+      validateEnv({ ...base, INTEGRATION_CREDENTIAL_KEY: 'Q0hBTkdFLU1FLWRldi1vbmx5LW5vdC1mb3ItcHJvZCE=' }),
+    ).not.toThrow();
+  });
+
   it('returns the config unchanged when valid', () => {
     const config = { ...base, EXTRA: 'keep-me' };
     expect(validateEnv(config)).toEqual(config);

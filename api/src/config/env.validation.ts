@@ -26,6 +26,19 @@ const PLACEHOLDER_ADMIN_JWT_SECRET = 'local-dev-only-change-me-admin';
 const MIN_PROD_SECRET_LENGTH = 32;
 
 /**
+ * The Integration Hub credential-vault key shipped in `.env.example`. Unlike
+ * JWT_SECRET it decodes to 32 real bytes, so it looks like a genuine generated
+ * secret and is easy to copy into production unchanged — at which point every
+ * stored third-party credential across every tenant becomes decryptable to
+ * anyone who has read this public repository. Rejected outright in production,
+ * same fail-fast treatment as the placeholder JWT secrets.
+ */
+const PLACEHOLDER_INTEGRATION_CREDENTIAL_KEYS = [
+  'JdKT12mhp2Qmo/Hh9ml7kOgmb6CZsMeSe+wW6ViXam0=', // the value historically committed to .env.example
+  'Q0hBTkdFLU1FLWRldi1vbmx5LW5vdC1mb3ItcHJvZCE=', // the current placeholder (decodes to "CHANGE-ME-dev-only-not-for-prod!")
+];
+
+/**
  * The well-known dev-only Postgres role passwords from docker-compose.yml /
  * .env.example. If any of these ever appears in a production connection string
  * it means the deploy's password-rotation step (deploy-api.yml runs
@@ -118,6 +131,15 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
     }
     if (adminSecret.length > 0 && adminSecret === secret) {
       errors.push('ADMIN_JWT_SECRET must not be the same value as JWT_SECRET — a shared secret would let a token signed for one audience be replayed against the other.');
+    }
+
+    // The in-repo Integration Hub credential-vault key must never survive into
+    // production — it's public, so every stored tenant credential would be
+    // decryptable. (In dev/test the committed value is fine and intended.)
+    if (PLACEHOLDER_INTEGRATION_CREDENTIAL_KEYS.includes(integrationKeyRaw)) {
+      errors.push(
+        'INTEGRATION_CREDENTIAL_KEY is still the in-repo example key — generate a unique one (`openssl rand -base64 32`) per environment, or every stored integration credential is decryptable from the public repo.',
+      );
     }
 
     // The dev-only database role passwords must never survive into production.

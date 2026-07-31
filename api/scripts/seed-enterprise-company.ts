@@ -22,6 +22,9 @@ import { randomUUID } from 'crypto';
 import { JobStatus, MessageSenderType, PrismaClient, StopOutcome } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { provisionCompany } from '../src/companies/provision-company';
+import { assertSafeToSeed } from './seed-guard';
+
+assertSafeToSeed('seed-enterprise-company');
 
 const prisma = new PrismaClient();
 
