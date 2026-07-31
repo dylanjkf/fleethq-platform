@@ -18,7 +18,7 @@ export class BillingMailService {
   ) {}
 
   private billingSettingsLink(): string {
-    return `${this.config.get<string>('APP_BASE_URL', 'http://localhost:5173').replace(/\/$/, '')}/settings/billing`;
+    return `${this.config.get<string>('APP_BASE_URL', 'http://localhost:5173').replace(/\/$/, '')}/billing`;
   }
 
   async sendPaymentFailed(to: string, fullName: string, companyName: string, nextAttempt: Date | null): Promise<void> {

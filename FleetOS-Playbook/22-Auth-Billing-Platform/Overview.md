@@ -21,7 +21,7 @@ drifts into describing features that don't exist yet.
 | 4 | Registration depth (org intake fields) + named role templates | **Done** |
 | 5 | Full Stripe webhook coverage + failed-payment handling | **Done** |
 | 6 | Billing & security notification emails | **Done** |
-| 7 | Customer self-service billing portal UI | Planned |
+| 7 | Customer self-service billing portal UI | **Done** |
 | 8 | GST / Australian tax invoicing | Planned |
 | 9 | Usage & feature limit depth | Planned |
 | 10 | Security hardening depth | Planned |
@@ -505,3 +505,56 @@ covering password change/reset, MFA enable/disable, and lockout
 (`auth-completeness`, `auth-security-policy`, `mfa`) continued passing
 unchanged, confirming the new fire-and-forget calls don't throw or otherwise
 disrupt those flows.
+
+## Phase 7: Customer self-service billing portal UI
+
+The self-service billing UI (`fleethq-frontend`'s `BillingPage.tsx` —
+subscription/trial badge, plan picker, Stripe portal button) already existed
+from earlier work (A3's plan tiers, the self-serve-signup/trial-concept
+milestone). This phase closes the specific gap Phase 5/6 opened: the backend
+had been computing and emailing dunning-cycle detail
+(`paymentFailureCount`/`lastPaymentFailedAt`/`nextPaymentAttemptAt`) since
+Phase 5, but nothing in the frontend type or UI read it — `GET
+/v1/billing/status` already returned all three fields; the frontend's
+`BillingStatus` interface (`src/api/types.ts`) simply hadn't been extended to
+match, so they were silently dropped by the type before ever reaching a
+component.
+
+**What changed**:
+
+- `BillingStatus` (`src/api/types.ts`) gained the three fields.
+- The PAST_DUE banner, previously one static sentence regardless of retry
+  state ("Your last payment didn't go through. Update your payment method to
+  avoid any interruption."), now reports the real attempt count (once
+  `paymentFailureCount > 1`) and either the actual next-retry date or that
+  retries are exhausted — via a new pure `paymentFailureMessage()` helper
+  (`src/features/billing/payment-failure-message.ts`, kept out of
+  `BillingPage.tsx` so that file stays components-only for fast refresh).
+  The banner also gained its own "Update payment method" button (opens the
+  same Stripe portal session as the page's existing "Manage billing"
+  button) so the CTA is immediate rather than requiring a scroll down to the
+  subscription-management box — extracted into its own `PaymentFailureBanner`
+  component alongside the existing `PlanCard`.
+- **A stale link fixed along the way**: the Phase 6 billing emails
+  (`BillingMailService`) linked to `/settings/billing`, which doesn't exist
+  — the real route is `/billing` (`src/app/router.tsx`). Corrected in both
+  `BillingMailService` and the two `linkPath`s `BillingService` sets on the
+  in-app notifications.
+
+**Deliberately not built** (a documented existing decision, not an
+oversight): an in-app invoice/payment history list.
+`19-Billing/Billing_And_Subscriptions.md` already states this is
+intentionally deferred to the Stripe-hosted Billing Portal ("FleetOS links
+out to it rather than rebuilding it") — this phase didn't reverse that
+decision, since nothing about Phase 5/6's new data changes the calculus
+(Stripe's own portal already shows the full invoice list with none of this
+data-duplication risk).
+
+**Testing**: `payment-failure-message.spec.ts` pins the three real message
+states (next-retry-date, attempt-count-appended, retries-exhausted). The
+banner's actual rendering (badge, message, "Update payment method" button
+appearing/disappearing correctly) was verified in a real headless browser —
+a company was created via the real signup endpoint, moved to `PAST_DUE` with
+`paymentFailureCount=3` directly in Postgres (bypassing Stripe, which isn't
+configured in this dev environment), and the rendered `/billing` page was
+screenshotted and its text content asserted against.

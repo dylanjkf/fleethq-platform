@@ -344,7 +344,7 @@ export class BillingService {
         body: nextAttempt
           ? `Stripe was unable to charge your payment method and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}. Update your payment method to avoid an interruption.`
           : 'Stripe was unable to charge your payment method and will not retry automatically. Update your payment method to keep your subscription active.',
-        linkPath: '/settings/billing',
+        linkPath: '/billing',
       });
       const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
@@ -379,7 +379,7 @@ export class BillingService {
         type: 'billing.payment_recovered',
         title: 'Payment received — your subscription is back in good standing',
         body: 'Your most recent payment succeeded and your subscription is no longer past due.',
-        linkPath: '/settings/billing',
+        linkPath: '/billing',
       });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
       return { companyName: company.name, holders };

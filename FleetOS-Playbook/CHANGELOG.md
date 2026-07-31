@@ -2,6 +2,16 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 7 (customer self-service billing portal UI)
+
+`fleethq-frontend`'s Billing page already existed (subscription badge, plan picker, Stripe portal button) — this phase closes the gap Phase 5/6 opened: the backend computed/emailed dunning-cycle detail since Phase 5, but the frontend `BillingStatus` type never picked up the three new fields, so the UI silently had no way to show them.
+
+- `BillingStatus` (`src/api/types.ts`) gained `paymentFailureCount`/`lastPaymentFailedAt`/`nextPaymentAttemptAt`.
+- The PAST_DUE banner went from one static sentence to reporting the real attempt count and either the actual next-retry date or that retries are exhausted, via a new pure `paymentFailureMessage()` helper (kept in its own module so `BillingPage.tsx` stays components-only for fast refresh) — plus its own "Update payment method" button so the CTA doesn't require scrolling down to the subscription box.
+- **Fixed a stale link found along the way**: Phase 6's billing emails linked to `/settings/billing`, which doesn't exist — the real route is `/billing`. Corrected in `BillingMailService` and the two in-app notification `linkPath`s in `BillingService`.
+- **Deliberately not built**: an in-app invoice/payment history list — `19-Billing/Billing_And_Subscriptions.md` already documents this as intentionally deferred to the Stripe-hosted Billing Portal; nothing about this phase's new data changes that calculus.
+- Verified: new `payment-failure-message.spec.ts` (vitest) pins the three message states; frontend `tsc`/oxlint/vitest clean; the banner's actual rendering (badge, message, button visibility) was browser-verified — a real signed-up company moved to `PAST_DUE` with a failure count directly in Postgres (Stripe isn't configured in this dev environment), then screenshotted and asserted against at `/billing`.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 6 (billing & security notification emails)
 
 Two sets of transactional emails (`22-Auth-Billing-Platform/Overview.md`), both through the existing `NotificationChannel` abstraction — no new email infrastructure.
