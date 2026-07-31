@@ -1,6 +1,8 @@
 import { Controller, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
+import { ADMIN_SENSITIVE_ACTION_THROTTLE } from '../common/throttles';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
 import { RequireAdminPermission } from '../admin-auth/decorators/require-admin-permission.decorator';
 import { CurrentAdmin } from '../admin-auth/decorators/current-admin.decorator';
@@ -41,6 +43,7 @@ export class AdminCustomerUsersController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':userId/unlock')
   @HttpCode(HttpStatus.OK)
   async unlock(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
@@ -50,6 +53,7 @@ export class AdminCustomerUsersController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':userId/reset-mfa')
   @HttpCode(HttpStatus.OK)
   async resetMfa(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {

@@ -5,7 +5,7 @@ import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
-import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
+import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
 import { AdminJwtPayload, AdminMfaChallengePayload } from './admin-jwt-payload.interface';
 
 export interface AdminAuthContext {
@@ -123,19 +123,16 @@ export class AdminAuthService {
 
     const result = await this.mfa.verifyChallenge(user, code);
     if (!result.ok) {
-      await this.audit.record({
-        adminUserId: user.id,
-        action: ADMIN_AUDIT_ACTIONS.MFA_CHALLENGE_FAILED,
-        entityType: 'admin_user',
-        entityId: user.id,
-        ip: context.ip,
-        userAgent: context.userAgent,
-      });
+      await this.auditAdminUserEvent(user.id, ADMIN_AUDIT_ACTIONS.MFA_CHALLENGE_FAILED, context);
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+    }
+    if (result.usedBackupCode) {
+      await this.auditAdminUserEvent(user.id, ADMIN_AUDIT_ACTIONS.MFA_BACKUP_CODE_USED, context);
     }
 
     if (rememberDevice && payload.deviceFingerprint) {
       await this.trustDevice(user.id, payload.deviceFingerprint);
+      await this.auditAdminUserEvent(user.id, ADMIN_AUDIT_ACTIONS.DEVICE_TRUSTED, context);
     }
 
     return this.completeLogin(user.id, context);
@@ -219,8 +216,16 @@ export class AdminAuthService {
     });
   }
 
-  async logout(sessionId: string): Promise<void> {
+  async logout(adminUserId: string, sessionId: string, context: AdminAuthContext = {}): Promise<void> {
     await this.adminPrisma.adminSession.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } });
+    await this.audit.record({
+      adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.LOGOUT,
+      entityType: 'admin_session',
+      entityId: sessionId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
   }
 
   private async isDeviceTrusted(adminUserId: string, deviceFingerprint: string): Promise<boolean> {
@@ -242,6 +247,17 @@ export class AdminAuthService {
   /** Never store a client-supplied identifier verbatim, even though it isn't a credential. */
   private hashFingerprint(raw: string): string {
     return createHash('sha256').update(raw).digest('hex');
+  }
+
+  private async auditAdminUserEvent(adminUserId: string, action: AdminAuditAction, context: AdminAuthContext): Promise<void> {
+    await this.audit.record({
+      adminUserId,
+      action,
+      entityType: 'admin_user',
+      entityId: adminUserId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
   }
 
   private async recordAttempt(username: string, success: boolean, failureReason: string | null, context: AdminAuthContext): Promise<void> {

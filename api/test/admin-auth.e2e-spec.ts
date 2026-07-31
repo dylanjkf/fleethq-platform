@@ -161,4 +161,88 @@ describe('Admin Auth', () => {
       .set('Authorization', `Bearer ${token}`)
       .expect(401);
   });
+
+  it('disables MFA with a correct code, and rejects a wrong one', async () => {
+    const admin = await createTestAdmin([]);
+    const loginRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    const token = loginRes.body.accessToken as string;
+
+    const setupRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/setup')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    const secret = setupRes.body.secret as string;
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/enable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: totp(secret) })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/disable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: 'wrong-code' })
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/disable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: totp(secret) })
+      .expect(200);
+
+    // Disabled — a subsequent login must not challenge for MFA anymore.
+    const nextLogin = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    expect(nextLogin.body.status).toBe('authenticated');
+  });
+
+  it('audit-logs MFA enable, MFA disable, and logout as distinct events', async () => {
+    const admin = await createTestAdmin([ADMIN_PERMISSIONS.AUDIT_LOG_VIEW]);
+    const loginRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    const token = loginRes.body.accessToken as string;
+
+    const setupRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/setup')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    const secret = setupRes.body.secret as string;
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/enable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: totp(secret) })
+      .expect(200);
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/disable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: totp(secret) })
+      .expect(200);
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/logout')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    // Log back in (the token above is now revoked) to browse the audit log.
+    const viewerLogin = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    const viewerToken = viewerLogin.body.accessToken as string;
+
+    for (const action of ['admin_auth.mfa_enabled', 'admin_auth.mfa_disabled', 'admin_auth.logout']) {
+      const res = await request(app.getHttpServer())
+        .get('/v1/admin/audit-log')
+        .query({ action, adminUserId: admin.adminUserId })
+        .set('Authorization', `Bearer ${viewerToken}`)
+        .expect(200);
+      expect(res.body.items.length).toBeGreaterThanOrEqual(1);
+    }
+  });
 });

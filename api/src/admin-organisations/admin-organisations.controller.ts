@@ -1,6 +1,8 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
+import { ADMIN_SENSITIVE_ACTION_THROTTLE } from '../common/throttles';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
 import { RequireAdminPermission } from '../admin-auth/decorators/require-admin-permission.decorator';
 import { CurrentAdmin } from '../admin-auth/decorators/current-admin.decorator';
@@ -116,6 +118,7 @@ export class AdminOrganisationsController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_IMPERSONATE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':id/impersonate')
   @HttpCode(HttpStatus.OK)
   impersonate(

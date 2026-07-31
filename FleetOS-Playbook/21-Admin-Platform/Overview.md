@@ -25,7 +25,7 @@ yet.
 | 4 | Billing operations on top of the existing Stripe integration | **Done** |
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | **Done** |
 | 6 | Admin frontend SPA (`admin/`) | **Done** |
-| 7 | Audit-log wiring across every phase, hardening, docs, tests | Pending |
+| 7 | Audit-log wiring across every phase, hardening, docs, tests | **Done** |
 
 ## Isolation model
 
@@ -388,9 +388,10 @@ Not a scaffold: `operational-recommendations`'s two routes are gated on a real f
 ### Audit log browse endpoint (Phase 6 prereq)
 
 `AdminAuditService.list()` / `GET /v1/admin/audit-log` (`audit_log:view`) —
-every phase above already *writes* to `admin_audit_logs` on every mutating
-action; this is the first endpoint that *reads* it back, paginated and
-filterable by `action`/`entityType`/`organisationId`/`adminUserId`/`from`/`to`.
+every mutating admin action writes to `admin_audit_logs` (a handful of gaps
+in `admin-auth` were closed in Phase 7, below); this is the first endpoint
+that *reads* it back, paginated and filterable by
+`action`/`entityType`/`organisationId`/`adminUserId`/`from`/`to`.
 Needed before the frontend could have a real Audit Log page rather than a
 placeholder. `test/admin-audit-log.e2e-spec.ts`: auth/permission rejection
 and a positive test that creates an announcement, then finds its
@@ -476,9 +477,67 @@ announcement, confirmed via a fresh fetch each time), and organisation-detail
 navigation from the list. No console errors or failed requests during the
 run.
 
+## Audit wiring, hardening, tests, docs (Phase 7)
+
+Closed the gaps a systematic audit of every admin-\* service/controller
+found, rather than a rebuild — Phases 1-6 already audit-logged the large
+majority of mutations correctly.
+
+**Audit logging gaps, all in `admin-auth`** (every other admin module was
+already complete): MFA enrolment (`MFA_ENABLED`) and disablement
+(`MFA_DISABLED`) were silent; a backup code being consumed during either a
+login MFA challenge or a disable-MFA challenge went unlogged
+(`MFA_BACKUP_CODE_USED` — a real signal an admin's authenticator may be
+lost/compromised); `logout()` revoked the session without a trail, unlike
+the near-identical `revokeOwnSession()` right above it in the same file
+(`LOGOUT`); and "remember this device" silently extended a 30-day MFA-skip
+window with no record (`DEVICE_TRUSTED`). Five new `ADMIN_AUDIT_ACTIONS`,
+wired at the point each event actually completes.
+
+**Permission-guard coverage test had a blind spot.**
+`test/admin-route-permission-coverage.spec.ts` dynamically scans every
+`Admin*Controller` for the `@AdminAuthenticatedOnly()`/
+`@RequireAdminPermission()` classification decorator — but never checked
+that `AdminJwtAuthGuard`/`AdminPermissionGuard` (wired per-route via
+`@AdminGuarded()`, not globally — every admin controller is `@Public()` from
+the *customer* stack's perspective) were actually present on the route. A
+future route carrying the classification decorator but missing
+`@AdminGuarded()` would have passed this test while being completely
+unauthenticated in production. Now asserts `Reflect.getMetadata(GUARDS_METADATA, ...)`
+includes both guard classes on every non-exempt route.
+
+**Rate limiting on high-value mutations.** Only `admin-auth`'s own
+credential/code-checking routes were tightly throttled; every other admin
+mutation — including Stripe billing actions and customer-account
+impersonation/MFA-reset/unlock — fell back to the app-wide 300/min default,
+far too loose for actions with real financial or account-takeover blast
+radius. New `ADMIN_SENSITIVE_ACTION_THROTTLE` (20/min, `src/common/throttles.ts`,
+alongside the existing `BULK_THROTTLE`/`EXPORT_THROTTLE`/etc. presets) now
+gates all seven `AdminBillingController` mutations, organisation
+impersonation, and customer-user `unlock`/`reset-mfa`.
+
+**Test coverage**: `test/admin-auth.e2e-spec.ts` gained an `mfa/disable`
+positive-and-negative-code test and a test proving the five new events above
+land in the audit log (queried back through `GET /v1/admin/audit-log`, the
+same endpoint the frontend uses — not a raw DB check). New
+`src/admin-billing/admin-billing.service.spec.ts` (11 tests, Stripe client
+mocked): every one of the seven mutating billing methods' happy path, the
+cross-tenant invoice-ownership rejection, and both reinstate-subscription
+refusal branches — the e2e suite could only cover the "no Stripe
+customer/subscription yet" refusal paths, since a completed refund/coupon/
+invoice/credit-note/retry needs a live Stripe test account this offline
+suite doesn't have.
+
+**Not done in this phase, deliberately out of scope**: CSRF protection —
+inapplicable by construction (bearer token in the `Authorization` header via
+`admin/`'s `tokenStore`, never a cookie, so there's no ambient credential a
+cross-site request could ride on). CORS: `CORS_ALLOWED_ORIGINS` already
+supports an arbitrary allowlist (`main.ts`); a deployed `admin/`'s origin
+just needs adding to that env var alongside `fleethq-frontend`'s, a
+deployment-config step rather than a code change.
+
 ## Not yet built
 
 FleetHQ staff account management (`admin_users:view`/`manage` — creating
 admins other than via the one-time bootstrap script) — see the status table
-above. Phase 7 (audit-log wiring depth, security hardening, broader test
-coverage, docs) is still pending.
+above.

@@ -14,6 +14,8 @@ import { ManualInvoiceDto } from './dto/manual-invoice.dto';
 import { CreditNoteDto } from './dto/credit-note.dto';
 import { RetryPaymentDto } from './dto/retry-payment.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
+import { Throttle } from '@nestjs/throttler';
+import { ADMIN_SENSITIVE_ACTION_THROTTLE } from '../common/throttles';
 
 /** See AdminAuthController's docstring for why every route here is `@Public()` from the customer stack's perspective. */
 @Public()
@@ -37,6 +39,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('refund')
   @HttpCode(HttpStatus.OK)
   refund(
@@ -51,6 +54,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('coupon')
   @HttpCode(HttpStatus.OK)
   applyCoupon(
@@ -65,6 +69,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('manual-invoice')
   @HttpCode(HttpStatus.OK)
   createManualInvoice(
@@ -79,6 +84,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('credit-note')
   @HttpCode(HttpStatus.OK)
   issueCreditNote(
@@ -93,6 +99,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('retry-payment')
   @HttpCode(HttpStatus.OK)
   retryPayment(
@@ -107,6 +114,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('cancel')
   @HttpCode(HttpStatus.OK)
   cancelSubscription(
@@ -121,6 +129,7 @@ export class AdminBillingController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post('reinstate')
   @HttpCode(HttpStatus.OK)
   reinstateSubscription(

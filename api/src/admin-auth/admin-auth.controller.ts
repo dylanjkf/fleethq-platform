@@ -91,8 +91,8 @@ export class AdminAuthController {
   @AdminAuthenticatedOnly()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  async logout(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
-    await this.adminAuth.logout(admin.sessionId);
+  async logout(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+    await this.adminAuth.logout(admin.adminUserId, admin.sessionId, { ip, userAgent: req.get('user-agent') ?? null });
     return { ok: true };
   }
 
@@ -111,8 +111,8 @@ export class AdminAuthController {
   @Throttle(ADMIN_AUTH_THROTTLE)
   @Post('mfa/enable')
   @HttpCode(HttpStatus.OK)
-  enableMfa(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Body() dto: AdminMfaCodeDto) {
-    return this.mfa.confirmEnrollment(admin.adminUserId, dto.code);
+  enableMfa(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Body() dto: AdminMfaCodeDto, @Ip() ip: string, @Req() req: Request) {
+    return this.mfa.confirmEnrollment(admin.adminUserId, dto.code, { ip, userAgent: req.get('user-agent') ?? null });
   }
 
   @AdminGuarded()
@@ -120,8 +120,8 @@ export class AdminAuthController {
   @Throttle(ADMIN_AUTH_THROTTLE)
   @Post('mfa/disable')
   @HttpCode(HttpStatus.OK)
-  async disableMfa(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Body() dto: AdminMfaCodeDto) {
-    await this.mfa.disable(admin.adminUserId, dto.code);
+  async disableMfa(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Body() dto: AdminMfaCodeDto, @Ip() ip: string, @Req() req: Request) {
+    await this.mfa.disable(admin.adminUserId, dto.code, { ip, userAgent: req.get('user-agent') ?? null });
     return { ok: true };
   }
 }

@@ -3,6 +3,8 @@ import { BadRequestException, ConflictException, Injectable, UnauthorizedExcepti
 import * as bcrypt from 'bcrypt';
 import { AdminPrismaService } from '../../prisma/admin-prisma.service';
 import { generateSecret, otpauthUrl, verifyTotp } from '../../auth/mfa/totp';
+import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../../admin-audit/admin-audit.service';
+import type { AdminAuthContext } from '../admin-auth.service';
 
 const BACKUP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const BACKUP_CODE_COUNT = 10;
@@ -24,7 +26,10 @@ interface AdminMfaUser {
  */
 @Injectable()
 export class AdminMfaService {
-  constructor(private readonly adminPrisma: AdminPrismaService) {}
+  constructor(
+    private readonly adminPrisma: AdminPrismaService,
+    private readonly audit: AdminAuditService,
+  ) {}
 
   private async requireUser(adminUserId: string): Promise<AdminMfaUser> {
     const user = await this.adminPrisma.adminUser.findUnique({
@@ -45,7 +50,7 @@ export class AdminMfaService {
     return { secret, otpauthUrl: otpauthUrl(secret, user.username, 'FleetHQ Admin') };
   }
 
-  async confirmEnrollment(adminUserId: string, code: string): Promise<{ backupCodes: string[] }> {
+  async confirmEnrollment(adminUserId: string, code: string, context: AdminAuthContext = {}): Promise<{ backupCodes: string[] }> {
     const user = await this.requireUser(adminUserId);
     if (user.mfaEnabledAt) {
       throw new ConflictException({ code: 'MFA_ALREADY_ENABLED', message: 'MFA is already enabled.' });
@@ -62,19 +67,45 @@ export class AdminMfaService {
       where: { id: adminUserId },
       data: { mfaEnabledAt: new Date(), mfaBackupCodes: hashes },
     });
+    await this.audit.record({
+      adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.MFA_ENABLED,
+      entityType: 'admin_user',
+      entityId: adminUserId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
     return { backupCodes };
   }
 
-  async disable(adminUserId: string, code: string): Promise<void> {
+  async disable(adminUserId: string, code: string, context: AdminAuthContext = {}): Promise<void> {
     const user = await this.requireUser(adminUserId);
     if (!user.mfaEnabledAt) return;
     const result = await this.verifyChallenge(user, code);
     if (!result.ok) {
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
     }
+    if (result.usedBackupCode) {
+      await this.audit.record({
+        adminUserId,
+        action: ADMIN_AUDIT_ACTIONS.MFA_BACKUP_CODE_USED,
+        entityType: 'admin_user',
+        entityId: adminUserId,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+    }
     await this.adminPrisma.adminUser.update({
       where: { id: adminUserId },
       data: { mfaSecret: null, mfaEnabledAt: null, mfaBackupCodes: [] },
+    });
+    await this.audit.record({
+      adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.MFA_DISABLED,
+      entityType: 'admin_user',
+      entityId: adminUserId,
+      ip: context.ip,
+      userAgent: context.userAgent,
     });
   }
 

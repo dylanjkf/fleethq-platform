@@ -2,6 +2,16 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — FleetHQ Administration Platform, Phase 7 (audit wiring, hardening, tests, docs)
+
+Closed the real gaps a systematic audit of every `admin-*` service/controller found, rather than a rebuild — Phases 1-6 already did the large majority of this correctly.
+
+- **Audit logging gaps, all in `admin-auth`**: MFA enrolment/disablement (`MFA_ENABLED`/`MFA_DISABLED`), backup-code consumption during a login challenge or a disable challenge (`MFA_BACKUP_CODE_USED`), `logout()` (`LOGOUT` — was silent, unlike the near-identical `revokeOwnSession()` right next to it), and "remember this device" (`DEVICE_TRUSTED`) were all unaudited security-relevant state changes. Five new `ADMIN_AUDIT_ACTIONS`, wired at the point each event actually completes.
+- **`test/admin-route-permission-coverage.spec.ts` had a blind spot**: it verified every admin route carries a classification decorator (`@AdminAuthenticatedOnly()`/`@RequireAdminPermission()`) but never checked the `AdminJwtAuthGuard`/`AdminPermissionGuard` pair (`@AdminGuarded()`) was actually wired — since these guards are applied per-route rather than globally, a route that forgot `@AdminGuarded()` would have passed this test while being completely unauthenticated in production. Now asserts both guard classes are present via `Reflect.getMetadata(GUARDS_METADATA, ...)`.
+- **Rate limiting**: only `admin-auth`'s login/MFA routes were tightly throttled; every Stripe billing mutation, organisation impersonation, and customer-account unlock/MFA-reset fell back to the app-wide 300/min default — far too loose for actions with real financial or account-takeover blast radius. New `ADMIN_SENSITIVE_ACTION_THROTTLE` (20/min, alongside the existing `BULK_THROTTLE`/`EXPORT_THROTTLE` presets) now gates all of them.
+- **Tests**: `admin-auth.e2e-spec.ts` gained an `mfa/disable` test and a test proving all five new audit events land (read back through the real `GET /v1/admin/audit-log` endpoint). New `admin-billing.service.spec.ts` (11 tests, Stripe client mocked) covers the positive path of every one of the seven billing mutations plus the cross-tenant invoice-ownership rejection and both reinstate-subscription refusal branches — the e2e suite could only cover the "no Stripe object yet" refusal paths without a live Stripe test account.
+- Deliberately not touched: CSRF (inapplicable — bearer token in `Authorization`, never a cookie) and CORS origin config for a deployed `admin/` (already supported by the existing `CORS_ALLOWED_ORIGINS` allowlist; adding the origin is a deployment step, not a code change).
+
 ## 2026-07-31 — FleetHQ Administration Platform, Phase 6 (admin frontend SPA)
 
 **Phase 6 prereq**: `GET /v1/admin/audit-log` (`AdminAuditService.list()`, `audit_log:view`) — every prior phase already wrote to `admin_audit_logs` on every mutating action; this is the first endpoint that reads it back, paginated and filterable by action/entity/organisation/admin/date range. Also added `GET /v1/admin/organisations/:id/roles` so the existing "add a user to this org" support action can offer a real role picker instead of a raw UUID.

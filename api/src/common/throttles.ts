@@ -36,3 +36,14 @@ export const REGISTRATION_THROTTLE = routeThrottle(30);
 
 /** Expensive data-export routes (full-tenant export / erasure). */
 export const EXPORT_THROTTLE = routeThrottle(5);
+
+/**
+ * FleetHQ-staff admin-platform actions with real financial or account-
+ * takeover blast radius (billing mutations, impersonation, resetting a
+ * customer's MFA/lockout) — the app-wide 300/min default is far too loose
+ * for these; a genuine support workflow never needs more than a handful per
+ * minute. Deliberately separate from `admin-auth`'s own tighter
+ * `ADMIN_AUTH_THROTTLE` (10/min), which guards credential/code-checking
+ * routes specifically.
+ */
+export const ADMIN_SENSITIVE_ACTION_THROTTLE = routeThrottle(20);
