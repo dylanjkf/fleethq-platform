@@ -31,7 +31,14 @@ founder's decision to build the full spec.
 - New shared pieces: `AdminGuarded()` decorator (collapses the two guards every authenticated admin route needs), `AdminActionContext` interface (shared across admin feature modules), and `test/admin-route-permission-coverage.spec.ts` (the admin-platform equivalent of the customer route-coverage build check).
 - `test/admin-organisations.e2e-spec.ts` + `test/admin-customer-users.e2e-spec.ts`: 15 tests covering every action above, including the suspension-enforcement fix, against the real HTTP API.
 
-Not yet built: the executive dashboard, billing operations, support tools/feature flags, FleetHQ staff account management (creating admins other than via the bootstrap script), or the admin frontend — see the Overview doc's status table.
+**Phase 3 — executive dashboard (real aggregate data):**
+- `src/admin-analytics/` (`/v1/admin/analytics/*`): organisation/user/fleet counts, subscription-status breakdown, an active-trials count, a daily-signups time series, and a trials-expiring-soon follow-up list — computed live on every request from the same `fleetos_admin` connection every other admin module uses. No new database grants needed; Phase 1's existing read access to `companies`/`users`/`assets`/`operators` already covered it.
+- **Revenue (MRR/ARR)** computed from the small, fixed set of configured tier price ids — at most 3 Stripe API calls total (`BillingService.getPriceUnitAmounts`, a new stateless method on the existing customer `BillingService`), never one per subscribed company; annual prices normalised to monthly before summing. Honestly reports `billingConfigured: false` (all revenue fields `null`) rather than fabricating a number when Stripe isn't configured, matching `BillingService`'s existing tolerance everywhere else.
+- **Churn** is a documented best-effort proxy (count of currently-CANCELED companies updated in the last 30 days — `Company` has no `cancelledAt` column) reported as a plain count, not a percentage, since a true rate would need historical data this schema doesn't track.
+- Deliberately reports only metrics this codebase can actually produce — no fabricated infrastructure numbers (queue depth, cache hit rate) for systems that don't exist here.
+- `src/admin-analytics/admin-analytics.service.spec.ts`: focused unit coverage for the MRR arithmetic (monthly/annual normalisation, multi-tier summation, a failed price lookup handled gracefully) with Stripe/DB mocked, since the configured-Stripe path can't be exercised end-to-end without real network access. `test/admin-analytics.e2e-spec.ts`: real aggregate counts, the unconfigured-billing path, signups, trials-expiring, and query validation against the real HTTP API.
+
+Not yet built: billing operations, support tools/feature flags, FleetHQ staff account management (creating admins other than via the bootstrap script), real system/infrastructure health, or the admin frontend — see the Overview doc's status table.
 
 ## 2026-07-28 — Live map removal, configurable barcode scanning, Integration Hub foundation
 

@@ -99,6 +99,43 @@ export class BillingService {
   }
 
   /**
+   * Fetches the current unit amount (in the smallest currency unit, e.g.
+   * cents) and billing interval for a set of Stripe Price ids — global
+   * Stripe catalog data, not tied to any one company/tenant. Used by the
+   * FleetHQ admin platform's executive dashboard (21-Admin-Platform/Overview.md)
+   * to compute real MRR/ARR from the small, fixed set of configured price
+   * ids (PAID_TIERS) rather than one lookup per subscribed company.
+   *
+   * Returns `null` per price id it can't resolve (deleted/archived price,
+   * lookup failure) and an empty object entirely when billing isn't
+   * configured — the caller reports `billingConfigured: false` rather than
+   * this throwing, matching this service's existing "billing informs, never
+   * hard-locks" tolerance for an unconfigured deployment.
+   */
+  async getPriceUnitAmounts(
+    priceIds: string[],
+  ): Promise<Record<string, { unitAmount: number; interval: string; currency: string } | null>> {
+    if (!this.isConfigured() || priceIds.length === 0) return {};
+    const stripe = this.getStripe();
+    const results: Record<string, { unitAmount: number; interval: string; currency: string } | null> = {};
+    await Promise.all(
+      priceIds.map(async (priceId) => {
+        try {
+          const price = await stripe.prices.retrieve(priceId);
+          results[priceId] =
+            price.unit_amount != null && price.recurring
+              ? { unitAmount: price.unit_amount, interval: price.recurring.interval, currency: price.currency }
+              : null;
+        } catch (err) {
+          this.logger.warn(`Could not resolve Stripe price ${priceId} for the admin dashboard: ${err instanceof Error ? err.message : String(err)}`);
+          results[priceId] = null;
+        }
+      }),
+    );
+    return results;
+  }
+
+  /**
    * Creates (or reuses) a Stripe Customer for this company, then a Checkout
    * Session in subscription mode for the given Price. The company's own
    * subscriptionStatus/planPriceId are only ever updated by the webhook

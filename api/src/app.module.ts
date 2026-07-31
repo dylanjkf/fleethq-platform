@@ -55,6 +55,7 @@ import { ContactModule } from './contact/contact.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminOrganisationsModule } from './admin-organisations/admin-organisations.module';
 import { AdminCustomerUsersModule } from './admin-customer-users/admin-customer-users.module';
+import { AdminAnalyticsModule } from './admin-analytics/admin-analytics.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
@@ -179,6 +180,7 @@ import { validateEnv } from './config/env.validation';
     AdminAuthModule,
     AdminOrganisationsModule,
     AdminCustomerUsersModule,
+    AdminAnalyticsModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before

@@ -21,7 +21,7 @@ yet.
 | 1 | Schema, auth (login/MFA/sessions/lockout), permission-guarded route foundation | **Done** |
 | 1b | Bootstrap script (first Super Admin) | **Done** |
 | 2 | Organisation + customer-user administration | **Done** |
-| 3 | Executive dashboard (real aggregate data) | Pending |
+| 3 | Executive dashboard (real aggregate data) | **Done** |
 | 4 | Billing operations on top of the existing Stripe integration | Pending |
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | Pending |
 | 6 | Admin frontend SPA | Pending |
@@ -228,9 +228,61 @@ applied to `tokenVersion` revocation.
 
 `test/admin-organisations.e2e-spec.ts` and `test/admin-customer-users.e2e-spec.ts` — list/detail, suspend blocking a fresh login AND killing an already-issued session, archive/unarchive, trial updates, impersonation (including refusal against a suspended org), admin-created user login, disable/reactivate, lockout/unlock, MFA reset, and password-reset triggering — all against the real HTTP API and a live test database.
 
+## Executive dashboard (Phase 3)
+
+`src/admin-analytics/` (`/v1/admin/analytics/*`, gated on `analytics:view`)
+— real aggregate business data, computed on every request (no caching, no
+scheduled rollups) from the same `fleetos_admin` connection every other
+admin module uses. Deliberately reports **only** metrics this codebase can
+actually produce — no fabricated infrastructure numbers (queue depth, cache
+hit rate, etc.) for systems that don't exist here. See "Not yet built" for
+what real system/infra health looks like instead (Phase 5).
+
+| Route | Returns |
+|---|---|
+| `GET overview` | Organisation counts (active/suspended/archived/total), active-trial count, user counts (total + new in last 30 days), fleet totals (assets/operators), subscription-status breakdown, a churn count, and revenue |
+| `GET signups?days=N` (default 30, max 365) | Daily company-creation counts over the trailing window |
+| `GET trials-expiring?days=N` (default 7, max 365) | Organisations whose native trial ends within the window — an actionable follow-up list (id, name, trial end, suspended state, user count), not just a count |
+
+**Revenue (MRR/ARR)**: computed from the small, fixed set of configured tier
+price ids (`PAID_TIERS` in `src/billing/plans.ts`) — at most 3 Stripe API
+calls total (`BillingService.getPriceUnitAmounts`, a new stateless,
+tenant-independent method added to the existing customer `BillingService`),
+never one lookup per subscribed company. Annual prices are normalised to a
+monthly figure before summing. Honestly reports `billingConfigured: false`
+(with `mrr`/`arr`/`currency` all `null`) rather than fabricating a number
+when no `STRIPE_SECRET_KEY` is set — the same tolerance `BillingService`
+already has everywhere else. `revenue.byTier` breaks the total down per
+tier so it's auditable, not a black box.
+
+**Churn**: `Company` has no `cancelledAt` column, so this is a documented
+best-effort proxy — a count of currently-`CANCELED` companies whose
+`updatedAt` falls in the last 30 days (the billing webhook touches both
+fields together on a status transition). Reported as a plain count, not a
+percentage — a true churn *rate* would need a historical
+active-customer-count this schema doesn't track, and presenting one anyway
+would overclaim precision the data doesn't support.
+
+No new database grants were needed — `fleetos_admin`'s existing read access
+to `companies`/`users`/`assets`/`operators` (from Phase 1's migration)
+already covers everything this phase's spec called for.
+
+### Tests
+
+`src/admin-analytics/admin-analytics.service.spec.ts` — unit coverage for
+the MRR arithmetic specifically (monthly/annual normalisation, multi-tier
+summation, a failed price lookup excluded from the total but still listed),
+with `BillingService`/`ConfigService`/`AdminPrismaService` mocked — the
+configured-Stripe path can't be exercised end-to-end without real network
+access to Stripe. `test/admin-analytics.e2e-spec.ts` covers the real
+HTTP API path: auth rejection, real aggregate counts, the
+`billingConfigured: false` path (no Stripe key in this test environment),
+the signups time series, trials-expiring, and query validation.
+
 ## Not yet built
 
-The executive dashboard, billing operations, support tools/feature flags,
-FleetHQ staff account management (`admin_users:view`/`manage` — creating
-admins other than via the one-time bootstrap script), and the admin
-frontend — see the status table above.
+Billing operations, support tools/feature flags, FleetHQ staff account
+management (`admin_users:view`/`manage` — creating admins other than via
+the one-time bootstrap script), real system/infrastructure health (DB
+connectivity, deploy info — Phase 5), and the admin frontend — see the
+status table above.
