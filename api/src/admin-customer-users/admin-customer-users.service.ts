@@ -80,6 +80,19 @@ export class AdminCustomerUsersService {
     return { emailOnFile: !!user.email };
   }
 
+  /**
+   * Delegates to the customer AuthService's own resend-verification flow —
+   * same "no-op if no email on file, or already verified" behaviour as
+   * self-service. Support scenario: a customer says they never got (or lost)
+   * their verification email.
+   */
+  async resendVerification(userId: string, context: AdminActionContext): Promise<{ emailOnFile: boolean }> {
+    const user = await this.requireUser(userId);
+    await this.authService.resendVerification(user.username);
+    await this.recordAction(userId, ADMIN_AUDIT_ACTIONS.CUSTOMER_USER_VERIFICATION_RESENT, context);
+    return { emailOnFile: !!user.email && !user.emailVerifiedAt };
+  }
+
   private async recordAction(userId: string, action: AdminAuditAction, context: AdminActionContext): Promise<void> {
     await this.audit.record({
       adminUserId: context.adminUserId,

@@ -52,15 +52,22 @@ import { AuditModule } from './audit/audit.module';
 import { BarcodeModule } from './barcode/barcode.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { ContactModule } from './contact/contact.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminOrganisationsModule } from './admin-organisations/admin-organisations.module';
 import { AdminCustomerUsersModule } from './admin-customer-users/admin-customer-users.module';
 import { AdminAnalyticsModule } from './admin-analytics/admin-analytics.module';
 import { AdminBillingModule } from './admin-billing/admin-billing.module';
+import { AdminSupportModule } from './admin-support/admin-support.module';
+import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
+import { AdminFeatureFlagsModule } from './admin-feature-flags/admin-feature-flags.module';
+import { AdminSystemModule } from './admin-system/admin-system.module';
+import { AdminFleetModule } from './admin-fleet/admin-fleet.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
 import { FeatureGuard } from './common/guards/feature.guard';
+import { FeatureFlagGuard } from './common/guards/feature-flag.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { validateEnv } from './config/env.validation';
 
@@ -183,6 +190,12 @@ import { validateEnv } from './config/env.validation';
     AdminCustomerUsersModule,
     AdminAnalyticsModule,
     AdminBillingModule,
+    AdminSupportModule,
+    AnnouncementsModule,
+    FeatureFlagsModule,
+    AdminFeatureFlagsModule,
+    AdminSystemModule,
+    AdminFleetModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before
@@ -196,6 +209,9 @@ import { validateEnv } from './config/env.validation';
     // Paid-add-on paywall. Runs after permissions so "you can't do this at all"
     // (403) is answered before "your plan doesn't cover it" (402).
     { provide: APP_GUARD, useClass: FeatureGuard },
+    // Admin-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b)
+    // — a separate axis from FeatureGuard's billing entitlement check.
+    { provide: APP_GUARD, useClass: FeatureFlagGuard },
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
   ],
 })

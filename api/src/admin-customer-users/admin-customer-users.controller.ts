@@ -64,4 +64,12 @@ export class AdminCustomerUsersController {
   sendPasswordReset(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     return this.customerUsers.sendPasswordReset(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
   }
+
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.SUPPORT_MANAGE)
+  @Post(':userId/resend-verification')
+  @HttpCode(HttpStatus.OK)
+  resendVerification(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+    return this.customerUsers.resendVerification(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
+  }
 }

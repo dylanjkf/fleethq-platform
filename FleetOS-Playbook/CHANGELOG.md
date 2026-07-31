@@ -46,7 +46,14 @@ founder's decision to build the full spec.
 - Every mutation is audit-logged (7 new `ADMIN_AUDIT_ACTIONS`), and every unconfigured/missing-Stripe-object case fails with a specific error code (`NO_STRIPE_CUSTOMER`, `NO_STRIPE_SUBSCRIPTION`, `INVOICE_NOT_FOUND`, `SUBSCRIPTION_ALREADY_CANCELED`, etc.) rather than a generic 500.
 - `test/admin-billing.e2e-spec.ts`: 13 tests — auth/permission rejection, DTO validation, and the `NO_STRIPE_CUSTOMER`/`NO_STRIPE_SUBSCRIPTION` refusal path for every mutating route. Exercising a real Stripe call needs a live test account this offline suite doesn't have, the same documented constraint `test/billing.e2e-spec.ts` already carries.
 
-Not yet built: support tools/feature flags, FleetHQ staff account management (creating admins other than via the bootstrap script), real system/infrastructure health, or the admin frontend — see the Overview doc's status table.
+**Phase 5 — support tools, feature flags, system health, cross-tenant fleet views:**
+- `src/admin-support/`: a customer-visible announcement banner (`Announcement` — deliberately NOT `admin_`-prefixed/RLS'd, since it's meant to be read by the customer stack, unlike everything else in this section) plus staff-internal notes about an organisation (`admin_organisation_notes` — the opposite: never readable by customers). New customer route `GET /v1/announcements/active`. A "resend verification email" support action added to the existing `AdminCustomerUsersController`.
+- `src/feature-flags/` + `src/admin-feature-flags/`: admin-managed rollout flags (`FeatureFlag` global default + per-company `FeatureFlagOverride`, RLS'd like any other tenant table) evaluated by a new `FeatureFlagGuard`/`@RequireFeatureFlag`, modelled on the existing billing-entitlement `FeatureGuard` but answering a different question. **Not a scaffold**: `operational-recommendations`'s routes are actually gated on it, and the test suite proves disabling the flag returns a real `403` and a per-company override actually restores access. A missing flag key fails open (enabled), so creating a flag is always safe.
+- `src/admin-system/`: real DB-connectivity/uptime/version diagnostics (`GET /v1/admin/system/health`) — no fabricated infra numbers, matching Phase 3's honesty standard for the same reason.
+- `src/admin-fleet/`: cross-tenant read-only browsing of assets/operators/integration connections for support lookups ("who owns this VIN/rego"). New grant on `integration_connections` only — never `integration_credentials` (encrypted secrets) — and operator live location is deliberately excluded (Privacy Act personal information with no support justification).
+- 22 new tests across `test/admin-support.e2e-spec.ts`, `test/admin-feature-flags.e2e-spec.ts`, `test/admin-system.e2e-spec.ts`, `test/admin-fleet.e2e-spec.ts`.
+
+Not yet built: FleetHQ staff account management (creating admins other than via the bootstrap script) and the admin frontend — see the Overview doc's status table.
 
 ## 2026-07-28 — Live map removal, configurable barcode scanning, Integration Hub foundation
 

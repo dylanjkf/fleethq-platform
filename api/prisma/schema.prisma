@@ -1094,9 +1094,9 @@ model StopParcel {
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  company     Company            @relation(fields: [companyId], references: [id])
-  stop        JobStop            @relation(fields: [stopId], references: [id])
-  scanEvents  BarcodeScanEvent[]
+  company    Company            @relation(fields: [companyId], references: [id])
+  stop       JobStop            @relation(fields: [stopId], references: [id])
+  scanEvents BarcodeScanEvent[]
 
   @@unique([stopId, reference])
   @@index([companyId, stopId])
@@ -1227,14 +1227,14 @@ model BarcodeScanConfig {
 }
 
 model BarcodeScanEvent {
-  id              String              @id @default(uuid()) @db.Uuid
-  companyId       String?             @map("company_id") @db.Uuid
-  userId          String?             @map("user_id") @db.Uuid
-  scannedValue    String              @map("scanned_value")
-  scanMode        BarcodeScanMode     @map("scan_mode")
+  id              String             @id @default(uuid()) @db.Uuid
+  companyId       String?            @map("company_id") @db.Uuid
+  userId          String?            @map("user_id") @db.Uuid
+  scannedValue    String             @map("scanned_value")
+  scanMode        BarcodeScanMode    @map("scan_mode")
   outcome         BarcodeScanOutcome
-  matchedParcelId String?             @map("matched_parcel_id") @db.Uuid
-  createdAt       DateTime            @default(now()) @map("created_at")
+  matchedParcelId String?            @map("matched_parcel_id") @db.Uuid
+  createdAt       DateTime           @default(now()) @map("created_at")
 
   matchedParcel StopParcel? @relation(fields: [matchedParcelId], references: [id])
 
@@ -1288,10 +1288,10 @@ model MaintenanceJob {
   approvedByUser     User?                     @relation("MaintenanceApprovedByUser", fields: [approvedByUserId], references: [id])
   partsUsed          MaintenanceJobPartUsage[]
 
+  @@unique([companyId, clientRequestId])
   @@index([companyId])
   // "All maintenance for this asset" — the asset detail / history page.
   @@index([companyId, assetId])
-  @@unique([companyId, clientRequestId])
   @@map("maintenance_jobs")
 }
 
@@ -1819,27 +1819,27 @@ enum MessageSenderType {
 /// Scoped down from the full spec: no attachments/photos, no read receipts, no
 /// group/broadcast threads, no push notifications — a plain two-party thread.
 model Message {
-  id           String            @id @default(uuid()) @db.Uuid
-  companyId    String            @map("company_id") @db.Uuid
-  operatorId   String            @map("operator_id") @db.Uuid
-  senderType   MessageSenderType @map("sender_type")
-  senderUserId String?           @map("sender_user_id") @db.Uuid
-  body         String
+  id              String            @id @default(uuid()) @db.Uuid
+  companyId       String            @map("company_id") @db.Uuid
+  operatorId      String            @map("operator_id") @db.Uuid
+  senderType      MessageSenderType @map("sender_type")
+  senderUserId    String?           @map("sender_user_id") @db.Uuid
+  body            String
   // Client-generated idempotency key so a DriverOS outbox replay after a lost
   // response can't post the same message twice. Null for office-sent messages.
-  clientRequestId String?        @map("client_request_id") @db.Uuid
-  createdAt    DateTime          @default(now()) @map("created_at")
+  clientRequestId String?           @map("client_request_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
 
   company    Company  @relation(fields: [companyId], references: [id])
   operator   Operator @relation(fields: [operatorId], references: [id])
   senderUser User?    @relation("MessageSender", fields: [senderUserId], references: [id])
 
-  @@index([companyId, operatorId])
-  // Thread read takes the most recent messages ordered by createdAt.
-  @@index([companyId, operatorId, createdAt])
   // Idempotency: at most one message per (company, clientRequestId). Postgres
   // treats NULLs as distinct, so office messages (null key) are unconstrained.
   @@unique([companyId, clientRequestId])
+  @@index([companyId, operatorId])
+  // Thread read takes the most recent messages ordered by createdAt.
+  @@index([companyId, operatorId, createdAt])
   @@map("messages")
 }
 
@@ -1966,11 +1966,11 @@ model FuelEntry {
   operator          Operator?   @relation(fields: [operatorId], references: [id])
   receiptAttachment Attachment? @relation(fields: [receiptAttachmentId], references: [id])
 
+  @@unique([companyId, clientRequestId])
   @@index([companyId, filledAt])
   @@index([companyId, assetId])
   @@index([operatorId])
   @@index([receiptAttachmentId])
-  @@unique([companyId, clientRequestId])
   @@map("fuel_entries")
 }
 
@@ -2209,8 +2209,8 @@ model IntegrationConnection {
   updatedAt      DateTime                 @updatedAt @map("updated_at")
   archivedAt     DateTime?                @map("archived_at")
 
-  company       Company                    @relation(fields: [companyId], references: [id])
-  credential    IntegrationCredential?     @relation(fields: [credentialId], references: [id])
+  company       Company                   @relation(fields: [companyId], references: [id])
+  credential    IntegrationCredential?    @relation(fields: [credentialId], references: [id])
   fieldMappings IntegrationFieldMapping[]
   webhooks      IntegrationWebhook[]
   syncRuns      IntegrationSyncRun[]
@@ -2430,10 +2430,12 @@ model AdminUser {
   /// immediately (see AdminAuthService.disable).
   archivedAt        DateTime? @map("archived_at")
 
-  role            AdminRole            @relation(fields: [roleId], references: [id])
-  sessions        AdminSession[]
-  trustedDevices  AdminTrustedDevice[]
-  auditLogEntries AdminAuditLog[]
+  role              AdminRole               @relation(fields: [roleId], references: [id])
+  sessions          AdminSession[]
+  trustedDevices    AdminTrustedDevice[]
+  auditLogEntries   AdminAuditLog[]
+  organisationNotes AdminOrganisationNote[]
+  announcements     Announcement[]
 
   @@map("admin_users")
 }
@@ -2525,4 +2527,99 @@ model AdminAuditLog {
   @@index([organisationId, createdAt])
   @@index([entityType, entityId])
   @@map("admin_audit_logs")
+}
+
+/// Internal-only, FleetHQ-staff-authored notes about an organisation
+/// ("support:view"/"support:manage" — 21-Admin-Platform/Overview.md, Phase
+/// 5a). Deliberately `admin_`-prefixed and never granted to `fleetos_app`:
+/// unlike Announcement below, a customer must never be able to read this —
+/// it's staff-internal context (support history, escalation flags), not
+/// tenant data. `companyId` is a plain indexed column, not a Company
+/// relation, matching AdminAuditLog's own reasoning: a note must survive
+/// even if the organisation it's about is later hard-deleted.
+model AdminOrganisationNote {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  adminUserId String?  @map("admin_user_id") @db.Uuid
+  body        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@map("admin_organisation_notes")
+}
+
+enum AnnouncementSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/// A staff-authored banner shown to every customer (21-Admin-Platform/Overview.md,
+/// Phase 5a) — deliberately NOT `admin_`-prefixed and NOT row-level-secured:
+/// unlike every other table in this section, this one IS meant to be read by
+/// the customer-facing API (`fleetos_app` gets a plain read-only `GRANT
+/// SELECT`, since there's no tenant data here to leak — every row is shown to
+/// every company). Only `fleetos_admin` can write it. `startsAt`/`endsAt`
+/// being null means "starts immediately"/"never expires" respectively.
+model Announcement {
+  id                   String               @id @default(uuid()) @db.Uuid
+  title                String
+  body                 String
+  severity             AnnouncementSeverity @default(INFO)
+  active               Boolean              @default(true)
+  startsAt             DateTime?            @map("starts_at")
+  endsAt               DateTime?            @map("ends_at")
+  createdByAdminUserId String?              @map("created_by_admin_user_id") @db.Uuid
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  createdByAdminUser AdminUser? @relation(fields: [createdByAdminUserId], references: [id], onDelete: SetNull)
+
+  @@index([active, startsAt, endsAt])
+  @@map("announcements")
+}
+
+/// A staff-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b) —
+/// not created by seed data or a hardcoded enum; an admin creates a flag row
+/// for a `FeatureFlagGuard`-gated route to start meaning anything at all
+/// (see `RequireFeatureFlag` in the customer API). Like Announcement, this is
+/// global reference data with no tenant column, so `fleetos_app` gets a plain
+/// read-only `GRANT SELECT` — no RLS needed. `globalEnabled` is the default
+/// for every company; `FeatureFlagOverride` rows narrow that per company.
+model FeatureFlag {
+  id            String   @id @default(uuid()) @db.Uuid
+  key           String   @unique
+  name          String
+  description   String
+  globalEnabled Boolean  @default(true) @map("global_enabled")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  overrides FeatureFlagOverride[]
+
+  @@map("feature_flags")
+}
+
+/// Per-company exception to a FeatureFlag's `globalEnabled` default — e.g.
+/// disabling an in-rollout feature for one customer, or enabling a beta for a
+/// design-partner ahead of general availability. Unlike FeatureFlag itself,
+/// this DOES carry tenant data (which company has which override) and gets
+/// the identical `tenant_isolation` RLS policy every other tenant table has,
+/// so `fleetos_app`'s plain `GRANT SELECT` only ever returns the caller's own
+/// company's override rows — admin writes go through `fleetos_admin`
+/// (BYPASSRLS), same as everywhere else in this section.
+model FeatureFlagOverride {
+  id        String   @id @default(uuid()) @db.Uuid
+  flagId    String   @map("flag_id") @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  enabled   Boolean
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  flag FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+
+  @@unique([flagId, companyId])
+  @@map("feature_flag_overrides")
 }

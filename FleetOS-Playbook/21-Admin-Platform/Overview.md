@@ -23,7 +23,7 @@ yet.
 | 2 | Organisation + customer-user administration | **Done** |
 | 3 | Executive dashboard (real aggregate data) | **Done** |
 | 4 | Billing operations on top of the existing Stripe integration | **Done** |
-| 5 | Support tools, feature flags, system health, cross-tenant fleet views | Pending |
+| 5 | Support tools, feature flags, system health, cross-tenant fleet views | **Done** |
 | 6 | Admin frontend SPA | Pending |
 | 7 | Audit-log wiring across every phase, hardening, docs, tests | Pending |
 
@@ -347,9 +347,46 @@ account this offline suite doesn't have — the same documented constraint
 `test/billing.e2e-spec.ts` already carries for the customer-facing
 checkout/portal-session tests.
 
+## Support tools, feature flags, system health, fleet views (Phase 5)
+
+Four independent slices, each its own module, none touching another's tables.
+
+### Support tools (5a)
+
+`src/admin-support/` (`support:view`/`support:manage`):
+
+| Route | Notes |
+|---|---|
+| `GET/POST/PATCH/DELETE /v1/admin/announcements` | A staff-authored banner. Unlike every other admin-platform table, `Announcement` is deliberately NOT `admin_`-prefixed and NOT row-level-secured — it's meant to be read by the customer stack (`fleetos_app` gets a plain read-only `GRANT SELECT`, since every row is shown to every company, so there's no tenant data to leak). `startsAt`/`endsAt` null means "starts immediately"/"never expires" |
+| `GET/POST/DELETE /v1/admin/organisations/:id/notes` | Staff-internal notes about an organisation (support history, escalation flags) — `admin_organisation_notes`, `admin_`-prefixed and never granted to `fleetos_app`: unlike announcements, a customer must never read these |
+| `POST /v1/admin/customer-users/:userId/resend-verification` | Delegates to the customer `AuthService.resendVerification` — same no-op-if-already-verified-or-no-email behaviour as self-service. Lives on `AdminCustomerUsersController` (Phase 2) rather than a new controller, gated on `support:manage` per the permission catalog's own description |
+
+New customer-facing route: `GET /v1/announcements/active` (`src/announcements/`, `@AuthenticatedOnly()`) — every user of any role sees the same window-filtered, active-only list.
+
+### Feature flags (5b)
+
+Not a scaffold: `operational-recommendations`'s two routes are gated on a real flag (`RequireFeatureFlag('operational_recommendations')`), so this section proves the mechanism actually blocks a request, not just that it stores rows.
+
+- `FeatureFlag` (global, no RLS, `fleetos_app` read-only — same pattern as `Announcement`) holds `globalEnabled`, the default for every company with no override.
+- `FeatureFlagOverride` (has `companyId`, gets the identical `tenant_isolation` RLS policy every other tenant table has) narrows that per company.
+- `src/feature-flags/` (customer side): `FeatureFlagsService.isEnabled(key, companyId)` — a flag key that doesn't exist yet **fails open** (enabled), so creating a flag is always a safe, additive admin action, never a surprise outage. `GET /v1/feature-flags` (`@AuthenticatedOnly()`) returns the evaluated map for a client to consult once per session.
+- `FeatureFlagGuard`/`@RequireFeatureFlag(key)` (`src/common/guards/feature-flag.guard.ts`) — registered globally via `APP_GUARD`, a no-op unless a route declares a required flag, modelled directly on the existing `FeatureGuard`/`@RequireFeature` billing-entitlement guard but answering a different question ("has FleetHQ staff turned this on for this company right now" vs. "has this company paid for this"). Rejects with `403 FEATURE_DISABLED`, not the entitlement guard's `402`.
+- `src/admin-feature-flags/` (`feature_flags:view`/`manage`): `/v1/admin/feature-flags` (CRUD on flag definitions) and `/v1/admin/organisations/:id/feature-flags` (list every flag's effective state for that org; `PUT`/`DELETE .../feature-flags/:flagKey` sets/clears that org's override).
+
+### System health (5c)
+
+`src/admin-system/` (`system:view`), `GET /v1/admin/system/health` — reports only what this deployment can actually answer: `SELECT 1` reachability on both the customer (`fleetos_app`) and admin (`fleetos_admin`) database roles, process uptime, Node version, the API's own `package.json` version, and a deployed commit SHA if the platform injects one (`GIT_COMMIT_SHA`/`RAILWAY_GIT_COMMIT_SHA`, `null` otherwise). No fabricated infrastructure numbers (queue depth, cache hit rate, CPU/memory graphs) for systems that don't exist here — the same honesty standard `AdminAnalyticsService`'s revenue reporting established in Phase 3.
+
+### Cross-tenant fleet views (5d)
+
+`src/admin-fleet/` (`fleet:view`), read-only: `GET /v1/admin/fleet/assets|operators|integrations` — the support scenario is "which organisation owns this asset/VIN/rego" or "which company is this GPS integration configured for" without an admin already knowing the `companyId`. Reuses Phase 1's existing `fleetos_admin` read grants on `assets`/`operators`; a new migration grants read access to `integration_connections` **only** — never `integration_credentials` (holds encrypted secrets: payload/IV/tag), and the customer's live operator location (`lastLat`/`lastLng`/`lastLocationAt` — personal information under the Privacy Act) is deliberately excluded from the response with no support-lookup justification for a cross-tenant view to see it.
+
+### Tests
+
+`test/admin-support.e2e-spec.ts`, `test/admin-feature-flags.e2e-spec.ts`, `test/admin-system.e2e-spec.ts`, `test/admin-fleet.e2e-spec.ts` — 22 tests total, all against the real HTTP API and a live test database, including the feature-flag suite's proof that disabling `operational_recommendations` actually returns `403` and a per-company override actually restores access.
+
 ## Not yet built
 
-Support tools/feature flags, FleetHQ staff account management
-(`admin_users:view`/`manage` — creating admins other than via the one-time
-bootstrap script), real system/infrastructure health (DB connectivity,
-deploy info — Phase 5), and the admin frontend — see the status table above.
+FleetHQ staff account management (`admin_users:view`/`manage` — creating
+admins other than via the one-time bootstrap script) and the admin frontend
+— see the status table above.

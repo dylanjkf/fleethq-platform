@@ -28,6 +28,17 @@ export const ADMIN_AUDIT_ACTIONS = {
   BILLING_PAYMENT_RETRIED: 'billing.payment_retried',
   BILLING_SUBSCRIPTION_CANCELED: 'billing.subscription_canceled',
   BILLING_SUBSCRIPTION_REINSTATED: 'billing.subscription_reinstated',
+  CUSTOMER_USER_VERIFICATION_RESENT: 'customer_users.verification_resent',
+  ANNOUNCEMENT_CREATED: 'support.announcement_created',
+  ANNOUNCEMENT_UPDATED: 'support.announcement_updated',
+  ANNOUNCEMENT_DELETED: 'support.announcement_deleted',
+  ORGANISATION_NOTE_ADDED: 'support.organisation_note_added',
+  ORGANISATION_NOTE_DELETED: 'support.organisation_note_deleted',
+  FEATURE_FLAG_CREATED: 'feature_flags.created',
+  FEATURE_FLAG_UPDATED: 'feature_flags.updated',
+  FEATURE_FLAG_DELETED: 'feature_flags.deleted',
+  FEATURE_FLAG_OVERRIDE_SET: 'feature_flags.override_set',
+  FEATURE_FLAG_OVERRIDE_CLEARED: 'feature_flags.override_cleared',
 } as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[keyof typeof ADMIN_AUDIT_ACTIONS];
