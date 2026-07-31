@@ -2,6 +2,16 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Repo split: admin/ → fleethq-frontend, driveros/ → fleethq-driveros (Phase 8)
+
+On explicit direction: `driveros/` and `admin/` no longer live in this repo.
+
+- **New repo [`fleethq-driveros`](https://github.com/dylanjkf/fleethq-driveros)**: `driveros/`'s content moved as-is (no functional changes). Own CI workflow, own README (updated to reference `fleethq-platform` for the backend/spec instead of a shared root). Lint/build/test re-verified clean in the new location before pushing.
+- **`admin/` → `fleethq-frontend`, as a sibling app** (`fleethq-frontend/admin/`), deployed at `fleethq.online/admin` rather than a separate origin. `fleethq-frontend/vercel.json`'s `buildCommand` now builds both apps and stitches `admin`'s output into `dist/admin/`; its `rewrites` route `/admin/(.*)` to `admin`'s own `index.html` ahead of the office-dashboard's catch-all SPA rewrite (order matters — the catch-all would otherwise swallow every `/admin/*` request first). `admin/vite.config.ts` gained `base: '/admin/'`; `admin/src/app/router.tsx` passes `basename: import.meta.env.BASE_URL` to `createBrowserRouter` so client-side routing agrees with the subpath in dev and production alike. The app itself is unchanged: still its own `package.json`/build/bundle, still completely separate authentication from the customer SPA — only the deploy topology changed, not the isolation.
+- **What stayed put**: the admin platform's backend (`api/src/admin-*`, `admin_*` tables, `fleetos_admin` role) is entirely unaffected — this repo remains the single source of truth for every admin permission, audit event, and guard. Only the two frontend clients relocated.
+- Verified locally: both `fleethq-frontend`'s multi-app build command and the standalone `fleethq-driveros` repo build/lint/test clean. Not yet verified against a live Vercel deployment — flagged in both repos' docs as a spot-check for the first real deploy with this config.
+- `FleetOS-Playbook/21-Admin-Platform/Overview.md`, this repo's root `README.md`, and `CLAUDE.md` updated throughout to reflect the new three-repo shape.
+
 ## 2026-07-31 — FleetHQ Administration Platform, Phase 7 (audit wiring, hardening, tests, docs)
 
 Closed the real gaps a systematic audit of every `admin-*` service/controller found, rather than a rebuild — Phases 1-6 already did the large majority of this correctly.

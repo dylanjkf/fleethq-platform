@@ -1,27 +1,34 @@
 # FleetHQ Platform
 
-The FleetOS API, the DriverOS mobile app, and the full product specification
-(`FleetOS-Playbook/`). Together with
-[`fleethq-frontend`](https://github.com/dylanjkf/fleethq-frontend) (the
-office dashboard SPA), this is FleetOS.
+The FleetOS API and the full product specification (`FleetOS-Playbook/`).
+FleetOS is split across three repos:
+
+- **This repo (`fleethq-platform`)** — the API only.
+- [`fleethq-frontend`](https://github.com/dylanjkf/fleethq-frontend) — the
+  customer office dashboard SPA, plus `admin/`, the FleetHQ staff console
+  (a separate app within that repo, deployed alongside it at
+  `fleethq.online/admin`).
+- [`fleethq-driveros`](https://github.com/dylanjkf/fleethq-driveros) — the
+  driver/field mobile app, its own repo so native iOS/Android builds and
+  app-store release tooling aren't coupled to the API's release cadence.
 
 ```
 api/                the API — NestJS + Prisma + PostgreSQL, multi-tenant with row-level security
-driveros/            the driver/field app — React + Vite PWA, wrapped natively with Capacitor
-admin/               the FleetHQ staff console — React + Vite SPA, talks to /v1/admin/*
 FleetOS-Playbook/    the product specification — read its CLAUDE.md first
 docs/                architecture/security/database/deployment reference docs
 ```
 
-Each of `api/`, `driveros/`, and `admin/` is independently built, tested, and
-deployed — see their own READMEs for day-to-day development. This file
-covers running them together locally and deploying them to production.
+Every client — `fleethq-frontend`, `admin/`, `fleethq-driveros`, or a
+third-party integration — reads and writes FleetOS data exclusively through
+`api/`'s versioned REST API over HTTPS. No client gets direct database
+access, a shared filesystem, or a local import of anything under `api/`.
 
-`admin/` is FleetHQ staff's own internal tool for operating the SaaS
+The FleetHQ admin platform (`api/src/admin-*`, `admin_*` database tables,
+`fleetos_admin` role) is FleetHQ staff's own tool for operating the SaaS
 business (organisations, billing, support, system health) — completely
-separate from the customer-facing product (`driveros/` and
-`fleethq-frontend`): separate authentication, separate database role,
-separate frontend. See `FleetOS-Playbook/21-Admin-Platform/Overview.md`.
+separate authentication and database role from the customer-facing product,
+even though its frontend now shares a repo/deploy domain with
+`fleethq-frontend`. See `FleetOS-Playbook/21-Admin-Platform/Overview.md`.
 
 ## Local development
 
@@ -31,25 +38,18 @@ docker compose up -d          # Postgres 16 on localhost:5432
 cd api
 cp .env.example .env          # see api/README.md / .env.example for details
 npm install
-npm run prisma:migrate:deploy # creates the schema, RLS policies, and the fleetos_app/fleetos_auth roles
+npm run prisma:migrate:deploy # creates the schema, RLS policies, and the fleetos_app/fleetos_auth/fleetos_admin roles
 npm run seed
 npm run dev:watch             # http://localhost:3000
-
-# in another terminal
-cd driveros
-npm install
-npm run dev                   # http://localhost:5173, proxies /v1 and /health to :3000
-
-# in another terminal — only if you need the staff admin console
-cd admin
-npm install
-npm run dev                   # http://localhost:5175, proxies /v1 and /health to :3000
-npm run admin:bootstrap --prefix ../api  # creates the first AdminUser (see api/scripts/bootstrap-admin.ts)
 ```
 
-`fleethq-frontend` (a separate repo) can point at this same local API by
-setting `VITE_API_URL` unset (its own dev server proxies the same way) or by
-running it side by side against `http://localhost:3000`.
+`fleethq-frontend` (its own repo, `admin/` included) and `fleethq-driveros`
+(its own repo) both point at this same local API — set `VITE_API_URL`/
+`VITE_API_BASE` unset (each app's own dev server proxies `/v1` and `/health`
+to `localhost:3000`) or run them side by side against
+`http://localhost:3000`. To exercise `admin/` locally you'll also need a
+bootstrapped `AdminUser`: `npm run admin:bootstrap` in `api/` (see
+`api/scripts/bootstrap-admin.ts`).
 
 ## Deployment
 
@@ -71,9 +71,11 @@ list with rationale):
 | `DATABASE_URL` | Schema-owner connection (migrations) |
 | `APP_DATABASE_URL` | Low-privilege runtime connection (RLS-enforced) |
 | `AUTH_DATABASE_URL` | Pre-tenant-context login lookup (narrow SELECT-only role) |
-| `JWT_SECRET` | Session token signing — 32+ random chars in production |
+| `ADMIN_DATABASE_URL` | The FleetHQ admin platform's runtime connection (`fleetos_admin`, `BYPASSRLS` with narrow explicit grants — see `FleetOS-Playbook/21-Admin-Platform/Overview.md`) |
+| `JWT_SECRET` | Customer session token signing — 32+ random chars in production |
+| `ADMIN_JWT_SECRET` | Admin session token signing — a completely different secret from `JWT_SECRET`; boot fails if they're ever equal |
 | `INTEGRATION_CREDENTIAL_KEY` | AES-256 key for the Integration Hub credential vault |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed frontend origins, e.g. `https://app.fleethq.online` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed frontend origins, e.g. `https://fleethq.online` — one entry covers both the office dashboard and `/admin`, since they share an origin |
 | `APP_BASE_URL` | Deployed FleetHQ URL, used in emailed links |
 
 Optional (safe no-op when unset): `VAPID_*` (web push), `SENTRY_DSN` (error
@@ -81,22 +83,30 @@ tracking), `STRIPE_*`/`BILLING_ENFORCED` (billing), `EMAIL_PROVIDER`/
 `EMAIL_FROM_ADDRESS`/`AWS_REGION` (SES email), `ATTACHMENTS_BUCKET` (S3
 attachment storage — inline-in-Postgres otherwise).
 
-The three database roles (`fleetos`, `fleetos_app`, `fleetos_auth`) and
-their RLS policies are created by the migrations themselves — a fresh
+The database roles (`fleetos`, `fleetos_app`, `fleetos_auth`, `fleetos_admin`)
+and their RLS policies are created by the migrations themselves — a fresh
 Railway Postgres just needs `DATABASE_URL` pointed at it and
-`prisma migrate deploy` run once (handled automatically, see above); the app
-and auth role passwords still need to be set to match `APP_DATABASE_URL`/
-`AUTH_DATABASE_URL` (`npm run db:rotate-role-passwords` in `api/`, or set
-them directly via `ALTER ROLE ... PASSWORD ...` against the new database).
+`prisma migrate deploy` run once (handled automatically, see above); the
+role passwords still need to be set to match `APP_DATABASE_URL`/
+`AUTH_DATABASE_URL`/`ADMIN_DATABASE_URL` (`npm run db:rotate-role-passwords`
+in `api/`, or set them directly via `ALTER ROLE ... PASSWORD ...` against
+the new database). Then `npm run admin:bootstrap` once, against the deployed
+API, to create the first FleetHQ staff account.
 
-### DriverOS → app stores + PWA
+### fleethq-frontend (+ admin/) → Vercel
+
+Deploys from its own repo — see `fleethq-frontend`'s own README for the
+multi-app build (`admin/` builds separately and is stitched into
+`dist/admin/`) and Vercel rewrite configuration.
+
+### fleethq-driveros → app stores + PWA
 
 DriverOS is installable as a PWA today with zero store review. For the
 native App Store / Google Play builds, the Capacitor toolchain and native
-`ios/`/`android/` projects already exist in this repo — see
-`driveros/README.md` "Native app packaging" for what's done and what still
-needs a human with Xcode/Android Studio/developer accounts (none of that can
-happen in CI).
+`ios/`/`android/` projects already exist in that repo — see its own README's
+"Native app packaging" section for what's done and what still needs a human
+with Xcode/Android Studio/developer accounts (none of that can happen in
+CI).
 
 ## FleetOS-Playbook
 

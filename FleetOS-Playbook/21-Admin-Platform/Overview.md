@@ -26,6 +26,7 @@ yet.
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | **Done** |
 | 6 | Admin frontend SPA (`admin/`) | **Done** |
 | 7 | Audit-log wiring across every phase, hardening, docs, tests | **Done** |
+| 8 | Repo split: `admin/` → `fleethq-frontend`, `driveros/` → `fleethq-driveros` | **Done** |
 
 ## Isolation model
 
@@ -405,14 +406,24 @@ already had `SELECT` on `roles` from Phase 1).
 
 ## Admin frontend SPA (Phase 6)
 
-`admin/` — a new, independently built/deployed React app, sibling to `api/`
-and `driveros/` in this repo (see the root README's layout). Built here
-rather than inside `fleethq-frontend` because that customer SPA lives in a
-separate, unattached repo from this session's perspective, and because a
-completely separate deployable is the correct shape anyway: separate origin,
-separate auth, separate bundle, no accidental code sharing between "FleetHQ
-staff tool" and "customer product" that Phase 1's backend isolation already
-went out of its way to avoid.
+> **Relocated in Phase 8**: `admin/` was originally built as a sibling
+> directory in *this* repo (`fleethq-platform`), for the reasons the next
+> paragraph explains. It has since moved into the
+> [`fleethq-frontend`](https://github.com/dylanjkf/fleethq-frontend) repo as
+> a sibling app there instead, deployed at `fleethq.online/admin` — see that
+> repo's `admin/README.md`. Everything below describes the app itself
+> (still accurate); only its repo location has changed.
+
+`admin/` — a new, independently built/deployed React app. Originally built
+as a sibling to `api/` and `driveros/` in this repo (see the root README's
+historical layout at the time) rather than inside `fleethq-frontend`,
+because that customer SPA lived in a separate, unattached repo from that
+session's perspective, and because a completely separate deployable was the
+correct shape regardless: separate origin, separate auth, separate bundle,
+no accidental code sharing between "FleetHQ staff tool" and "customer
+product" that Phase 1's backend isolation already went out of its way to
+avoid. That isolation (separate `package.json`/build/auth) is preserved in
+its new location too — see Phase 8 below.
 
 **Stack**: React 19 + Vite + TypeScript + Tailwind CSS 4, TanStack Query,
 `react-router`, `axios` — the same versions `driveros` already uses, minus
@@ -453,11 +464,13 @@ actual fail-open behaviour); the Dashboard's revenue card shows "Billing is
 not configured on this deployment" rather than a fabricated `$0`, mirroring
 `AdminAnalyticsService`'s own `billingConfigured: false` honesty from Phase 3.
 
-**Impersonation UX is a deliberate scope decision, not a gap**: since
-`fleethq-frontend` is a separate, unattached repo, the Overview tab's
-impersonate action shows the minted customer access token in a
-`ConfirmDialog` for the admin to copy manually rather than attempting a
-same-tab cross-origin handoff.
+**Impersonation UX is a deliberate scope decision, not a gap**: the
+Overview tab's impersonate action shows the minted customer access token in
+a `ConfirmDialog` for the admin to copy manually rather than a same-tab
+handoff into the office-dashboard app. This was necessary when `admin/` and
+`fleethq-frontend` were separate, unattached repos; now that both live in
+the same repo/origin (Phase 8) a real handoff is possible but still not
+built — see that repo's `admin/README.md` "Known scope decisions".
 
 **Cross-tenant safety carried into the UI**: the Fleet page's tables never
 render `config`/`credentialId` (verified absent from the `FleetIntegration`
@@ -533,8 +546,42 @@ inapplicable by construction (bearer token in the `Authorization` header via
 `admin/`'s `tokenStore`, never a cookie, so there's no ambient credential a
 cross-site request could ride on). CORS: `CORS_ALLOWED_ORIGINS` already
 supports an arbitrary allowlist (`main.ts`); a deployed `admin/`'s origin
-just needs adding to that env var alongside `fleethq-frontend`'s, a
-deployment-config step rather than a code change.
+needs adding to that env var — as of Phase 8 (below) that's the same origin
+`fleethq-frontend` already needs, so it's one entry, not two.
+
+## Repo relocation: driveros/ and admin/ move out (Phase 8)
+
+Two of this repo's three original apps moved to their own repos, on
+explicit request, once it became clear each needed a repo boundary this one
+repo didn't give it:
+
+- **`admin/` → `fleethq-frontend`** (as a sibling app, `fleethq-frontend/admin/`,
+  deployed at `fleethq.online/admin` via that repo's `vercel.json` — one
+  Vercel build produces both apps' output, with `/admin/(.*)` routed to
+  `admin`'s own `index.html` ahead of the office-dashboard's catch-all SPA
+  rewrite). The two apps still share nothing but the repo and the deploy
+  domain: separate `package.json`, separate build, separate bundle, and —
+  unchanged — completely separate authentication from the customer app.
+  `vite.config.ts` gained `base: '/admin/'` and `router.tsx` passes
+  `basename: import.meta.env.BASE_URL` to `createBrowserRouter` so
+  client-side routing agrees with the subpath in both dev and production.
+- **`driveros/` → its own repo**, [`fleethq-driveros`](https://github.com/dylanjkf/fleethq-driveros),
+  content moved as-is (no functional changes, lint/build/test re-verified
+  clean in the new location) — so native iOS/Android App Store / Google
+  Play release tooling and CI can live on their own cadence, independent of
+  this API's.
+
+**What did not move**: the admin platform's *backend* — `api/src/admin-*`,
+the `admin_*` database tables, and the `fleetos_admin` role — is unchanged
+and still lives entirely in this repo. Only the two frontend clients moved;
+this repo remains the single source of truth for every admin permission,
+audit event, and guard.
+
+**Not verified against a live deployment**: the `fleethq-frontend`
+multi-app Vercel build command was verified locally (both apps build, the
+admin build's assets resolve under `/admin/assets/*`) but not against a
+real Vercel build/CDN — see that repo's README for the "spot-check after
+first deploy" note.
 
 ## Not yet built
 
