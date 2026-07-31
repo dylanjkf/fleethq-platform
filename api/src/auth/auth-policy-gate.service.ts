@@ -21,6 +21,12 @@ export interface PolicyCheckExtra {
   rememberMe?: boolean;
   isNewDeviceLogin?: boolean;
   loginMethod?: LoginMethod;
+  /**
+   * True when this membership holds an admin-tier permission (see
+   * ADMIN_TIER_PERMISSION_KEYS). Forces MFA even if the company hasn't opted
+   * into `mfaRequired` — a privileged account must not run on password alone.
+   */
+  holdsAdminPermission?: boolean;
 }
 
 /**
@@ -40,17 +46,22 @@ export class AuthPolicyGateService {
   /**
    * Returns a blocking `LoginResult` if the policy isn't satisfied yet, or
    * `null` to proceed. MFA is checked first — an account with no second
-   * factor at all is a bigger gap than a stale password. A verified
-   * WebAuthn/passkey login always satisfies the MFA requirement on its own
-   * — see AuthService.completeWebauthnLogin's doc comment for why a passkey
-   * is treated as already MFA-equivalent — and the expiry check applies
-   * regardless of loginMethod, since the concern is a stale password sitting
-   * there as a fallback credential, not which method this login happened to use.
+   * factor at all is a bigger gap than a stale password. MFA is mandatory
+   * when the company opted into `mfaRequired` OR the account holds an
+   * admin-tier permission (`extra.holdsAdminPermission`) — a privileged
+   * account must not run on password alone even in a company that hasn't
+   * turned the policy on. A verified WebAuthn/passkey login always satisfies
+   * the MFA requirement on its own — see AuthService.completeWebauthnLogin's
+   * doc comment for why a passkey is treated as already MFA-equivalent — and
+   * the expiry check applies regardless of loginMethod, since the concern is a
+   * stale password sitting there as a fallback credential, not which method
+   * this login happened to use.
    */
   checkPolicy(user: PolicyCheckUser, membership: PolicyCheckMembership, extra: PolicyCheckExtra): LoginResult | null {
     const policy = membership.company.securitySettings;
 
-    const mfaSatisfied = !policy?.mfaRequired || !!user.mfaEnabledAt || extra.loginMethod === 'webauthn';
+    const mfaRequired = !!policy?.mfaRequired || !!extra.holdsAdminPermission;
+    const mfaSatisfied = !mfaRequired || !!user.mfaEnabledAt || extra.loginMethod === 'webauthn';
     if (!mfaSatisfied) {
       return { status: 'mfa_setup_required', setupToken: this.signPolicyToken(user.id, membership, 'mfa_setup', extra) };
     }

@@ -5,7 +5,7 @@ import { Public } from '../common/decorators/public.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
-import { REGISTRATION_THROTTLE } from '../common/throttles';
+import { GPS_INGEST_THROTTLE, REGISTRATION_THROTTLE } from '../common/throttles';
 import { GpsService } from './gps.service';
 import { IngestGpsDto, RegisterGpsDeviceDto, UpdateGpsDeviceDto } from './dto/gps.dto';
 
@@ -19,6 +19,7 @@ export class GpsController {
    * endpoint any GPS source POSTs to.
    */
   @Public()
+  @Throttle(GPS_INGEST_THROTTLE)
   @Post('ingest')
   ingest(@Body() dto: IngestGpsDto) {
     return this.service.ingest(dto);

@@ -50,6 +50,41 @@ describe('AuthPolicyGateService', () => {
     expect(result).toEqual({ status: 'mfa_setup_required', setupToken: expect.any(String) });
   });
 
+  it('forces MFA for an admin-permission holder even when the company has no mandatory-MFA policy', () => {
+    const result = gate.checkPolicy(
+      { id: 'u1', mfaEnabledAt: null, passwordChangedAt: new Date() },
+      membership(false),
+      { loginMethod: 'password', holdsAdminPermission: true },
+    );
+    expect(result).toEqual({ status: 'mfa_setup_required', setupToken: expect.any(String) });
+  });
+
+  it('does not force MFA for a non-admin login when the company has no mandatory-MFA policy', () => {
+    const result = gate.checkPolicy(
+      { id: 'u1', mfaEnabledAt: null, passwordChangedAt: new Date() },
+      membership(false),
+      { loginMethod: 'password', holdsAdminPermission: false },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('an admin-permission holder with MFA enabled (or a passkey login) is not blocked', () => {
+    expect(
+      gate.checkPolicy(
+        { id: 'u1', mfaEnabledAt: new Date(), passwordChangedAt: new Date() },
+        membership(false),
+        { loginMethod: 'password', holdsAdminPermission: true },
+      ),
+    ).toBeNull();
+    expect(
+      gate.checkPolicy(
+        { id: 'u1', mfaEnabledAt: null, passwordChangedAt: new Date() },
+        membership(false),
+        { loginMethod: 'webauthn', holdsAdminPermission: true },
+      ),
+    ).toBeNull();
+  });
+
   it('verifyPolicyToken round-trips a minted token and rejects the wrong purpose', () => {
     const blocked = gate.checkPolicy({ id: 'u1', mfaEnabledAt: null, passwordChangedAt: new Date() }, membership(true), { loginMethod: 'password' }) as {
       status: 'mfa_setup_required';

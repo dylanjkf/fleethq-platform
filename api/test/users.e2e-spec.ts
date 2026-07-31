@@ -144,11 +144,13 @@ describe('User management', () => {
       const roleAId = await createRole(tokenA, 'Contractor Role A', [PERMISSIONS.OPERATORS_VIEW]);
 
       const contractorUsername = `contractor-${roleAId}`;
+      const contractorEmail = `${contractorUsername}@example.com`;
       await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenA}`)
         .send({
           username: contractorUsername,
+          email: contractorEmail,
           password: 'a-strong-password',
           fullName: 'Contractor Chris',
           roleId: roleAId,
@@ -159,7 +161,7 @@ describe('User management', () => {
       const linked = await request(app.getHttpServer())
         .post('/v1/users/link')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username: contractorUsername, roleId: roleBId })
+        .send({ username: contractorUsername, email: contractorEmail, roleId: roleBId })
         .expect(201);
       expect(linked.body.username).toBe(contractorUsername);
       expect(linked.body.role.id).toBe(roleBId);
@@ -180,7 +182,29 @@ describe('User management', () => {
       const res = await request(app.getHttpServer())
         .post('/v1/users/link')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username: 'no-such-username-at-all', roleId: roleBId })
+        .send({ username: 'no-such-username-at-all', email: 'nobody@example.com', roleId: roleBId })
+        .expect(404);
+      expect(res.body.error.code).toBe('USER_NOT_FOUND');
+    });
+
+    it('returns the same generic not-found when the username exists but the email is wrong (no enumeration oracle)', async () => {
+      const tokenA = await loginAsFullyPermissionedAdmin();
+      const tokenB = await loginAsFullyPermissionedAdmin();
+      const roleAId = await createRole(tokenA, 'Enum Guard Role A', [PERMISSIONS.OPERATORS_VIEW]);
+      const username = `enum-guard-${roleAId}`;
+      await request(app.getHttpServer())
+        .post('/v1/users')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Enum Guard', roleId: roleAId })
+        .expect(201);
+
+      const roleBId = await createRole(tokenB, 'Enum Guard Role B', []);
+      // A real, existing username but the wrong email must be indistinguishable
+      // from a username that doesn't exist at all — same 404, same code.
+      const res = await request(app.getHttpServer())
+        .post('/v1/users/link')
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ username, email: 'attacker-guess@example.com', roleId: roleBId })
         .expect(404);
       expect(res.body.error.code).toBe('USER_NOT_FOUND');
     });
@@ -192,13 +216,13 @@ describe('User management', () => {
       await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, password: 'a-strong-password', fullName: 'Already Member', roleId: roleBId })
+        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Already Member', roleId: roleBId })
         .expect(201);
 
       const res = await request(app.getHttpServer())
         .post('/v1/users/link')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, roleId: roleBId })
+        .send({ username, email: `${username}@example.com`, roleId: roleBId })
         .expect(409);
       expect(res.body.error.code).toBe('ALREADY_MEMBER');
     });
@@ -212,7 +236,7 @@ describe('User management', () => {
       const created = await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, password: 'a-strong-password', fullName: 'Reactivate Me', roleId: roleB1Id })
+        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Reactivate Me', roleId: roleB1Id })
         .expect(201);
 
       await request(app.getHttpServer())
@@ -223,10 +247,40 @@ describe('User management', () => {
       const relinked = await request(app.getHttpServer())
         .post('/v1/users/link')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, roleId: roleB2Id })
+        .send({ username, email: `${username}@example.com`, roleId: roleB2Id })
         .expect(201);
       expect(relinked.body.archivedAt).toBeNull();
       expect(relinked.body.role.id).toBe(roleB2Id);
+    });
+  });
+
+  describe('admin MFA enforcement (ENFORCE_ADMIN_MFA)', () => {
+    const original = process.env.ENFORCE_ADMIN_MFA;
+    afterEach(() => {
+      if (original === undefined) delete process.env.ENFORCE_ADMIN_MFA;
+      else process.env.ENFORCE_ADMIN_MFA = original;
+    });
+
+    it('blocks a password-only admin-permission holder with mfa_setup_required when enforced', async () => {
+      const admin = await createTestTenant([PERMISSIONS.USERS_EDIT, PERMISSIONS.ROLES_EDIT]);
+      process.env.ENFORCE_ADMIN_MFA = 'true';
+      const res = await request(app.getHttpServer())
+        .post('/v1/auth/login')
+        .send({ username: admin.username, password: TEST_PASSWORD })
+        .expect(200);
+      expect(res.body.status).toBe('mfa_setup_required');
+      expect(res.body.setupToken).toEqual(expect.any(String));
+    });
+
+    it('still lets a non-admin password login through when enforced', async () => {
+      const user = await createTestTenant([PERMISSIONS.OPERATORS_VIEW]);
+      process.env.ENFORCE_ADMIN_MFA = 'true';
+      const res = await request(app.getHttpServer())
+        .post('/v1/auth/login')
+        .send({ username: user.username, password: TEST_PASSWORD })
+        .expect(200);
+      expect(res.body.status).toBe('authenticated');
+      expect(res.body.accessToken).toEqual(expect.any(String));
     });
   });
 });

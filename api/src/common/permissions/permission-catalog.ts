@@ -139,6 +139,30 @@ export const PERMISSIONS = {
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
+/**
+ * Permissions that grant privileged control over a tenant's security posture:
+ * managing users, managing roles/permissions (the privilege-escalation path),
+ * setting the security policy itself, managing billing, erasing personal data,
+ * and managing integration credentials. A holder of any of these can escalate
+ * privilege or exfiltrate/destroy data if their account is taken over, so MFA
+ * is mandatory for them regardless of the company's own opt-in `mfaRequired`
+ * setting (production-readiness audit: "enforce MFA for admin roles"). Kept
+ * deliberately narrow — day-to-day operational permissions (dispatch, assets,
+ * maintenance, etc.) are not admin-tier and do not force a second factor.
+ */
+export const ADMIN_TIER_PERMISSION_KEYS: ReadonlySet<PermissionKey> = new Set<PermissionKey>([
+  PERMISSIONS.USERS_CREATE,
+  PERMISSIONS.USERS_EDIT,
+  PERMISSIONS.USERS_ARCHIVE,
+  PERMISSIONS.ROLES_CREATE,
+  PERMISSIONS.ROLES_EDIT,
+  PERMISSIONS.ROLES_ARCHIVE,
+  PERMISSIONS.SECURITY_POLICY_MANAGE,
+  PERMISSIONS.BILLING_MANAGE,
+  PERMISSIONS.PRIVACY_ERASE_DATA,
+  PERMISSIONS.INTEGRATIONS_MANAGE,
+]);
+
 export interface PermissionCatalogEntry {
   key: PermissionKey;
   category: string;

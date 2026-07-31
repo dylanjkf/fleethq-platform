@@ -17,6 +17,7 @@ import { OidcVerifierService } from './oidc-verifier.service';
 import { WebauthnService } from './webauthn/webauthn.service';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import { LoginMethod, MfaChallengePayload, PolicyActionPayload, PreAuthJwtPayload } from './jwt-payload.interface';
+import { ADMIN_TIER_PERMISSION_KEYS, PermissionKey } from '../common/permissions/permission-catalog';
 
 /** Optional request context threaded from the controller for audit records. */
 export interface AuthContext {
@@ -451,8 +452,26 @@ export class AuthService {
    * new-device-login alert email fires (previously duplicated between
    * completeLogin and selectCompany for the multi-company case).
    */
+  /**
+   * Whether admin-tier accounts must have MFA to complete login
+   * (production-readiness audit: "enforce MFA for admin roles"). Defaults on in
+   * every real environment; set `ENFORCE_ADMIN_MFA=false` to stage a rollout.
+   * Defaults *off* under NODE_ENV=test so the broad e2e suite's password-only
+   * admin logins aren't all forced through the MFA-setup wall — the dedicated
+   * test for this behaviour opts in via the same env var.
+   */
+  private adminMfaEnforced(): boolean {
+    const raw = process.env.ENFORCE_ADMIN_MFA;
+    if (process.env.NODE_ENV === 'test') return raw === 'true';
+    return raw !== 'false';
+  }
+
   private async finishLoginForMembership(user: LoginUser, membership: MembershipWithSecurity, context: AuthContext, extra: LoginExtra): Promise<LoginResult> {
-    const blocked = this.policyGate.checkPolicy(user, membership, extra);
+    // Only pay for the role-permission read when enforcement is actually on.
+    const holdsAdminPermission = this.adminMfaEnforced()
+      ? await this.membershipHoldsAdminPermission(membership.companyId, membership.id)
+      : false;
+    const blocked = this.policyGate.checkPolicy(user, membership, { ...extra, holdsAdminPermission });
     if (blocked) return blocked;
 
     if (extra.isNewDeviceLogin && user.email) {
@@ -512,6 +531,26 @@ export class AuthService {
    * the next time the client calls this (matching PermissionGuard's own
    * "resolved fresh every time" discipline).
    */
+  /**
+   * Whether this membership's role grants any admin-tier permission (see
+   * ADMIN_TIER_PERMISSION_KEYS) — the signal that forces MFA at login even
+   * when the company hasn't opted into a mandatory-MFA policy. Read under
+   * `withTenant`: the `roles`/`role_permissions` RLS policies only expose rows
+   * via `current_company_id`, not the `current_user_id` context login runs
+   * under, so it can't be folded into the withUser membership query. The
+   * companyId was already proven to belong to this user by the membership
+   * query that produced it, so scoping a read to it here is safe.
+   */
+  private async membershipHoldsAdminPermission(companyId: string, membershipId: string): Promise<boolean> {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const membership = await tx.companyMembership.findUnique({
+        where: { id: membershipId },
+        select: { role: { select: { permissions: { select: { permission: { select: { key: true } } } } } } },
+      });
+      return !!membership?.role.permissions.some((p) => ADMIN_TIER_PERMISSION_KEYS.has(p.permission.key as PermissionKey));
+    });
+  }
+
   async getMe(companyId: string, membershipId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       const membership = await tx.companyMembership.findUnique({

@@ -12,6 +12,7 @@ import {
   Req,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -19,6 +20,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
 import { ListQueryDto } from '../common/dto/list-query.dto';
+import { INBOUND_WEBHOOK_THROTTLE } from '../common/throttles';
 import { IntegrationCredentialsService } from './integration-credentials.service';
 import { IntegrationConnectionsService } from './integration-connections.service';
 import { IntegrationSyncEngine } from './integration-sync-engine.service';
@@ -222,6 +224,7 @@ export class IntegrationsController {
    * kind of route.
    */
   @Public()
+  @Throttle(INBOUND_WEBHOOK_THROTTLE)
   @Post('webhooks/in/:token')
   @HttpCode(HttpStatus.OK)
   async receiveInboundWebhook(@Param('token') token: string, @Req() req: RawBodyRequest<Request>) {

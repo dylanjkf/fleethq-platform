@@ -25,7 +25,14 @@ import { NotificationsModule } from '../notifications/notifications.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('JWT_SECRET'),
-        signOptions: { expiresIn: config.get<string>('JWT_EXPIRES_IN', '12h') },
+        // Pin the algorithm on both sides. The main session path
+        // (jwt.strategy.ts) already pins `algorithms: ['HS256']`; setting it
+        // here as the module-level default applies the same pin to every
+        // ad-hoc jwt.verify() in this module — the pre-auth, MFA-challenge,
+        // policy-action, and WebAuthn-challenge tokens — closing an
+        // algorithm-confusion / `alg:none` gap without repeating it per call.
+        signOptions: { expiresIn: config.get<string>('JWT_EXPIRES_IN', '12h'), algorithm: 'HS256' },
+        verifyOptions: { algorithms: ['HS256'] },
       }),
     }),
   ],

@@ -140,26 +140,41 @@ export class UsersService {
    * access to this company under a chosen role, without creating a second
    * login identity — usernames are globally unique, so there's exactly one
    * User to find.
+   *
+   * The caller must supply the target's email as well as their username, and
+   * both must match. This is what stops a routine `users:create` holder from
+   * turning the endpoint into a platform-wide username-enumeration oracle
+   * (production-readiness audit): every user-identity mismatch — nonexistent
+   * username, archived account, or wrong email — returns the same generic
+   * "not found", so success is only ever observable to a caller who already
+   * knows the person's real email.
    */
-  async linkExisting(companyId: string, actorUserId: string, dto: LinkExistingUserDto) {
-    // Same reasoning as AuthService.login's pre-context lookup: `users` RLS
-    // requires an existing shared CompanyMembership, which by definition
-    // doesn't exist yet between this company and the user we're trying to
-    // find — so this one lookup goes through the narrow, SELECT-only
-    // fleetos_auth connection rather than the normal tenant-scoped one.
-    const targetUser = await this.systemPrisma.user.findUnique({ where: { username: dto.username } });
-    if (!targetUser || targetUser.archivedAt) {
-      throw new NotFoundException({
-        code: 'USER_NOT_FOUND',
-        message: 'No active user with that username exists.',
-      });
+  /**
+   * Resolve the target of a `linkExisting` by username+email, or throw the one
+   * generic not-found that keeps the endpoint from being an enumeration oracle.
+   * The lookup goes through the narrow, SELECT-only fleetos_auth connection for
+   * the same reason AuthService.login's pre-context lookup does: `users` RLS
+   * requires an existing shared CompanyMembership, which by definition doesn't
+   * exist yet between this company and the user being found.
+   */
+  private async resolveLinkTarget(username: string, email: string) {
+    const targetUser = await this.systemPrisma.user.findUnique({ where: { username } });
+    const emailMatches = !!targetUser?.email && targetUser.email.toLowerCase() === email.trim().toLowerCase();
+    if (!targetUser || targetUser.archivedAt || !emailMatches) {
+      throw new NotFoundException({ code: 'USER_NOT_FOUND', message: 'No active user matching those details exists.' });
     }
+    return targetUser;
+  }
 
-    return this.prisma.withTenant(companyId, async (tx) => {
+  async linkExisting(companyId: string, actorUserId: string, dto: LinkExistingUserDto) {
+    const targetUser = await this.resolveLinkTarget(dto.username, dto.email);
+
+    const { view, companyName } = await this.prisma.withTenant(companyId, async (tx) => {
       const role = await tx.role.findUnique({ where: { id: dto.roleId } });
       if (!role || role.companyId !== companyId) {
         throw new NotFoundException({ code: 'ROLE_NOT_FOUND', message: 'Role not found.' });
       }
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
 
       // The unique constraint on (userId, companyId) means a prior,
       // deactivated membership must be reactivated rather than re-created —
@@ -209,8 +224,19 @@ export class UsersService {
         },
       });
 
-      return toMembershipView(membership);
+      return { view: toMembershipView(membership), companyName: company.name };
     });
+
+    // Transparency (audit): the linked user should know their login just gained
+    // access to another company. Best-effort and after commit, so a mail
+    // outage can't fail or roll back the grant itself.
+    if (targetUser.email) {
+      void this.authMail
+        .sendCompanyAccessGranted(targetUser.email, targetUser.fullName, companyName)
+        .catch(() => undefined);
+    }
+
+    return view;
   }
 
   async findAll(companyId: string, query: ListQueryDto) {

@@ -57,6 +57,23 @@ export class AuthMailService {
     });
   }
 
+  /**
+   * Fires when an existing identity is granted access to a *new* company via
+   * the admin "link existing user" path (UsersService.linkExisting). The
+   * production-readiness audit flagged that the linked user was never told
+   * they'd gained access to another company — a silent privilege change. Same
+   * transparency principle as the other security emails here: the account
+   * holder should always know when their access footprint changes, even for a
+   * legitimate administrative action.
+   */
+  async sendCompanyAccessGranted(to: string, fullName: string, companyName: string): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: `You've been given access to ${companyName} on FleetOS`,
+      body: `Hi ${fullName},\n\nYour existing FleetOS login was just granted access to ${companyName}. The next time you sign in you'll be able to switch to it.\n\nIf you weren't expecting this, contact your company administrator — access can be removed.`,
+    });
+  }
+
   async sendInvite(to: string, fullName: string, companyName: string, token: string): Promise<void> {
     const link = `${this.baseUrl()}/reset-password?token=${encodeURIComponent(token)}&invite=1`;
     await this.channel.sendEmail({
