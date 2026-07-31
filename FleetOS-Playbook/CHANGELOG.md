@@ -2,6 +2,19 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — FleetHQ Administration Platform, Phase 6 (admin frontend SPA)
+
+**Phase 6 prereq**: `GET /v1/admin/audit-log` (`AdminAuditService.list()`, `audit_log:view`) — every prior phase already wrote to `admin_audit_logs` on every mutating action; this is the first endpoint that reads it back, paginated and filterable by action/entity/organisation/admin/date range. Also added `GET /v1/admin/organisations/:id/roles` so the existing "add a user to this org" support action can offer a real role picker instead of a raw UUID.
+
+**Phase 6 — `admin/`, a new independently built/deployed React app** (sibling to `api/`/`driveros/`), the FleetHQ staff console. Built here rather than inside `fleethq-frontend` since that customer SPA is a separate, unattached repo — a fully separate deployable (origin, auth, bundle) is the correct shape anyway, matching the backend isolation Phase 1 already established.
+
+- React 19 + Vite + TypeScript + Tailwind CSS 4 + TanStack Query + `react-router`, the same versions `driveros` uses minus everything offline/native-specific — desktop-only console, no offline requirement. `oxlint`, with its per-function complexity/line thresholds raised from `driveros`' mobile defaults for legitimately longer admin console pages.
+- Two-step login (password → optional TOTP), a persisted device fingerprint for trusted-device MFA skip, and `useAuth().hasPermission(key)` gating every nav item/tab/action button on the exact permission key the backend route enforces — the UI's visible surface can never drift ahead of what a click would actually be allowed to do.
+- One page per admin backend module from Phases 1–5 plus the Phase 6 prereq: Dashboard, Organisations (list + 4-tab detail: Overview/Billing/Notes/Feature Flags), Customer User detail, Announcements, Feature Flags, System Health, Fleet (cross-tenant search), Audit Log, Settings (MFA + sessions).
+- Every empty/unconfigured state is honest, not a placeholder — e.g. the Dashboard's revenue card says "Billing is not configured on this deployment" rather than showing a fabricated `$0`, mirroring `AdminAnalyticsService`'s own `billingConfigured: false` from Phase 3; the Feature Flags empty state states the real fail-open behaviour.
+- Impersonation shows the minted customer token in a dialog for the admin to copy manually (documented scope decision — `fleethq-frontend` is unattached, so a same-tab handoff isn't wired up), and the Fleet/Customer-User pages carry forward the backend's own cross-tenant exclusions (no credential config, no operator live location).
+- `npx tsc -b`/`npx oxlint`/`npm run build` all clean. Manually browser-verified end to end with Playwright against a live local API + Postgres: full login, every page rendered with real data, a full write-path round trip (create → list → delete an announcement), and organisation-detail navigation — no console errors or failed requests.
+
 ## 2026-07-30 — FleetHQ Administration Platform, Phase 1 (schema + auth)
 
 New `21-Admin-Platform/Overview.md`: FleetHQ staff's own internal tool for

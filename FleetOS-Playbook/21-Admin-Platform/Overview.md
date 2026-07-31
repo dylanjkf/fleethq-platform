@@ -24,7 +24,7 @@ yet.
 | 3 | Executive dashboard (real aggregate data) | **Done** |
 | 4 | Billing operations on top of the existing Stripe integration | **Done** |
 | 5 | Support tools, feature flags, system health, cross-tenant fleet views | **Done** |
-| 6 | Admin frontend SPA | Pending |
+| 6 | Admin frontend SPA (`admin/`) | **Done** |
 | 7 | Audit-log wiring across every phase, hardening, docs, tests | Pending |
 
 ## Isolation model
@@ -385,8 +385,100 @@ Not a scaffold: `operational-recommendations`'s two routes are gated on a real f
 
 `test/admin-support.e2e-spec.ts`, `test/admin-feature-flags.e2e-spec.ts`, `test/admin-system.e2e-spec.ts`, `test/admin-fleet.e2e-spec.ts` — 22 tests total, all against the real HTTP API and a live test database, including the feature-flag suite's proof that disabling `operational_recommendations` actually returns `403` and a per-company override actually restores access.
 
+### Audit log browse endpoint (Phase 6 prereq)
+
+`AdminAuditService.list()` / `GET /v1/admin/audit-log` (`audit_log:view`) —
+every phase above already *writes* to `admin_audit_logs` on every mutating
+action; this is the first endpoint that *reads* it back, paginated and
+filterable by `action`/`entityType`/`organisationId`/`adminUserId`/`from`/`to`.
+Needed before the frontend could have a real Audit Log page rather than a
+placeholder. `test/admin-audit-log.e2e-spec.ts`: auth/permission rejection
+and a positive test that creates an announcement, then finds its
+`support.announcement_created` entry via the `action` filter.
+
+Also added this phase: `GET /v1/admin/organisations/:id/roles` (id + name
+only) — so the existing "add a user to this org" support action
+(Phase 2) can offer a real role picker instead of requiring the admin to
+paste a raw role UUID. No new database grants needed (`fleetos_admin`
+already had `SELECT` on `roles` from Phase 1).
+
+## Admin frontend SPA (Phase 6)
+
+`admin/` — a new, independently built/deployed React app, sibling to `api/`
+and `driveros/` in this repo (see the root README's layout). Built here
+rather than inside `fleethq-frontend` because that customer SPA lives in a
+separate, unattached repo from this session's perspective, and because a
+completely separate deployable is the correct shape anyway: separate origin,
+separate auth, separate bundle, no accidental code sharing between "FleetHQ
+staff tool" and "customer product" that Phase 1's backend isolation already
+went out of its way to avoid.
+
+**Stack**: React 19 + Vite + TypeScript + Tailwind CSS 4, TanStack Query,
+`react-router`, `axios` — the same versions `driveros` already uses, minus
+everything offline/native-specific (`idb`, Capacitor, the PWA service worker)
+since this is a desktop-only internal console with no offline requirement.
+`oxlint` for linting, matching the rest of the repo; its per-function
+line/complexity thresholds are raised from `driveros`' mobile-screen defaults
+(50 lines / complexity 10 → 240 / 18, documented inline in `.oxlintrc.json`)
+because admin console pages (tabbed detail views, multi-form ops panels) are
+legitimately longer than a single mobile field screen.
+
+**Auth**: two-step login (`username`/`password` → either an immediate
+session or an `mfaToken` requiring a TOTP code), a `crypto.randomUUID()`
+device fingerprint persisted in `localStorage` for the backend's trusted-
+device skip-MFA behaviour, and an `AuthContext`/`useAuth()` exposing
+`hasPermission(key)` off `GET /v1/admin/auth/me`'s granted permission list —
+every nav item, tab, and action button in the app is gated on the same
+permission key the backend route actually enforces, so the UI's visible
+surface can never drift ahead of what a click would actually be allowed to
+do.
+
+**Pages**, one per admin backend module built in Phases 1–5 plus the Phase 6
+prereq above: Dashboard (Phase 3's aggregate/revenue/signups/trials data),
+Organisations list + detail (Overview/Billing/Notes/Feature Flags tabs —
+suspend/restore/archive/trial edit/impersonate/add-user on Overview, the
+full Phase 4 billing action set on Billing, notes CRUD, per-org flag
+overrides), Customer User detail (disable/reactivate/unlock/reset-MFA/
+password-reset/resend-verification), Announcements (create/activate/
+deactivate/delete), Feature Flags (global CRUD), System Health (30s
+auto-refreshing DB/process/version diagnostics), Fleet (cross-tenant
+assets/operators/integrations search, three tabs), Audit Log (filterable,
+paginated), and Settings (MFA enrol/disable, active-session list/revoke).
+
+**Every "no data" and "not configured" state is honest, not a placeholder**:
+a fresh Feature Flags page explicitly states "a gated route treats a missing
+flag as enabled, so this is always safe" (matching `FeatureFlagsService`'s
+actual fail-open behaviour); the Dashboard's revenue card shows "Billing is
+not configured on this deployment" rather than a fabricated `$0`, mirroring
+`AdminAnalyticsService`'s own `billingConfigured: false` honesty from Phase 3.
+
+**Impersonation UX is a deliberate scope decision, not a gap**: since
+`fleethq-frontend` is a separate, unattached repo, the Overview tab's
+impersonate action shows the minted customer access token in a
+`ConfirmDialog` for the admin to copy manually rather than attempting a
+same-tab cross-origin handoff.
+
+**Cross-tenant safety carried into the UI**: the Fleet page's tables never
+render `config`/`credentialId` (verified absent from the `FleetIntegration`
+type the API client exposes), and neither the Customer User detail page nor
+an organisation's Overview tab render operator live location — matching the
+backend's own Privacy-Act-driven exclusions from Phase 5d.
+
+### Verification
+
+`npx tsc -b`, `npx oxlint`, and `npm run build` all clean. Manually
+browser-tested end to end against a live local API + Postgres with
+Playwright: full login (no MFA enrolled on the test account, so the direct-
+session path), every page above rendered with real data (thousands of real
+seeded/test organisations, assets, and audit-log rows from the backend test
+suite), a full write-path round trip (create → list → delete an
+announcement, confirmed via a fresh fetch each time), and organisation-detail
+navigation from the list. No console errors or failed requests during the
+run.
+
 ## Not yet built
 
 FleetHQ staff account management (`admin_users:view`/`manage` — creating
-admins other than via the one-time bootstrap script) and the admin frontend
-— see the status table above.
+admins other than via the one-time bootstrap script) — see the status table
+above. Phase 7 (audit-log wiring depth, security hardening, broader test
+coverage, docs) is still pending.

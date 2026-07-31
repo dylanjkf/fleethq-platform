@@ -38,6 +38,13 @@ export class AdminOrganisationsController {
   }
 
   @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
+  @Get(':id/roles')
+  listRoles(@Param('id') id: string) {
+    return this.organisations.listRoles(id);
+  }
+
+  @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_SUSPEND)
   @Post(':id/suspend')
   @HttpCode(HttpStatus.OK)

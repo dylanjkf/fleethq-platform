@@ -84,6 +84,12 @@ export class AdminOrganisationsService {
     return company;
   }
 
+  /** For the "add a user to this org" support action — an admin needs to pick from this organisation's own roles, not know a raw role id. */
+  async listRoles(id: string) {
+    await this.requireCompany(id);
+    return this.adminPrisma.role.findMany({ where: { companyId: id }, orderBy: { name: 'asc' }, select: { id: true, name: true } });
+  }
+
   async getById(id: string) {
     const company = await this.requireCompany(id);
     const [memberships, assetCount, operatorCount, attachedUnitCount] = await Promise.all([

@@ -8,13 +8,20 @@ office dashboard SPA), this is FleetOS.
 ```
 api/                the API — NestJS + Prisma + PostgreSQL, multi-tenant with row-level security
 driveros/            the driver/field app — React + Vite PWA, wrapped natively with Capacitor
+admin/               the FleetHQ staff console — React + Vite SPA, talks to /v1/admin/*
 FleetOS-Playbook/    the product specification — read its CLAUDE.md first
 docs/                architecture/security/database/deployment reference docs
 ```
 
-Each of `api/` and `driveros/` is independently built, tested, and deployed —
-see their own READMEs for day-to-day development. This file covers running
-them together locally and deploying them to production.
+Each of `api/`, `driveros/`, and `admin/` is independently built, tested, and
+deployed — see their own READMEs for day-to-day development. This file
+covers running them together locally and deploying them to production.
+
+`admin/` is FleetHQ staff's own internal tool for operating the SaaS
+business (organisations, billing, support, system health) — completely
+separate from the customer-facing product (`driveros/` and
+`fleethq-frontend`): separate authentication, separate database role,
+separate frontend. See `FleetOS-Playbook/21-Admin-Platform/Overview.md`.
 
 ## Local development
 
@@ -32,6 +39,12 @@ npm run dev:watch             # http://localhost:3000
 cd driveros
 npm install
 npm run dev                   # http://localhost:5173, proxies /v1 and /health to :3000
+
+# in another terminal — only if you need the staff admin console
+cd admin
+npm install
+npm run dev                   # http://localhost:5175, proxies /v1 and /health to :3000
+npm run admin:bootstrap --prefix ../api  # creates the first AdminUser (see api/scripts/bootstrap-admin.ts)
 ```
 
 `fleethq-frontend` (a separate repo) can point at this same local API by

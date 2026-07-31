@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
+import { AdminAuditLogQueryDto } from './dto/admin-audit-log-query.dto';
 
 /** Canonical action names for the admin platform's own audit log. */
 export const ADMIN_AUDIT_ACTIONS = {
@@ -91,5 +93,37 @@ export class AdminAuditService {
       // failure must never block the administrative action it's recording.
       this.logger.error({ err, action: input.action }, 'Failed to write admin audit log entry');
     }
+  }
+
+  /**
+   * The read half of this table (`audit_log:view` — 21-Admin-Platform/Overview.md,
+   * Phase 6): FleetHQ staff browsing the admin platform's own history. Every
+   * filter is structured (action/entityType/organisationId/adminUserId/date
+   * range), never free-text, since these columns aren't indexed for `LIKE`
+   * scans and the values are always exact (an action key, a UUID).
+   */
+  async list(query: AdminAuditLogQueryDto) {
+    const where: Prisma.AdminAuditLogWhereInput = {
+      ...(query.action ? { action: query.action } : {}),
+      ...(query.entityType ? { entityType: query.entityType } : {}),
+      ...(query.organisationId ? { organisationId: query.organisationId } : {}),
+      ...(query.adminUserId ? { adminUserId: query.adminUserId } : {}),
+      ...(query.from || query.to
+        ? { createdAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lte: new Date(query.to) } : {}) } }
+        : {}),
+    };
+
+    const [total, entries] = await Promise.all([
+      this.adminPrisma.adminAuditLog.count({ where }),
+      this.adminPrisma.adminAuditLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        include: { adminUser: { select: { id: true, fullName: true, username: true } } },
+      }),
+    ]);
+
+    return { total, page: query.page, pageSize: query.take, items: entries };
   }
 }
