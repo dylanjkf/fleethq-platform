@@ -146,8 +146,12 @@ async function seedReferenceData() {
   // Administrator/Read Only system-template role gets any permission added
   // to the catalog since it was created — not just brand-new companies.
   const reconciled = await reconcileSystemRolePermissions(prisma);
+  const createdSummary = Object.entries(reconciled.rolesCreated)
+    .filter(([, count]) => count > 0)
+    .map(([name, count]) => `${count} ${name}`)
+    .join(', ');
   console.log(
-    `  Reconciled ${reconciled.administratorRolesChecked} Administrator role(s) and ${reconciled.readOnlyRolesChecked} Read Only role(s); granted ${reconciled.permissionsGranted} missing permission(s).`,
+    `  Reconciled role templates; created ${createdSummary || 'no'} missing role(s); granted ${reconciled.permissionsGranted} missing permission(s).`,
   );
 
   // Same drift guard, for the FleetHQ internal administration platform's own

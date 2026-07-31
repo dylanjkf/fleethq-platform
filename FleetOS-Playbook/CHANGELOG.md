@@ -2,6 +2,17 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 4 (registration depth + named role templates)
+
+Two independent pieces of depth on `POST /v1/companies` provisioning (`22-Auth-Billing-Platform/Overview.md`).
+
+- **Registration depth**: new `Company` columns `abn` (validated via a real ABR checksum algorithm, `IsAbn`), `industry`, `phone`, `fleetSizeEstimate` (all optional, editable after signup too), and a mandatory `termsAcceptedAt` — `SignupCompanyDto.acceptedTerms` must be exactly `true` (`@Equals(true)`), closing a real gap: the platform had actual ToS/Privacy Policy drafts but no record anyone had agreed to them.
+- **Named role templates**: four new purpose-built system-template roles — Dispatcher, Fleet/Workshop Manager, Compliance Officer, Accounts — alongside the existing Administrator/Read Only/Driver trio. `provisionCompany` and `prisma/reconcile-permissions.ts` were both rewritten to loop over a single `ROLE_TEMPLATES` catalog instead of one hand-written block per role name.
+- **Two real bugs caught by the rewrite**: `Role`'s `(companyId, name)` unique constraint has no exemption for archived rows or custom (non-system-template) roles, so (a) a company that archived its own copy of a template role, and (b) a company with an unrelated custom role that happens to share a new template's name (found 18 such cases in the dev database, from unrelated fixtures) both used to crash reconciliation trying to insert a duplicate. Fixed by checking for *any* role with that name before deciding a company is "missing" a template.
+- **Also fixed**: the previous reconciliation script fetched every role's full permission set into memory and issued one `createMany` call *per role* — an N+1 pattern that stopped scaling once a fleet reaches thousands of tenants (concretely: this repo's own accumulated dev database went from a reconciliation run timing out to completing in seconds). Rewritten as a single batched `skipDuplicates: true` insert of every (role × permission) pair.
+- **`fleethq-frontend`**: Administration → Company tab gained ABN/industry/phone/fleet-size fields.
+- Verified: backend `jest` (all auth/companies/reconcile-permissions suites green, including new coverage for both bugs above); frontend `tsc`/`oxlint`/`vitest` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 3 (password policy + per-org mandatory MFA)
 
 Two company-level security policies (`22-Auth-Billing-Platform/Overview.md`), both checked at the one point a login resolves to a specific company membership.

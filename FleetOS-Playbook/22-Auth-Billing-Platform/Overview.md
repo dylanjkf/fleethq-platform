@@ -18,7 +18,7 @@ drifts into describing features that don't exist yet.
 | 1 | Customer session & device management | **Done** |
 | 2 | Magic link + social login + WebAuthn-ready architecture | **Done** |
 | 3 | Password policy depth + per-org mandatory-MFA policy | **Done** |
-| 4 | Registration depth (org intake fields) + named role templates | Planned |
+| 4 | Registration depth (org intake fields) + named role templates | **Done** |
 | 5 | Full Stripe webhook coverage + failed-payment handling | Planned |
 | 6 | Billing & security notification emails | Planned |
 | 7 | Customer self-service billing portal UI | Planned |
@@ -301,3 +301,72 @@ security-sensitive `users` RLS policy itself.
 company's security policy last changed beyond the existing
 `security.settings_updated` audit action; a grace period between a password
 expiring and the account being blocked (it blocks immediately at next login).
+
+## Phase 4: Registration depth + named role templates
+
+Two independent pieces of depth on top of `POST /v1/companies` (Phase 1's
+provisioning path, kept for direct/internal use — see Phase 1's own
+`Company signup` e2e spec comment) and `provisionCompany`.
+
+**Registration depth** — five new `Company` columns
+(`prisma/migrations/20260731090000_registration_depth_role_templates/`):
+
+- `abn` — 11-digit Australian Business Number, validated at intake against
+  the real ABR checksum algorithm (`IsAbn`, `src/common/validators/is-abn.validator.ts`),
+  not just "is this an 11-digit string."
+- `industry`, `phone`, `fleetSizeEstimate` — free-text/numeric onboarding
+  fields, all optional and purely descriptive.
+- `termsAcceptedAt` — **mandatory** at signup (`SignupCompanyDto.acceptedTerms`
+  must be exactly `true`, enforced via `@Equals(true)`, not just `@IsBoolean()`)
+  and stamped with `new Date()` by `CompaniesService.signup()`. A genuine gap
+  this phase closes: the platform had real legal documents
+  (`20-Legal/Terms_of_Service.DRAFT.md`, `Privacy_Policy.DRAFT.md`) but no
+  record that anyone had ever agreed to them. Internal dev/seed scripts don't
+  set it (the column is nullable for exactly that reason — same treatment as
+  `trialDays`).
+
+All five are editable after signup via the existing `PATCH /v1/companies/me`
+(`companies:edit`), and shown/edited on the FleetHQ Administration → Company
+tab.
+
+**Named role templates** — beyond the existing Administrator/Read Only/Driver
+trio, four new purpose-built system-template roles a new company starts with:
+**Dispatcher** (runs the job board — dispatch, customers, messaging),
+**Fleet/Workshop Manager** (assets, attached units, maintenance, parts),
+**Compliance Officer** (compliance documents, fatigue rules, the security
+audit log, Privacy Act requests), and **Accounts** (billing, financial/
+operational reports). `provisionCompany` and `prisma/reconcile-permissions.ts`
+were both rewritten to loop over a single `ROLE_TEMPLATES` catalog
+(`src/common/permissions/permission-catalog.ts`) instead of one hand-written
+block per role name — the previous shape (3 near-duplicate blocks) would have
+become 7 with this phase, past the point copy-paste stays maintainable.
+
+**Two real bugs the rewrite surfaced** (both only reachable once a fleet has
+enough tenants/history to hit them, which is exactly why they'd gone
+unnoticed): `Role` has a `(companyId, name)` unique constraint with no
+exemption for `archivedAt` or `isSystemTemplate` — so (a) a company that
+archived its own copy of a system-template role must still count as "has
+that name," not "missing it," or reconciliation tries to insert a duplicate;
+and (b) a company with its own **custom** role that happens to share a new
+template's name (e.g. an Administrator hand-built a role called
+"Dispatcher" before the template existed) hits the exact same constraint.
+Both are now handled by checking for *any* role with that name (archived or
+custom) before deciding a company is missing a template, and only ever
+mutating active system-template roles' permissions.
+
+**Also fixed in the same rewrite**: the previous reconciliation implementation
+fetched every existing role's full permission set into memory and issued one
+`rolePermission.createMany` call *per role* to grant what was missing — an
+N+1 pattern that stops scaling once a fleet reaches thousands of tenants (this
+codebase's own dev database, after a long test history, made the cost
+concrete: a single reconciliation run went from timing out to completing in
+seconds). The rewrite instead always attempts to insert every (role × target
+permission) pair with `skipDuplicates: true` in batches — Postgres silently
+no-ops what a role already has, and the returned count is exactly how many
+were actually missing, all without ever reading existing permission rows back
+into the application.
+
+**Not yet covered by this phase**: a "start from a template" picker in the
+Roles UI's own create-role dialog (new templates only reach a company via
+initial provisioning or the `permissions:sync` backfill, not on demand);
+industry as a fixed, curated list rather than free text.

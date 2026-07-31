@@ -295,3 +295,139 @@ export const DRIVER_ROLE_PERMISSION_KEYS: PermissionKey[] = [
   PERMISSIONS.ATTACHMENTS_VIEW,
   PERMISSIONS.ATTACHMENTS_UPLOAD,
 ];
+
+/** Runs the day-to-day job board: create/assign/track dispatch jobs, customers, and office↔operator messaging. */
+export const DISPATCHER_ROLE_PERMISSION_KEYS: PermissionKey[] = [
+  PERMISSIONS.DISPATCH_VIEW,
+  PERMISSIONS.DISPATCH_CREATE,
+  PERMISSIONS.DISPATCH_EDIT,
+  PERMISSIONS.DISPATCH_ASSIGN,
+  PERMISSIONS.DISPATCH_CANCEL,
+  PERMISSIONS.CUSTOMERS_VIEW,
+  PERMISSIONS.CUSTOMERS_CREATE,
+  PERMISSIONS.CUSTOMERS_EDIT,
+  PERMISSIONS.DEPOTS_VIEW,
+  PERMISSIONS.ASSETS_VIEW,
+  PERMISSIONS.OPERATORS_VIEW,
+  PERMISSIONS.ATTACHED_UNITS_VIEW,
+  PERMISSIONS.MESSAGES_VIEW,
+  PERMISSIONS.MESSAGES_SEND,
+  PERMISSIONS.MESSAGES_BROADCAST,
+  PERMISSIONS.LOCATION_VIEW,
+  PERMISSIONS.SHIFTS_VIEW,
+  PERMISSIONS.TIMELINE_VIEW,
+  PERMISSIONS.REPORTS_VIEW,
+  PERMISSIONS.FLEET_GRAPH_VIEW,
+  PERMISSIONS.ATTACHMENTS_VIEW,
+  PERMISSIONS.CHECKLISTS_VIEW,
+];
+
+/** Owns vehicles: assets, attached units, maintenance jobs, and the parts catalog. */
+export const WORKSHOP_MANAGER_ROLE_PERMISSION_KEYS: PermissionKey[] = [
+  PERMISSIONS.ASSETS_VIEW,
+  PERMISSIONS.ASSETS_CREATE,
+  PERMISSIONS.ASSETS_EDIT,
+  PERMISSIONS.ASSETS_ARCHIVE,
+  PERMISSIONS.ATTACHED_UNITS_VIEW,
+  PERMISSIONS.ATTACHED_UNITS_CREATE,
+  PERMISSIONS.ATTACHED_UNITS_EDIT,
+  PERMISSIONS.ATTACHED_UNITS_ARCHIVE,
+  PERMISSIONS.MAINTENANCE_VIEW,
+  PERMISSIONS.MAINTENANCE_CREATE,
+  PERMISSIONS.MAINTENANCE_EDIT,
+  PERMISSIONS.MAINTENANCE_APPROVE,
+  PERMISSIONS.MAINTENANCE_CLOSE,
+  PERMISSIONS.PARTS_VIEW,
+  PERMISSIONS.PARTS_CREATE,
+  PERMISSIONS.PARTS_EDIT,
+  PERMISSIONS.PARTS_ARCHIVE,
+  PERMISSIONS.COMPLIANCE_VIEW,
+  PERMISSIONS.FLEET_GRAPH_VIEW,
+  PERMISSIONS.REPORTS_VIEW,
+  PERMISSIONS.TIMELINE_VIEW,
+  PERMISSIONS.ATTACHMENTS_VIEW,
+  PERMISSIONS.ATTACHMENTS_UPLOAD,
+  PERMISSIONS.GPS_DEVICE_MANAGE,
+  PERMISSIONS.ASSET_CLASS_MANAGE,
+  PERMISSIONS.DOCUMENTS_VIEW,
+];
+
+/** Owns NHVR/regulatory compliance: compliance documents, fatigue rules, the security audit log, and Privacy Act requests. */
+export const COMPLIANCE_OFFICER_ROLE_PERMISSION_KEYS: PermissionKey[] = [
+  PERMISSIONS.COMPLIANCE_VIEW,
+  PERMISSIONS.COMPLIANCE_CREATE,
+  PERMISSIONS.COMPLIANCE_EDIT,
+  PERMISSIONS.COMPLIANCE_ARCHIVE,
+  PERMISSIONS.FATIGUE_MANAGE,
+  PERMISSIONS.AUDIT_VIEW,
+  PERMISSIONS.PRIVACY_EXPORT_DATA,
+  PERMISSIONS.PRIVACY_ERASE_DATA,
+  PERMISSIONS.TIMELINE_VIEW,
+  PERMISSIONS.REPORTS_VIEW,
+  PERMISSIONS.OPERATORS_VIEW,
+  PERMISSIONS.ASSETS_VIEW,
+  PERMISSIONS.DOCUMENTS_VIEW,
+  PERMISSIONS.DOCUMENTS_CREATE,
+  PERMISSIONS.KNOWLEDGE_VIEW,
+  PERMISSIONS.KNOWLEDGE_CREATE,
+  PERMISSIONS.CHECKLISTS_VIEW,
+  PERMISSIONS.FORMS_VIEW,
+];
+
+/** Manages billing and views the financial/operational reports that depend on it. */
+export const ACCOUNTS_ROLE_PERMISSION_KEYS: PermissionKey[] = [
+  PERMISSIONS.BILLING_VIEW,
+  PERMISSIONS.BILLING_MANAGE,
+  PERMISSIONS.REPORTS_VIEW,
+  PERMISSIONS.CUSTOMERS_VIEW,
+  PERMISSIONS.FUEL_VIEW,
+  PERMISSIONS.PARTS_VIEW,
+  PERMISSIONS.DOCUMENTS_VIEW,
+];
+
+export interface RoleTemplateSpec {
+  name: string;
+  description: string;
+  /** `'ALL'`/`'VIEW_ONLY'` are computed from the live permission catalog at provision/reconcile time (so they always track new permissions); anything else is a fixed key list. */
+  permissionKeys: 'ALL' | 'VIEW_ONLY' | PermissionKey[];
+}
+
+/**
+ * Every system-template Role a new company is provisioned with, and that
+ * `reconcile-permissions.ts` keeps existing companies in sync with —
+ * Auth/Billing Platform Phase 4's "named role templates": beyond the generic
+ * Administrator/Read Only pair, a purpose-built bundle per common job
+ * function in a freight/logistics company, so a new company isn't stuck
+ * hand-building or cloning-and-pruning a role for its first Dispatcher or
+ * Workshop Manager. Adding a template here is the only step needed for both
+ * new-company provisioning and existing-company backfill to pick it up.
+ */
+export const ROLE_TEMPLATES: RoleTemplateSpec[] = [
+  { name: 'Administrator', description: 'Full access to every capability. Cloneable/editable like any role.', permissionKeys: 'ALL' },
+  { name: 'Read Only', description: 'View-only access across the platform.', permissionKeys: 'VIEW_ONLY' },
+  {
+    name: 'Driver',
+    description: 'DriverOS field access — inspections, forms, deliveries, location, shifts, fuel and office messaging.',
+    permissionKeys: DRIVER_ROLE_PERMISSION_KEYS,
+  },
+  {
+    name: 'Dispatcher',
+    description: 'Runs the day-to-day job board — dispatch jobs, customers, and office↔operator messaging.',
+    permissionKeys: DISPATCHER_ROLE_PERMISSION_KEYS,
+  },
+  {
+    name: 'Fleet/Workshop Manager',
+    description: 'Owns assets, attached units, maintenance jobs, and the parts catalog.',
+    permissionKeys: WORKSHOP_MANAGER_ROLE_PERMISSION_KEYS,
+  },
+  {
+    name: 'Compliance Officer',
+    description: 'Owns compliance documents, fatigue rules, the security audit log, and Privacy Act requests.',
+    permissionKeys: COMPLIANCE_OFFICER_ROLE_PERMISSION_KEYS,
+  },
+  {
+    name: 'Accounts',
+    description: 'Manages billing and views financial/operational reports.',
+    permissionKeys: ACCOUNTS_ROLE_PERMISSION_KEYS,
+  },
+];

@@ -1,4 +1,5 @@
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsAbn } from '../../common/validators/is-abn.validator';
 
 export class UpdateCompanyDto {
   @IsOptional()
@@ -21,4 +22,26 @@ export class UpdateCompanyDto {
   @IsString()
   @MaxLength(500)
   supportNotes?: string;
+
+  // Auth/Billing Platform Phase 4 (registration depth) — editable after signup, same as at intake.
+
+  @IsOptional()
+  @IsAbn()
+  abn?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  industry?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phone?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100000)
+  fleetSizeEstimate?: number;
 }

@@ -1,8 +1,20 @@
 import { randomUUID } from 'crypto';
-import { Prisma, TimelineEntityType } from '@prisma/client';
+import { Permission, Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { TimelineService } from '../timeline/timeline.service';
-import { DRIVER_ROLE_PERMISSION_KEYS } from '../common/permissions/permission-catalog';
+import { ROLE_TEMPLATES } from '../common/permissions/permission-catalog';
+
+/** Resolves one template's permission spec against the live catalog — shared with reconcile-permissions.ts so "ALL"/"VIEW_ONLY" always mean the same thing in both places. */
+export function resolveTemplatePermissions(
+  permissionKeys: (typeof ROLE_TEMPLATES)[number]['permissionKeys'],
+  allPermissions: Permission[],
+  viewOnlyPermissions: Permission[],
+): Permission[] {
+  if (permissionKeys === 'ALL') return allPermissions;
+  if (permissionKeys === 'VIEW_ONLY') return viewOnlyPermissions;
+  const keys = new Set<string>(permissionKeys);
+  return allPermissions.filter((p) => keys.has(p.key));
+}
 
 /**
  * The one place a Company, its starting Roles, and its first admin User get
@@ -39,6 +51,18 @@ export interface ProvisionCompanyInput {
    * omits it (no trial — dev runs unlimited via BILLING_ENFORCED=false anyway).
    */
   trialDays?: number;
+  /** Auth/Billing Platform Phase 4 (registration depth) — org intake fields, all optional. */
+  abn?: string;
+  industry?: string;
+  phone?: string;
+  fleetSizeEstimate?: number;
+  /**
+   * When the admin accepted the Terms of Service/Privacy Policy — set by
+   * `CompaniesService.signup()` from `SignupCompanyDto.acceptedTerms`
+   * (mandatory there). Internal dev/seed callers omit it; the column is
+   * nullable for exactly that reason.
+   */
+  termsAcceptedAt?: Date;
 }
 
 export interface ProvisionCompanyResult {
@@ -64,52 +88,40 @@ export async function provisionCompany(
       name: input.companyName,
       jurisdiction: input.jurisdiction ?? 'AU',
       trialEndsAt: input.trialDays ? new Date(Date.now() + input.trialDays * 24 * 60 * 60 * 1000) : null,
+      abn: input.abn,
+      industry: input.industry,
+      phone: input.phone,
+      fleetSizeEstimate: input.fleetSizeEstimate,
+      termsAcceptedAt: input.termsAcceptedAt,
     },
   });
 
   const allPermissions = await tx.permission.findMany();
   const viewOnlyPermissions = allPermissions.filter((p) => p.key.endsWith(':view'));
 
-  // Two starting Role Templates — companies can edit or clone either
-  // (14-Security/Permissions_Model.md), these are just a usable default so a
-  // brand-new company isn't stuck with zero roles to assign.
-  const administratorRole = await tx.role.create({
-    data: {
-      companyId,
-      name: 'Administrator',
-      description: 'Full access to every capability. Cloneable/editable like any role.',
-      isSystemTemplate: true,
-      permissions: { create: allPermissions.map((p) => ({ permissionId: p.id })) },
-    },
-  });
-
-  const readOnlyRole = await tx.role.create({
-    data: {
-      companyId,
-      name: 'Read Only',
-      description: 'View-only access across the platform.',
-      isSystemTemplate: true,
-      permissions: { create: viewOnlyPermissions.map((p) => ({ permissionId: p.id })) },
-    },
-  });
-
-  // A ready-to-assign role for DriverOS logins, bundling exactly the field
-  // actions a driver needs (inspections, forms, deliveries, location, shifts,
-  // fuel, and messaging the office). Without this, drivers were given a
-  // hand-built or Read-Only-derived role that easily omitted an action like
-  // `messages:send`, silently blocking them from replying to the office.
-  const driverPermissions = allPermissions.filter((p) =>
-    (DRIVER_ROLE_PERMISSION_KEYS as string[]).includes(p.key),
-  );
-  await tx.role.create({
-    data: {
-      companyId,
-      name: 'Driver',
-      description: 'DriverOS field access — inspections, forms, deliveries, location, shifts, fuel and office messaging.',
-      isSystemTemplate: true,
-      permissions: { create: driverPermissions.map((p) => ({ permissionId: p.id })) },
-    },
-  });
+  // Every named system-template Role a new company starts with
+  // (14-Security/Permissions_Model.md: companies can edit or clone any of
+  // them) — Auth/Billing Platform Phase 4's "named role templates": beyond
+  // Administrator/Read Only, a purpose-built bundle per common job function
+  // (Driver, Dispatcher, Fleet/Workshop Manager, Compliance Officer,
+  // Accounts), so a brand-new company isn't stuck hand-building or
+  // cloning-and-pruning a role for its first hire in one of those roles.
+  const roleIdsByName = new Map<string, string>();
+  for (const template of ROLE_TEMPLATES) {
+    const permissions = resolveTemplatePermissions(template.permissionKeys, allPermissions, viewOnlyPermissions);
+    const role = await tx.role.create({
+      data: {
+        companyId,
+        name: template.name,
+        description: template.description,
+        isSystemTemplate: true,
+        permissions: { create: permissions.map((p) => ({ permissionId: p.id })) },
+      },
+    });
+    roleIdsByName.set(template.name, role.id);
+  }
+  const administratorRoleId = roleIdsByName.get('Administrator')!;
+  const readOnlyRoleId = roleIdsByName.get('Read Only')!;
 
   // `users` RLS makes visibility depend on an existing CompanyMembership
   // (see the migration comment) — but Prisma's `.create()` always does an
@@ -134,7 +146,7 @@ export async function provisionCompany(
   });
 
   const adminMembership = await tx.companyMembership.create({
-    data: { userId: adminUserId, companyId, roleId: administratorRole.id },
+    data: { userId: adminUserId, companyId, roleId: administratorRoleId },
   });
 
   await timeline.record(tx, {
@@ -158,8 +170,8 @@ export async function provisionCompany(
   return {
     companyId,
     companyName: company.name,
-    administratorRoleId: administratorRole.id,
-    readOnlyRoleId: readOnlyRole.id,
+    administratorRoleId,
+    readOnlyRoleId,
     adminUserId,
     adminUsername: input.adminUsername,
     adminMembershipId: adminMembership.id,

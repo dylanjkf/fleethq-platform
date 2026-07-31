@@ -41,6 +41,26 @@ model Company {
   /// today, but the column exists from day one per 08-Compliance/Jurisdiction_Model.md
   /// so a second jurisdiction is configuration, not a schema change.
   jurisdiction         String             @default("AU")
+  /// Auth/Billing Platform Phase 4 (registration depth): 11-digit Australian
+  /// Business Number, validated via IsAbn's ABR checksum at intake. Optional
+  /// — not every company provides one immediately, and companies provisioned
+  /// before this field existed have none.
+  abn                  String?            @map("abn")
+  /// Free-text business category collected at intake (e.g. "Courier & parcel
+  /// delivery") — descriptive only, never used to gate a feature.
+  industry             String?            @map("industry")
+  /// Business contact phone collected at intake — distinct from supportPhone
+  /// below, which is the driver-facing helpdesk fallback number.
+  phone                String?            @map("phone")
+  /// Rough fleet size at signup — an onboarding/lead-quality signal, not
+  /// reconciled against the company's actual Asset count anywhere.
+  fleetSizeEstimate    Int?               @map("fleet_size_estimate")
+  /// When this company's admin accepted the Terms of Service/Privacy Policy
+  /// (FleetOS-Playbook/20-Legal/Terms_of_Service.DRAFT.md,
+  /// Privacy_Policy.DRAFT.md) — required at signup (SignupCompanyDto's
+  /// `acceptedTerms`). `null` only for companies provisioned before this
+  /// field existed, or via internal dev/seed scripts.
+  termsAcceptedAt      DateTime?          @map("terms_accepted_at")
   /// FOUNDER_NOTES.md's Support/help pathway gap: a phone number/note an
   /// operator stuck mid-shift can fall back to when messaging the office
   /// isn't fast enough (or there's no connectivity for DriverOS's own

@@ -36,6 +36,12 @@ export class CompaniesService {
           // No free trial — FleetHQ has no self-service signup path in the
           // product anymore (see fleethq-frontend's LoginPage/ContactPage);
           // this endpoint still exists for direct/internal provisioning.
+          abn: dto.abn,
+          industry: dto.industry,
+          phone: dto.phone,
+          fleetSizeEstimate: dto.fleetSizeEstimate,
+          // dto.acceptedTerms is validated `=== true` by SignupCompanyDto — the timestamp is what's actually meaningful to record.
+          termsAcceptedAt: new Date(),
         }),
       );
 
@@ -92,7 +98,7 @@ export class CompaniesService {
       }
 
       const changed: Record<string, { from: unknown; to: unknown }> = {};
-      for (const field of ['name', 'supportPhone', 'supportNotes'] as const) {
+      for (const field of ['name', 'supportPhone', 'supportNotes', 'abn', 'industry', 'phone', 'fleetSizeEstimate'] as const) {
         if (dto[field] !== undefined && dto[field] !== existing[field]) {
           changed[field] = { from: existing[field], to: dto[field] };
         }
@@ -100,7 +106,15 @@ export class CompaniesService {
 
       const company = await tx.company.update({
         where: { id: companyId },
-        data: { name: dto.name, supportPhone: dto.supportPhone, supportNotes: dto.supportNotes },
+        data: {
+          name: dto.name,
+          supportPhone: dto.supportPhone,
+          supportNotes: dto.supportNotes,
+          abn: dto.abn,
+          industry: dto.industry,
+          phone: dto.phone,
+          fleetSizeEstimate: dto.fleetSizeEstimate,
+        },
       });
 
       if (Object.keys(changed).length > 0) {
