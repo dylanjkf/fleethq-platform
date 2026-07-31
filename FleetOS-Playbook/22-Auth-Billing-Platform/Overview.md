@@ -19,7 +19,7 @@ drifts into describing features that don't exist yet.
 | 2 | Magic link + social login + WebAuthn-ready architecture | **Done** |
 | 3 | Password policy depth + per-org mandatory-MFA policy | **Done** |
 | 4 | Registration depth (org intake fields) + named role templates | **Done** |
-| 5 | Full Stripe webhook coverage + failed-payment handling | Planned |
+| 5 | Full Stripe webhook coverage + failed-payment handling | **Done** |
 | 6 | Billing & security notification emails | Planned |
 | 7 | Customer self-service billing portal UI | Planned |
 | 8 | GST / Australian tax invoicing | Planned |
@@ -370,3 +370,71 @@ into the application.
 Roles UI's own create-role dialog (new templates only reach a company via
 initial provisioning or the `permissions:sync` backfill, not on demand);
 industry as a fixed, curated list rather than free text.
+
+## Phase 5: Full Stripe webhook coverage + failed-payment handling
+
+Before this phase, `BillingService.handleWebhookEvent`
+(`src/billing/billing.service.ts`) only handled `checkout.session.completed`
+and the three `customer.subscription.*` events — every invoice/payment event
+fell into the `default:` no-op branch, on the theory that a failed invoice
+already surfaces indirectly via the subscription's own status going
+`past_due`. That's true for *entitlements* (see below), but it meant no
+record of *when* a payment failed, no retry-schedule visibility, and nothing
+that would let a "you have a failed payment" UI (Phase 7) exist.
+
+**New `Company` columns** (`prisma/migrations/20260731100000_billing_payment_failure_tracking/`):
+
+- `paymentFailureCount` — incremented on every `invoice.payment_failed`,
+  reset to `0` on the next successful `invoice.paid`. Purely observational:
+  per `19-Billing/Billing_And_Subscriptions.md`'s "billing informs, never
+  hard-locks" v1 decision, this does **not** by itself change entitlements —
+  `subscriptionStatus` going `PAST_DUE` (already handled before this phase)
+  is what that decision is actually about, and `PAST_DUE` deliberately stays
+  in `plans.ts`'s `ACTIVE_STATUSES`. This phase doesn't touch that.
+- `lastPaymentFailedAt` — never cleared on recovery, a historical "has this
+  company ever had a failed payment" marker for a future support/dunning
+  view.
+- `nextPaymentAttemptAt` — Stripe's own retry schedule
+  (`invoice.next_payment_attempt`), surfaced through `GET /v1/billing/status`
+  so a billing settings page can say exactly when the next charge attempt
+  will happen, not just "your payment failed."
+
+**Two new webhook cases** in `BillingService.handleWebhookEvent`:
+
+- `invoice.payment_failed` — resolves the company via
+  `invoice.parent.subscription_details.metadata.fleetosCompanyId`, which
+  Stripe snapshots onto the invoice at finalization; no extra Stripe API
+  round-trip needed (unlike `checkout.session.completed`, which still has to
+  retrieve the subscription since the checkout session event itself doesn't
+  carry that metadata). Increments `paymentFailureCount`, stamps
+  `lastPaymentFailedAt`/`nextPaymentAttemptAt`, and fans an in-app
+  notification (`billing.payment_failed`) out to every `billing:manage`
+  holder via the existing `NotificationsService.notifyPermissionInTx` — the
+  same cross-cutting mechanism Compliance/Messages/etc. already use, not new
+  infrastructure.
+- `invoice.paid` — resets `paymentFailureCount`/`nextPaymentAttemptAt`, and
+  **only** notifies (`billing.payment_recovered`) when this payment actually
+  recovered the company from a prior failure (`paymentFailureCount` was
+  `> 0`), never on a routine on-time renewal — otherwise "you're all paid up"
+  would fire every billing cycle for the overwhelmingly common case where
+  nothing was ever wrong. `invoice.payment_succeeded` (the older, still-fired
+  alias for the same event) is deliberately left unhandled to avoid
+  double-counting/double-notifying a single real-world payment.
+
+Both new handlers are `private` methods on `BillingService`, and the
+`checkout.session.completed`/subscription-created/updated/deleted cases were
+each extracted into their own private method too (`handleCheckoutSessionCompleted`,
+`handleSubscriptionEvent`) — adding two more cases to what was a single large
+`switch` pushed `handleWebhookEvent` over this repo's own complexity lint
+ceiling; extracting kept the dispatch switch itself trivial regardless of how
+many event types it now handles.
+
+**Deliberately out of scope for this phase** (see Phase 6/7's own scope):
+sending an actual *email* for a failed/recovered payment — only the in-app
+notification exists so far, since Phase 6 ("Billing & security notification
+emails") is where the dedicated email templates and channel wiring belong;
+any change to entitlement/enforcement behavior on repeated failures (still
+governed entirely by `subscriptionStatus`, unchanged by this phase); and any
+UI surfacing `paymentFailureCount`/`nextPaymentAttemptAt` on a billing
+settings page (Phase 7, "Customer self-service billing portal UI" — the data
+is there now, plumbing it into a UI is that phase's job).

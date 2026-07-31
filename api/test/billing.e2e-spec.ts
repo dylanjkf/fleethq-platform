@@ -59,6 +59,40 @@ function subscriptionUpdatedEvent(customerId: string, subscriptionId: string, st
   };
 }
 
+/**
+ * Auth/Billing Platform Phase 5 (full Stripe webhook coverage +
+ * failed-payment handling). companyId travels the same way as the
+ * subscription events above — Stripe snapshots `subscription.metadata` onto
+ * `invoice.parent.subscription_details.metadata` at invoice finalization, so
+ * no extra Stripe API round-trip is needed to resolve it.
+ */
+function invoiceEvent(
+  type: 'invoice.payment_failed' | 'invoice.paid',
+  subscriptionId: string,
+  companyId?: string,
+  nextPaymentAttempt: number | null = null,
+) {
+  return {
+    id: `evt_${type}_${subscriptionId}_${Math.random()}`,
+    object: 'event',
+    type,
+    data: {
+      object: {
+        id: `in_${subscriptionId}`,
+        object: 'invoice',
+        next_payment_attempt: nextPaymentAttempt,
+        parent: {
+          type: 'subscription_details',
+          subscription_details: {
+            subscription: subscriptionId,
+            metadata: companyId ? { fleetosCompanyId: companyId } : {},
+          },
+        },
+      },
+    },
+  };
+}
+
 describe('Billing / subscriptions', () => {
   let app: INestApplication;
 
@@ -198,5 +232,63 @@ describe('Billing / subscriptions', () => {
       app,
       subscriptionUpdatedEvent('cus_does_not_exist_anywhere', 'sub_orphan', 'active', 'price_test_standard'),
     ).expect(200);
+  });
+
+  it('records an invoice.payment_failed event and notifies billing:manage holders with the retry date', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+    const nextAttempt = Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId, nextAttempt)).expect(
+      200,
+    );
+
+    const status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(1);
+    expect(status.body.lastPaymentFailedAt).not.toBeNull();
+    expect(new Date(status.body.nextPaymentAttemptAt).getTime()).toBe(nextAttempt * 1000);
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    const types = (notifications.body.items as { type: string }[]).map((n) => n.type);
+    expect(types).toContain('billing.payment_failed');
+  });
+
+  it('increments paymentFailureCount across repeated failures, then resets it and notifies recovery on invoice.paid', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    let status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(2);
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(0);
+    expect(status.body.nextPaymentAttemptAt).toBeNull();
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    const types = (notifications.body.items as { type: string }[]).map((n) => n.type);
+    expect(types).toContain('billing.payment_recovered');
+  });
+
+  it('does not send a recovery notification for a routine invoice.paid with no prior failure', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(notifications.body.items).toHaveLength(0);
+  });
+
+  it('does nothing (no error) for an invoice event with no fleetosCompanyId metadata', async () => {
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', 'sub_orphan')).expect(200);
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', 'sub_orphan')).expect(200);
   });
 });

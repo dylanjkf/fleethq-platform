@@ -2,6 +2,17 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-07-31 — Auth/Billing Platform, Phase 5 (full Stripe webhook coverage + failed-payment handling)
+
+`BillingService.handleWebhookEvent` (`22-Auth-Billing-Platform/Overview.md`) previously only handled `checkout.session.completed` and the three `customer.subscription.*` events — every invoice/payment event fell into a no-op default branch.
+
+- **Two new webhook cases**: `invoice.payment_failed` increments a new `Company.paymentFailureCount`, stamps `lastPaymentFailedAt`/`nextPaymentAttemptAt` (Stripe's own retry schedule), and fans an in-app `billing.payment_failed` notification out to every `billing:manage` holder via the existing `NotificationsService` — no new notification infrastructure. `invoice.paid` resets the counter and notifies `billing.payment_recovered` **only** when this payment actually recovered the company from a prior failure, never on a routine renewal. Both resolve the company via `invoice.parent.subscription_details.metadata.fleetosCompanyId` — a Stripe-snapshotted field, no extra API round-trip needed.
+- **Entitlements are unchanged by design**: `paymentFailureCount` is purely observational — `subscriptionStatus` going `PAST_DUE` (already handled before this phase) remains the only thing tied to plan entitlements, and `PAST_DUE` deliberately stays in `plans.ts`'s `ACTIVE_STATUSES` per the existing "billing informs, never hard-locks" v1 decision.
+- **Complexity cleanup**: adding two more cases pushed `handleWebhookEvent` over this repo's own lint complexity ceiling, so every case body (including the pre-existing ones) was extracted into its own private method, keeping the dispatch switch itself trivial.
+- **Deliberately deferred**: an actual payment-failed/recovered *email* (Phase 6, "Billing & security notification emails" — only the in-app notification exists so far); any billing-portal UI surfacing the new fields (Phase 7).
+- **A pre-existing gap this phase's full-suite run caught**: `test/auth-completeness.e2e-spec.ts` still called `POST /v1/companies` without `acceptedTerms` — Phase 4 updated `companies.e2e-spec.ts`'s signup payloads but missed this other spec file, which started failing (400 instead of 201) the moment Phase 4 shipped. Unrelated to this phase's own webhook work, but caught and fixed here since it surfaced in this phase's full-suite verification pass.
+- Verified: full backend `jest` suite (535/536 — the one failure is the pre-existing `integrations.e2e-spec.ts` webhook-timeout flake documented in Phase 1-3, confirmed unrelated by its own isolated re-run) including `billing.e2e-spec.ts` extended with 4 new cases (both events, repeated-failure counting, no-recovery-notification-on-routine-renewal, orphan-metadata no-ops); `tsc`/`eslint` clean.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 4 (registration depth + named role templates)
 
 Two independent pieces of depth on `POST /v1/companies` provisioning (`22-Auth-Billing-Platform/Overview.md`).

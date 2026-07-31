@@ -13,6 +13,8 @@ FleetOS never stores card details, never computes prices, never runs its own dun
 
 This keeps the "which of Stripe's many statuses maps to what" logic in exactly one place (`billing.service.ts`'s `mapStripeStatus`) and means FleetOS can never drift into being a half-correct replica of Stripe's billing state machine.
 
+`paymentFailureCount` / `lastPaymentFailedAt` / `nextPaymentAttemptAt` (Auth/Billing Platform Phase 5, `22-Auth-Billing-Platform/Overview.md`) are a separate, purely observational layer on top of the same `Company` row — driven by `invoice.payment_failed`/`invoice.paid`, not `mapStripeStatus`. They never change what tier a company resolves to; only `subscriptionStatus` does that.
+
 ### Billing informs; it does not hard-lock-out (v1)
 A company with `subscriptionStatus` of `NONE`, `PAST_DUE`, or `CANCELED` is **not** blocked from using FleetOS in v1. The product surfaces status (a Billing page badge, a `PAST_DUE` warning banner) and leaves enforcement to a human commercial conversation. Rationale: a fleet mid-shift being abruptly locked out of dispatch/compliance tooling because a card expired is a worse outcome — for a safety-relevant operational system — than a few days of unpaid access while the operator sorts out payment. A future milestone can add graduated enforcement (e.g. read-only after N days past due) if the commercial reality demands it; the `subscriptionStatus` column already carries everything such a policy would need, so that's an additive change, not a schema one.
 
@@ -40,6 +42,6 @@ A company with `subscriptionStatus` of `NONE`, `PAST_DUE`, or `CANCELED` is **no
 1. Create a real Stripe account; complete Stripe's business verification.
 2. In the Stripe Dashboard, create the Product(s) and Price(s) for FleetOS's plan(s).
 3. Set `STRIPE_SECRET_KEY` (live key) and `STRIPE_WEBHOOK_SECRET` in Secrets Manager; set `VITE_STRIPE_PRICE_ID` to the live Price for the FleetHQ build.
-4. Register the `POST /v1/billing/webhook` endpoint in the Stripe Dashboard and subscribe it to `checkout.session.completed` and `customer.subscription.*` events.
+4. Register the `POST /v1/billing/webhook` endpoint in the Stripe Dashboard and subscribe it to `checkout.session.completed`, `customer.subscription.*`, `invoice.payment_failed`, and `invoice.paid` events (`22-Auth-Billing-Platform/Overview.md`'s Phase 5 — invoice events, not just subscription status, since Phase 5).
 5. Run one real end-to-end subscribe in Stripe **test mode** first, confirm the webhook drives `subscriptionStatus` to `ACTIVE`, then switch to live keys.
 6. Have the Terms of Service / subscription terms (see `19-Billing/`'s sibling legal drafts, pending lawyer review) in place before taking real payments.

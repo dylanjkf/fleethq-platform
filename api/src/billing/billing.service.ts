@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { PAID_TIERS, isTrialActive } from './plans';
 
 /**
@@ -38,6 +40,7 @@ export class BillingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   isConfigured(): boolean {
@@ -76,7 +79,15 @@ export class BillingService {
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({
         where: { id: companyId },
-        select: { subscriptionStatus: true, planPriceId: true, stripeCustomerId: true, trialEndsAt: true },
+        select: {
+          subscriptionStatus: true,
+          planPriceId: true,
+          stripeCustomerId: true,
+          trialEndsAt: true,
+          paymentFailureCount: true,
+          lastPaymentFailedAt: true,
+          nextPaymentAttemptAt: true,
+        },
       }),
     );
     return {
@@ -86,6 +97,9 @@ export class BillingService {
       billingConfigured: this.isConfigured(),
       trialEndsAt: company.trialEndsAt ? company.trialEndsAt.toISOString() : null,
       trialActive: isTrialActive(company.trialEndsAt),
+      paymentFailureCount: company.paymentFailureCount,
+      lastPaymentFailedAt: company.lastPaymentFailedAt ? company.lastPaymentFailedAt.toISOString() : null,
+      nextPaymentAttemptAt: company.nextPaymentAttemptAt ? company.nextPaymentAttemptAt.toISOString() : null,
     };
   }
 
@@ -257,35 +271,105 @@ export class BillingService {
     }
 
     switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object as Stripe.Checkout.Session;
-        const companyId = session.client_reference_id;
-        if (!companyId || !session.customer || !session.subscription) break;
-        const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
-        await this.syncSubscription(companyId, session.customer as string, subscription);
+      case 'checkout.session.completed':
+        await this.handleCheckoutSessionCompleted(stripe, event.data.object as Stripe.Checkout.Session);
         break;
-      }
       case 'customer.subscription.created':
       case 'customer.subscription.updated':
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object as Stripe.Subscription;
-        const companyId = subscription.metadata?.fleetosCompanyId;
-        if (!companyId) {
-          this.logger.warn(`Received a subscription event with no fleetosCompanyId metadata (subscription ${subscription.id})`);
-          break;
-        }
-        await this.syncSubscription(companyId, subscription.customer as string, subscription);
+      case 'customer.subscription.deleted':
+        await this.handleSubscriptionEvent(event.data.object as Stripe.Subscription);
         break;
-      }
+      case 'invoice.payment_failed':
+        await this.handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
+        break;
+      // Stripe fires both `invoice.paid` and the older `invoice.payment_succeeded`
+      // for the same successful charge — handling only `invoice.paid` (the
+      // currently-recommended event) avoids double-counting/double-notifying
+      // for what is a single real-world event.
+      case 'invoice.paid':
+        await this.handleInvoicePaymentSucceeded(event.data.object as Stripe.Invoice);
+        break;
       default:
-        // Every other event type is either not relevant to what this
-        // service tracks (invoices, payment methods, etc. — Stripe's own
-        // dashboard/portal is the place to look at those) or is implied by
-        // the subscription-status events above (e.g. a failed invoice on a
-        // subscription already shows up as that subscription's own status
-        // going to `past_due` via customer.subscription.updated).
+        // Every other event type is either not relevant to what this service
+        // tracks (payment methods, quotes, etc. — Stripe's own dashboard/
+        // portal is the place to look at those) or is a duplicate of one
+        // already handled above (`invoice.payment_succeeded` vs `invoice.paid`).
         break;
     }
+  }
+
+  private async handleCheckoutSessionCompleted(stripe: Stripe, session: Stripe.Checkout.Session): Promise<void> {
+    const companyId = session.client_reference_id;
+    if (!companyId || !session.customer || !session.subscription) return;
+    const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
+    await this.syncSubscription(companyId, session.customer as string, subscription);
+  }
+
+  private async handleSubscriptionEvent(subscription: Stripe.Subscription): Promise<void> {
+    const companyId = subscription.metadata?.fleetosCompanyId;
+    if (!companyId) {
+      this.logger.warn(`Received a subscription event with no fleetosCompanyId metadata (subscription ${subscription.id})`);
+      return;
+    }
+    await this.syncSubscription(companyId, subscription.customer as string, subscription);
+  }
+
+  /**
+   * `invoice.payment_failed` — the dunning-cycle-aware sibling of the coarser
+   * `customer.subscription.updated` → PAST_DUE transition: this fires on
+   * *every* failed attempt (not just the first), and carries the actual
+   * retry schedule (`next_payment_attempt`), which PAST_DUE alone doesn't.
+   * Company resolution reads `parent.subscription_details.metadata` directly
+   * off the invoice — no extra Stripe API round-trip needed, since Stripe
+   * snapshots the subscription's metadata onto the invoice at finalization.
+   */
+  private async handleInvoicePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
+    const companyId = invoice.parent?.subscription_details?.metadata?.fleetosCompanyId;
+    if (!companyId) {
+      this.logger.warn(`Received invoice.payment_failed with no fleetosCompanyId metadata (invoice ${invoice.id})`);
+      return;
+    }
+    const nextAttempt = invoice.next_payment_attempt ? new Date(invoice.next_payment_attempt * 1000) : null;
+
+    await this.prisma.withTenant(companyId, async (tx) => {
+      await tx.company.update({
+        where: { id: companyId },
+        data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: new Date(), nextPaymentAttemptAt: nextAttempt },
+      });
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.payment_failed',
+        title: 'A subscription payment failed',
+        body: nextAttempt
+          ? `Stripe was unable to charge your payment method and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}. Update your payment method to avoid an interruption.`
+          : 'Stripe was unable to charge your payment method and will not retry automatically. Update your payment method to keep your subscription active.',
+        linkPath: '/settings/billing',
+      });
+    });
+  }
+
+  /**
+   * `invoice.paid` — only notifies when this payment actually recovered the
+   * company from a prior failure (paymentFailureCount > 0), never on a
+   * routine on-time renewal, so "you're all paid up" doesn't fire every
+   * billing cycle for the common case where nothing was ever wrong.
+   */
+  private async handleInvoicePaymentSucceeded(invoice: Stripe.Invoice): Promise<void> {
+    const companyId = invoice.parent?.subscription_details?.metadata?.fleetosCompanyId;
+    if (!companyId) return;
+
+    await this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true } });
+      const wasRecovering = company.paymentFailureCount > 0;
+      await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null } });
+      if (wasRecovering) {
+        await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+          type: 'billing.payment_recovered',
+          title: 'Payment received — your subscription is back in good standing',
+          body: 'Your most recent payment succeeded and your subscription is no longer past due.',
+          linkPath: '/settings/billing',
+        });
+      }
+    });
   }
 
   private async syncSubscription(companyId: string, stripeCustomerId: string, subscription: Stripe.Subscription): Promise<void> {

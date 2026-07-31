@@ -35,7 +35,7 @@ describe('Auth completeness (verify, reset, lockout)', () => {
     const username = `owner-${Date.now()}-${suffix}`;
     const res = await request(app.getHttpServer())
       .post('/v1/companies')
-      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Ada Owner', adminEmail: email })
+      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Ada Owner', adminEmail: email, acceptedTerms: true })
       .expect(201);
     expect(res.body.status).toBe('authenticated');
     const user = await ownerPrisma.user.findUniqueOrThrow({ where: { username } });
@@ -88,7 +88,7 @@ describe('Auth completeness (verify, reset, lockout)', () => {
     const username = `revoke-${Date.now()}`;
     const signupRes = await request(app.getHttpServer())
       .post('/v1/companies')
-      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Rev Oke', adminEmail: 'revoke@example.com' })
+      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Rev Oke', adminEmail: 'revoke@example.com', acceptedTerms: true })
       .expect(201);
     const oldToken = signupRes.body.accessToken as string;
     const userId = (await ownerPrisma.user.findUniqueOrThrow({ where: { username } })).id;

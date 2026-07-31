@@ -95,6 +95,24 @@ model Company {
   /// the source of truth for what a plan costs/includes, so there's nothing
   /// to keep in sync if pricing changes in the Stripe Dashboard.
   planPriceId          String?            @map("plan_price_id")
+  /// Auth/Billing Platform Phase 5 (full Stripe webhook coverage + failed-
+  /// payment handling): incremented on each `invoice.payment_failed` webhook,
+  /// reset to 0 on the next successful `invoice.paid`. Purely observational —
+  /// per 19-Billing/Billing_And_Subscriptions.md's "billing informs, never
+  /// hard-locks" v1 decision, a positive count does not by itself change
+  /// entitlements (subscriptionStatus going PAST_DUE already covers that).
+  paymentFailureCount  Int                @default(0) @map("payment_failure_count")
+  /// Timestamp of the most recent payment failure. Never cleared on recovery
+  /// (unlike paymentFailureCount) — kept as a historical marker of "has this
+  /// company ever had a failed payment," which a future support/dunning view
+  /// may want.
+  lastPaymentFailedAt  DateTime?          @map("last_payment_failed_at")
+  /// When Stripe will next automatically retry a failed invoice
+  /// (`invoice.next_payment_attempt`), or `null` once the retry schedule is
+  /// exhausted or the invoice is paid. Surfaced via GET /v1/billing/status so
+  /// the billing settings page can tell a customer exactly when the next
+  /// charge attempt will happen, not just "your payment failed."
+  nextPaymentAttemptAt DateTime?          @map("next_payment_attempt_at")
   /// Self-serve free-trial window. Set at signup (14 days) so a new company
   /// experiences the full product before subscribing; entitlements grant the
   /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
