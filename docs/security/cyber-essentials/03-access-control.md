@@ -1,5 +1,19 @@
 # Access control & user management
 
+> **Scope note — built vs. target architecture.** Application-layer controls
+> (RLS tenant isolation, RBAC deny-by-default, MFA, lockout, password policy,
+> JWT auth + revocation, audit log, Privacy Act export/erasure, input
+> validation, rate limiting, magic-byte sniffing, SSRF guard) are implemented
+> and inspectable in `api/`. Infrastructure-layer controls (VPC/network, WAF,
+> KMS encryption-at-rest, CloudWatch/GuardDuty/CloudTrail monitoring, multi-AZ /
+> cross-region DB) describe a **target architecture** for the planned
+> Railway/AWS deployment and are **not yet built — there is no Terraform or
+> other IaC in this repository.** Any `infra/terraform/...` or `apps/api/...`
+> path-and-line pointer below therefore references a file that does not exist
+> yet (the application lives at `api/`, not `apps/api/`); treat every such
+> infrastructure item as **⏳ Planned — not yet implemented**, not as evidence
+> of a live control. See `README.md` in this folder for the full breakdown.
+
 ## Intent
 
 FleetOS is a multi-tenant SaaS: many independent fleet operators share one

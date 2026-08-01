@@ -28,15 +28,14 @@ scanning, so a regression fails the build rather than reaching production.
   strong-password rejection are covered by unit/e2e tests
   (`apps/api/src/attachments/attachments.service.spec.ts`,
   `apps/api/src/common/validators/is-strong-password.validator.spec.ts`).
-- **Static application security testing (SAST).** CodeQL runs over all repository
-  JS/TS with the stricter `security-and-quality` query suite on every push/PR and
-  weekly. `.github/workflows/security-scan.yml`.
-- **Dependency & secret scanning.** `npm audit` (fails on high/critical in
-  production dependencies), `dependency-review` on PRs, and gitleaks secret
-  scanning run in CI; Dependabot opens update PRs. See
+- **Dependency updates (Dependabot).** Dependabot opens update PRs for the API's
+  npm dependencies and the GitHub Actions toolchain. `.github/dependabot.yml`. See
   [04-patch-and-vulnerability-management.md](./04-patch-and-vulnerability-management.md).
-- **Infrastructure-as-code scanning.** `terraform validate` + tfsec run on any
-  change under `infra/terraform/**`. `.github/workflows/terraform-ci.yml`.
+- ⏳ **Planned — SAST, dependency-audit gate, secret scanning, IaC scanning.**
+  CodeQL (`security-and-quality`), an `npm audit` gate, `dependency-review`,
+  gitleaks, and `terraform validate` + tfsec are **not wired** — there is no
+  `security-scan.yml`, no `terraform-ci.yml`, and no IaC. These are the automated
+  static/scan controls this domain still needs.
 - **Scale/performance regression test.** A seeded 12,000-stop dataset asserts a
   report stays correct, uses the expected index (via `EXPLAIN`, no seq-scan), and
   returns within budget. `apps/api/test/scale-performance.e2e-spec.ts`.
@@ -52,18 +51,22 @@ scanning, so a regression fails the build rather than reaching production.
 | **No dynamic application security testing (DAST).** All automated testing is white-box (SAST + dependency audit + e2e); no scanner runs against a deployed, running instance. | low | Add a DAST pass (e.g. ZAP baseline) against a staging deployment in CI. |
 | Test coverage is collected but not enforced. `jest.config.js` gathers coverage, but CI runs `npm test` with no `coverageThreshold`, so coverage can silently regress. | low | Add a `coverageThreshold` and run coverage in CI, at least for the security-critical modules (auth, permissions, prisma/RLS, audit). |
 | Authentication negative tests do not explicitly cover a tampered / wrong-signature / expired JWT. The suite covers unauthenticated (401) and revoked (`TOKEN_REVOKED`), but not a forged token. | low | Add cases asserting a tampered-signature and an expired token are both rejected. |
-| The container image is scanned on push to ECR (OS-package level) but the scan does not gate the deploy. | medium | Gate deployment on the image scan result — carried in [04-patch-and-vulnerability-management.md](./04-patch-and-vulnerability-management.md). |
+| **No SAST / dependency-audit gate / secret scanning / IaC scanning in CI.** There is no `security-scan.yml` and no `terraform-ci.yml`; automated static and scan-based testing is absent (Dependabot aside). | medium | Add the security-scan workflow (CodeQL + `npm audit` gate + dependency-review + gitleaks) and, once IaC exists, IaC scanning — carried in [04](./04-patch-and-vulnerability-management.md) and [06](./06-secure-development-lifecycle.md). |
+| **No container-image scan gate.** There is no registry/deploy pipeline in this repo (Railway builds and runs the image); nothing scans the built image or gates a rollout on findings. | medium | Once a registry/deploy pipeline exists, gate deployment on an image scan — carried in [04-patch-and-vulnerability-management.md](./04-patch-and-vulnerability-management.md). |
 
 ## Standards mapping
 
 **Cyber Essentials:** ongoing assurance. Automated regression testing of security
-properties + SAST + dependency scanning is a strong continuous-assurance posture;
-an external test is the missing independent assurance.
+properties (the e2e suites via `api-ci.yml`) plus Dependabot is a solid base;
+**SAST and dependency/secret scanning gates are ⏳ planned**, and an external test
+is the missing independent assurance.
 
 **ISO/IEC 27001:2022 Annex A:** A.8.29 (security testing in development and
-acceptance) — well met by the e2e/SAST/dependency pipeline; A.8.8 (management of
-technical vulnerabilities) — met on discovery, see domain 4.
+acceptance) — *partial*: strong e2e coverage in CI, but SAST and scan gates are
+planned; A.8.8 (management of technical vulnerabilities) — partial on discovery
+(Dependabot in force; scan gates planned), see domain 4.
 
 **SOC 2 (2017 TSC):** CC4.1 (monitoring of controls via evaluations) and CC7.1
-(vulnerability detection). The automated pipeline supports both; an independent
-assessment and enforced coverage would strengthen the evidence.
+(vulnerability detection). The e2e pipeline and Dependabot partially support both;
+the automated SAST/SCA gates, an independent assessment, and enforced coverage
+would strengthen the evidence.

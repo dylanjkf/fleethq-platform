@@ -1,11 +1,17 @@
 /**
  * Closes the "seed-script permission drift" gap: every new permission this
  * codebase has added (depots:*, shifts:*, timeline:view, ...) required
- * someone to remember to re-grant it to existing companies' Administrator
- * role by hand via the Roles UI. provisionCompany() only computes "every
- * permission" / "every :view permission" once, at company-creation time —
- * nothing kept those two system-template roles in sync with the catalog
- * afterwards.
+ * someone to remember to re-grant it to existing companies' system-template
+ * roles by hand via the Roles UI. provisionCompany() only computes each
+ * template's permission set once, at company-creation time — nothing kept
+ * existing companies' roles in sync with the catalog afterwards.
+ *
+ * Generalized over `ROLE_TEMPLATES` (Auth/Billing Platform Phase 4's named
+ * role templates) rather than one hand-written block per role name: an
+ * existing company missing a template entirely (e.g. it was provisioned
+ * before "Dispatcher" existed) gets it created; an existing role of that
+ * name missing a permission the template has since gained gets it granted.
+ * Never touches a company's own custom (non-system-template) roles.
  *
  * Framework-agnostic on purpose (same reasoning as provision-company.ts):
  * runs as the schema-owning DB role, no NestJS DI container needed, callable
@@ -16,104 +22,113 @@
 import '../scripts/load-env';
 import { randomUUID } from 'crypto';
 import { PrismaClient } from '@prisma/client';
-import { DRIVER_ROLE_PERMISSION_KEYS } from '../src/common/permissions/permission-catalog';
+import { ROLE_TEMPLATES } from '../src/common/permissions/permission-catalog';
+import { resolveTemplatePermissions } from '../src/companies/provision-company';
 
 export interface ReconcileResult {
-  administratorRolesChecked: number;
-  readOnlyRolesChecked: number;
-  driverRolesCreated: number;
+  /** Roles created (backfilled), keyed by template name. */
+  rolesCreated: Record<string, number>;
   permissionsGranted: number;
 }
+
+/**
+ * Batch size for the (role × permission) cross-product `createMany` calls
+ * below — keeps each query's bind-parameter count (2 per row) comfortably
+ * under Postgres's ~65535 limit even across a large fleet of tenants, e.g.
+ * thousands of companies × dozens of permissions in the Administrator
+ * template.
+ */
+const GRANT_BATCH_SIZE = 5000;
 
 export async function reconcileSystemRolePermissions(prisma: PrismaClient): Promise<ReconcileResult> {
   const allPermissions = await prisma.permission.findMany();
   const viewOnlyPermissions = allPermissions.filter((p) => p.key.endsWith(':view'));
-  const driverPermissions = allPermissions.filter((p) =>
-    (DRIVER_ROLE_PERMISSION_KEYS as string[]).includes(p.key),
-  );
-
-  const administratorRoles = await prisma.role.findMany({
-    where: { isSystemTemplate: true, name: 'Administrator', archivedAt: null },
-    include: { permissions: true },
-  });
-  const readOnlyRoles = await prisma.role.findMany({
-    where: { isSystemTemplate: true, name: 'Read Only', archivedAt: null },
-    include: { permissions: true },
-  });
+  const companies = await prisma.company.findMany({ select: { id: true } });
 
   let permissionsGranted = 0;
-  permissionsGranted += await grantMissing(prisma, administratorRoles, allPermissions);
-  permissionsGranted += await grantMissing(prisma, readOnlyRoles, viewOnlyPermissions);
+  const rolesCreated: Record<string, number> = {};
 
-  // The "Driver" system role was added after some companies were provisioned,
-  // so create it wherever it's missing and keep existing ones in sync — the
-  // same drift guard as above, extended to the DriverOS role that fixes drivers
-  // being unable to message the office (missing messages:send).
-  const companies = await prisma.company.findMany({ select: { id: true } });
-  const driverRoles = await prisma.role.findMany({
-    where: { isSystemTemplate: true, name: 'Driver', archivedAt: null },
-    include: { permissions: true },
-  });
-  const companiesWithDriverRole = new Set(driverRoles.map((r) => r.companyId));
+  for (const template of ROLE_TEMPLATES) {
+    const targetPermissions = resolveTemplatePermissions(template.permissionKeys, allPermissions, viewOnlyPermissions);
 
-  // Bulk-create in two queries (roles, then their permissions) rather than a
-  // per-company round-trip, so this stays fast even across a large fleet of
-  // tenants.
-  const missingCompanies = companies.filter((c) => !companiesWithDriverRole.has(c.id));
-  if (missingCompanies.length > 0) {
-    const newRoles = missingCompanies.map((c) => ({ id: randomUUID(), companyId: c.id }));
-    await prisma.role.createMany({
-      data: newRoles.map((r) => ({
-        id: r.id,
-        companyId: r.companyId,
-        name: 'Driver',
-        description:
-          'DriverOS field access — inspections, forms, deliveries, location, shifts, fuel and office messaging.',
-        isSystemTemplate: true,
-      })),
+    // Only role/company ids — never each role's current permission set. A
+    // per-role `include: { permissions: true }` (or a per-role `createMany`
+    // call to grant what's missing) was the previous implementation's real
+    // cost: an N+1 round-trip per existing role, which stops scaling once a
+    // fleet reaches thousands of tenants. Instead, always attempt to insert
+    // every (role × target permission) pair with `skipDuplicates` — Postgres
+    // silently no-ops the ones a role already has, and the returned `count`
+    // is exactly how many were actually missing, all in one (batched) query.
+    //
+    // Fetched without an `isSystemTemplate`/`archivedAt` filter on purpose:
+    // `Role`'s `(companyId, name)` unique constraint applies to every role
+    // regardless of either flag. A company that renamed/archived its own
+    // system-template role, or that simply has its own custom role that
+    // happens to share this template's name (e.g. an Administrator picked
+    // "Dispatcher" for a hand-built role before this template existed),
+    // still isn't "missing" the name — attempting to create a fresh row
+    // would violate the constraint either way. Only permission grants below
+    // are scoped to active system-template roles; "does this company
+    // already have a row with this name at all" uses the fully unfiltered set.
+    const rolesWithName = await prisma.role.findMany({
+      where: { name: template.name },
+      select: { id: true, companyId: true, archivedAt: true, isSystemTemplate: true },
     });
-    await prisma.rolePermission.createMany({
-      data: newRoles.flatMap((r) => driverPermissions.map((p) => ({ roleId: r.id, permissionId: p.id }))),
-      skipDuplicates: true,
-    });
+    const activeSystemRoles = rolesWithName.filter((r) => r.isSystemTemplate && !r.archivedAt);
+    if (activeSystemRoles.length > 0) {
+      const pairs = activeSystemRoles.flatMap((r) => targetPermissions.map((p) => ({ roleId: r.id, permissionId: p.id })));
+      permissionsGranted += await createManyChunked(prisma, pairs);
+    }
+
+    // Bulk-create in two queries (roles, then their permissions) rather than
+    // a per-company round-trip, so this stays fast even across a large fleet
+    // of tenants.
+    const companiesWithRole = new Set(rolesWithName.map((r) => r.companyId));
+    const missingCompanies = companies.filter((c) => !companiesWithRole.has(c.id));
+    if (missingCompanies.length > 0) {
+      const newRoles = missingCompanies.map((c) => ({ id: randomUUID(), companyId: c.id }));
+      await prisma.role.createMany({
+        data: newRoles.map((r) => ({
+          id: r.id,
+          companyId: r.companyId,
+          name: template.name,
+          description: template.description,
+          isSystemTemplate: true,
+        })),
+      });
+      const newPairs = newRoles.flatMap((r) => targetPermissions.map((p) => ({ roleId: r.id, permissionId: p.id })));
+      await createManyChunked(prisma, newPairs);
+    }
+    rolesCreated[template.name] = missingCompanies.length;
   }
-  const driverRolesCreated = missingCompanies.length;
-  permissionsGranted += await grantMissing(prisma, driverRoles, driverPermissions);
 
-  return {
-    administratorRolesChecked: administratorRoles.length,
-    readOnlyRolesChecked: readOnlyRoles.length,
-    driverRolesCreated,
-    permissionsGranted,
-  };
+  return { rolesCreated, permissionsGranted };
 }
 
-async function grantMissing(
-  prisma: PrismaClient,
-  roles: { id: string; permissions: { permissionId: string }[] }[],
-  targetPermissions: { id: string }[],
-): Promise<number> {
-  let granted = 0;
-  for (const role of roles) {
-    const have = new Set(role.permissions.map((p) => p.permissionId));
-    const missing = targetPermissions.filter((p) => !have.has(p.id));
-    if (missing.length === 0) continue;
-    await prisma.rolePermission.createMany({
-      data: missing.map((p) => ({ roleId: role.id, permissionId: p.id })),
+/** `rolePermission.createMany({ skipDuplicates: true })`, chunked to stay under the bind-parameter limit; returns the total actually-inserted row count. */
+async function createManyChunked(prisma: PrismaClient, pairs: { roleId: string; permissionId: string }[]): Promise<number> {
+  let inserted = 0;
+  for (let i = 0; i < pairs.length; i += GRANT_BATCH_SIZE) {
+    const { count } = await prisma.rolePermission.createMany({
+      data: pairs.slice(i, i + GRANT_BATCH_SIZE),
       skipDuplicates: true,
     });
-    granted += missing.length;
+    inserted += count;
   }
-  return granted;
+  return inserted;
 }
 
 async function main() {
   const prisma = new PrismaClient();
   try {
     const result = await reconcileSystemRolePermissions(prisma);
+    const createdSummary = Object.entries(result.rolesCreated)
+      .filter(([, count]) => count > 0)
+      .map(([name, count]) => `${count} ${name}`)
+      .join(', ');
     console.log(
-      `Checked ${result.administratorRolesChecked} Administrator role(s) and ${result.readOnlyRolesChecked} Read Only role(s); ` +
-        `created ${result.driverRolesCreated} Driver role(s); granted ${result.permissionsGranted} missing permission(s).`,
+      `Reconciled ${ROLE_TEMPLATES.length} role template(s); ` +
+        `created ${createdSummary || 'no'} missing role(s); granted ${result.permissionsGranted} missing permission(s).`,
     );
   } finally {
     await prisma.$disconnect();

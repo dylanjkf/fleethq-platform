@@ -3,7 +3,8 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
-import { AuthService, LoginResult } from '../auth/auth.service';
+import type { LoginResult } from '../auth/auth.service';
+import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { provisionCompany } from './provision-company';
@@ -15,12 +16,12 @@ export class CompaniesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly timeline: TimelineService,
-    private readonly authService: AuthService,
+    private readonly sessions: AuthSessionsService,
     private readonly authTokens: AuthTokensService,
     private readonly authMail: AuthMailService,
   ) {}
 
-  async signup(dto: SignupCompanyDto): Promise<LoginResult> {
+  async signup(dto: SignupCompanyDto, context: { ip?: string | null; userAgent?: string | null } = {}): Promise<LoginResult> {
     const companyId = randomUUID();
 
     try {
@@ -35,6 +36,12 @@ export class CompaniesService {
           // No free trial — FleetHQ has no self-service signup path in the
           // product anymore (see fleethq-frontend's LoginPage/ContactPage);
           // this endpoint still exists for direct/internal provisioning.
+          abn: dto.abn,
+          industry: dto.industry,
+          phone: dto.phone,
+          fleetSizeEstimate: dto.fleetSizeEstimate,
+          // dto.acceptedTerms is validated `=== true` by SignupCompanyDto — the timestamp is what's actually meaningful to record.
+          termsAcceptedAt: new Date(),
         }),
       );
 
@@ -52,12 +59,13 @@ export class CompaniesService {
 
       return {
         status: 'authenticated',
-        accessToken: this.authService.issueSessionToken(
+        accessToken: await this.sessions.issueSessionToken(
           result.adminUserId,
           result.companyId,
           result.adminMembershipId,
           // Brand-new user — tokenVersion starts at 0.
           0,
+          { ip: context.ip, userAgent: context.userAgent },
         ),
         company: { id: result.companyId, name: result.companyName },
       };
@@ -90,7 +98,7 @@ export class CompaniesService {
       }
 
       const changed: Record<string, { from: unknown; to: unknown }> = {};
-      for (const field of ['name', 'supportPhone', 'supportNotes'] as const) {
+      for (const field of ['name', 'supportPhone', 'supportNotes', 'abn', 'industry', 'phone', 'fleetSizeEstimate'] as const) {
         if (dto[field] !== undefined && dto[field] !== existing[field]) {
           changed[field] = { from: existing[field], to: dto[field] };
         }
@@ -98,7 +106,15 @@ export class CompaniesService {
 
       const company = await tx.company.update({
         where: { id: companyId },
-        data: { name: dto.name, supportPhone: dto.supportPhone, supportNotes: dto.supportNotes },
+        data: {
+          name: dto.name,
+          supportPhone: dto.supportPhone,
+          supportNotes: dto.supportNotes,
+          abn: dto.abn,
+          industry: dto.industry,
+          phone: dto.phone,
+          fleetSizeEstimate: dto.fleetSizeEstimate,
+        },
       });
 
       if (Object.keys(changed).length > 0) {

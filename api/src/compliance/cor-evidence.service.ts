@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ComplianceExpiryStatus } from './compliance.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 const EXPIRING_SOON_WINDOW_DAYS = 30;
 
@@ -78,9 +79,14 @@ export class CorEvidenceService {
       const windowStart = job.createdAt;
       const windowEnd = job.completedAt ?? job.cancelledAt ?? new Date();
 
+      // Each evidence read is scoped to one job/asset/operator over the job's
+      // own window, so it's small in practice — MAX_AGGREGATION_ROWS is a hard
+      // safety bound so a single pathological entity can't turn the pack build
+      // into an unbounded scan.
       const schedulingEvents = await tx.timelineEvent.findMany({
         where: { entityType: TimelineEntityType.JOB, entityId: job.id },
         orderBy: { occurredAt: 'asc' },
+        take: MAX_AGGREGATION_ROWS,
       });
 
       const fatigueEvents = job.operatorId
@@ -92,6 +98,7 @@ export class CorEvidenceService {
               occurredAt: { gte: windowStart, lte: windowEnd },
             },
             orderBy: { occurredAt: 'asc' },
+            take: MAX_AGGREGATION_ROWS,
           })
         : [];
 
@@ -101,6 +108,7 @@ export class CorEvidenceService {
               where: { assetId: job.assetId, submittedAt: { gte: windowStart, lte: windowEnd } },
               include: { template: { select: { name: true } } },
               orderBy: { submittedAt: 'asc' },
+              take: MAX_AGGREGATION_ROWS,
             })
           : Promise.resolve([]),
         job.assetId
@@ -111,6 +119,7 @@ export class CorEvidenceService {
                 OR: [{ completedAt: null }, { completedAt: { gte: windowStart } }],
               },
               orderBy: { createdAt: 'asc' },
+              take: MAX_AGGREGATION_ROWS,
             })
           : Promise.resolve([]),
         job.assetId || job.operatorId
@@ -120,6 +129,7 @@ export class CorEvidenceService {
                 OR: [...(job.assetId ? [{ assetId: job.assetId }] : []), ...(job.operatorId ? [{ operatorId: job.operatorId }] : [])],
               },
               orderBy: { expiresAt: 'asc' },
+              take: MAX_AGGREGATION_ROWS,
             })
           : Promise.resolve([]),
       ]);

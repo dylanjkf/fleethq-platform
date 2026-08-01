@@ -117,10 +117,7 @@ export class OperatorsService {
 
   async update(companyId: string, actorUserId: string, id: string, dto: UpdateOperatorDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.operator.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-      }
+      const existing = await this.requireOperator(tx, companyId, id);
 
       const changed: Record<string, { from: unknown; to: unknown }> = {};
       for (const field of ['fullName', 'email', 'phone'] as const) {
@@ -152,10 +149,7 @@ export class OperatorsService {
 
   async archive(companyId: string, actorUserId: string, id: string) {
     const { operator, linkedUserId } = await this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.operator.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-      }
+      const existing = await this.requireOperator(tx, companyId, id);
       if (existing.archivedAt) {
         return { operator: existing, linkedUserId: null };
       }
@@ -239,5 +233,27 @@ export class OperatorsService {
 
       return updated;
     });
+  }
+
+  /**
+   * The shared operator-ownership guard reused across services (a 404s for an
+   * unknown/cross-tenant operator). `allowArchived` defaults to `true` — this
+   * service's own update/archive callers accept an archived operator — but a
+   * caller that must reject archived operators too (Compliance/Jobs/Maintenance/
+   * Messages, where you can't file a document, assign work, or message a retired
+   * operator) passes `{ allowArchived: false }` to fold that check in without a
+   * second lookup.
+   */
+  async requireOperator(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    id: string,
+    { allowArchived = true }: { allowArchived?: boolean } = {},
+  ) {
+    const operator = await tx.operator.findUnique({ where: { id } });
+    if (!operator || operator.companyId !== companyId || (!allowArchived && operator.archivedAt)) {
+      throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
+    }
+    return operator;
   }
 }

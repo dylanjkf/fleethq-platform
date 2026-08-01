@@ -31,19 +31,44 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
    * a session minted before the reset is rejected here even though its 12h
    * signature is still valid. A single indexed PK lookup by user id, via the
    * pre-tenant-context auth role (no company context exists at this layer yet).
+   * We also confirm the specific UserSession this token names hasn't been
+   * revoked or expired — the piece that makes per-device "log out" or
+   * "revoke this session" take effect immediately rather than at token expiry.
    */
   async validate(payload: JwtPayload): Promise<AuthenticatedRequestUser> {
-    const user = await this.systemPrisma.user.findUnique({
-      where: { id: payload.sub },
-      select: { tokenVersion: true, archivedAt: true },
-    });
-    if (!user || user.archivedAt || user.tokenVersion !== payload.tv) {
-      throw new UnauthorizedException({ code: 'TOKEN_REVOKED', message: 'This session is no longer valid. Please sign in again.' });
+    const invalid = () =>
+      new UnauthorizedException({ code: 'TOKEN_REVOKED', message: 'This session is no longer valid. Please sign in again.' });
+
+    const [user, company, session] = await Promise.all([
+      this.systemPrisma.user.findUnique({
+        where: { id: payload.sub },
+        select: { tokenVersion: true, archivedAt: true },
+      }),
+      this.systemPrisma.company.findUnique({
+        where: { id: payload.companyId },
+        select: { archivedAt: true, suspendedAt: true },
+      }),
+      this.systemPrisma.userSession.findUnique({ where: { id: payload.sid } }),
+    ]);
+    if (!user || user.archivedAt || user.tokenVersion !== payload.tv) throw invalid();
+    if (!session || session.revokedAt || session.expiresAt < new Date()) throw invalid();
+    // Suspension (FleetHQ admin action, 21-Admin-Platform/Overview.md) must take
+    // effect on the very next request, not just at the next login — otherwise
+    // a session minted before the suspension keeps working for its full 12h
+    // lifetime, the same reasoning already applied to tokenVersion above.
+    if (!company || company.archivedAt || company.suspendedAt) {
+      throw new UnauthorizedException({ code: 'COMPANY_SUSPENDED', message: 'This organisation no longer has active access. Contact FleetHQ support.' });
     }
+
+    // Best-effort liveness ping for "last seen" — not awaited on the critical
+    // path so a slow write never adds latency to every authenticated request.
+    void this.systemPrisma.userSession.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
+
     return {
       userId: payload.sub,
       companyId: payload.companyId,
       membershipId: payload.membershipId,
+      sessionId: payload.sid,
     };
   }
 }

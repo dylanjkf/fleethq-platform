@@ -10,6 +10,8 @@ import { ListChecklistTemplatesDto } from './dto/list-checklist-templates.dto';
 import { SubmitChecklistDto } from './dto/submit-checklist.dto';
 import { ListChecklistSubmissionsDto } from './dto/list-checklist-submissions.dto';
 import { ChecklistItemDto } from './dto/checklist-item.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
+import { evaluateAnswers } from './checklist-evaluation';
 
 /** The normalized item shape persisted in `items` / `template_snapshot` JSON. */
 interface NormalizedItem {
@@ -219,7 +221,7 @@ export class ChecklistsService {
       const asset = await this.requireAsset(tx, companyId, dto.assetId);
       const operatorId = await this.resolveOperatorId(tx, actorUserId);
 
-      const answers = this.validateAnswers(snapshot, dto.answers);
+      const answers = evaluateAnswers(snapshot, dto.answers);
       const hasFailures = answers.some((a) => a.status === 'fail');
 
       const submission = await tx.checklistSubmission.create({
@@ -370,6 +372,11 @@ export class ChecklistsService {
             template: { select: { name: true } },
             operator: { select: { fullName: true } },
           },
+          // Bounded: this loads today's submissions to reduce to latest-per-asset
+          // in JS. MAX_AGGREGATION_ROWS is far above any fleet's daily pre-start
+          // volume; ordered newest-first, so the latest-per-asset result is
+          // unaffected until a tenant is doing tens of thousands of checks a day.
+          take: MAX_AGGREGATION_ROWS,
         }),
       ]);
 
@@ -443,81 +450,6 @@ export class ChecklistsService {
         requireNoteOnFail: item.requireNoteOnFail ?? false,
         createsFaultOnFail: item.createsFaultOnFail ?? false,
       };
-    });
-  }
-
-  /**
-   * Validates the operator's answers against the snapshot they were shown: the
-   * checklist must be fully answered, every answer must map to a real item, "n/a"
-   * is only allowed where the item permits it, and a fail on a note-required item
-   * must carry a note. Returns the answers in snapshot order.
-   */
-  private validateAnswers(
-    snapshot: NormalizedItem[],
-    answers: SubmitChecklistDto['answers'],
-  ): { itemId: string; status: 'pass' | 'fail' | 'na' | null; note: string | null }[] {
-    const answerByItemId = new Map<string, (typeof answers)[number]>();
-    for (const answer of answers) {
-      if (answerByItemId.has(answer.itemId)) {
-        throw new BadRequestException({
-          code: 'CHECKLIST_DUPLICATE_ANSWER',
-          message: `Duplicate answer for item "${answer.itemId}".`,
-        });
-      }
-      answerByItemId.set(answer.itemId, answer);
-    }
-
-    const itemById = new Map(snapshot.map((item) => [item.id, item]));
-    for (const answer of answers) {
-      if (!itemById.has(answer.itemId)) {
-        throw new BadRequestException({
-          code: 'CHECKLIST_UNKNOWN_ITEM',
-          message: `Answer references unknown item "${answer.itemId}".`,
-        });
-      }
-    }
-
-    return snapshot.map((item) => {
-      const answer = answerByItemId.get(item.id);
-      if (!answer) {
-        throw new BadRequestException({
-          code: 'CHECKLIST_INCOMPLETE',
-          message: `Checklist item "${item.label}" was not answered.`,
-        });
-      }
-      const note = answer.note?.trim() ? answer.note.trim() : null;
-
-      // A written-answer item: the typed response is the answer, there is no
-      // pass/fail. An empty response counts as unanswered.
-      if (item.type === 'text') {
-        if (!note) {
-          throw new BadRequestException({
-            code: 'CHECKLIST_INCOMPLETE',
-            message: `Checklist item "${item.label}" needs a written answer.`,
-          });
-        }
-        return { itemId: item.id, status: null, note };
-      }
-
-      if (!answer.status) {
-        throw new BadRequestException({
-          code: 'CHECKLIST_INCOMPLETE',
-          message: `Checklist item "${item.label}" was not answered.`,
-        });
-      }
-      if (answer.status === 'na' && item.type !== 'pass_fail_na') {
-        throw new BadRequestException({
-          code: 'CHECKLIST_NA_NOT_ALLOWED',
-          message: `Item "${item.label}" cannot be marked not-applicable.`,
-        });
-      }
-      if (answer.status === 'fail' && item.requireNoteOnFail && !note) {
-        throw new BadRequestException({
-          code: 'CHECKLIST_NOTE_REQUIRED',
-          message: `A note is required to fail "${item.label}".`,
-        });
-      }
-      return { itemId: item.id, status: answer.status, note };
     });
   }
 

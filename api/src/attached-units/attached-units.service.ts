@@ -102,13 +102,7 @@ export class AttachedUnitsService {
 
   async findOne(companyId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const attachedUnit = await tx.attachedUnit.findUnique({ where: { id } });
-      if (!attachedUnit || attachedUnit.companyId !== companyId) {
-        throw new NotFoundException({
-          code: 'ATTACHED_UNIT_NOT_FOUND',
-          message: 'Attached unit not found.',
-        });
-      }
+      const attachedUnit = await this.requireAttachedUnit(tx, companyId, id);
       const [withAsset] = await withCurrentAsset(tx, companyId, [attachedUnit]);
       return withAsset;
     });
@@ -163,13 +157,7 @@ export class AttachedUnitsService {
 
   async update(companyId: string, actorUserId: string, id: string, dto: UpdateAttachedUnitDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.attachedUnit.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({
-          code: 'ATTACHED_UNIT_NOT_FOUND',
-          message: 'Attached unit not found.',
-        });
-      }
+      const existing = await this.requireAttachedUnit(tx, companyId, id);
 
       const changed: Record<string, { from: unknown; to: unknown }> = {};
       for (const field of ['name', 'externalReference'] as const) {
@@ -218,13 +206,7 @@ export class AttachedUnitsService {
 
   async archive(companyId: string, actorUserId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.attachedUnit.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({
-          code: 'ATTACHED_UNIT_NOT_FOUND',
-          message: 'Attached unit not found.',
-        });
-      }
+      const existing = await this.requireAttachedUnit(tx, companyId, id);
       if (existing.archivedAt) {
         return existing;
       }
@@ -258,10 +240,7 @@ export class AttachedUnitsService {
    */
   async hitch(companyId: string, actorUserId: string, id: string, assetId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const attachedUnit = await tx.attachedUnit.findUnique({ where: { id } });
-      if (!attachedUnit || attachedUnit.companyId !== companyId) {
-        throw new NotFoundException({ code: 'ATTACHED_UNIT_NOT_FOUND', message: 'Attached unit not found.' });
-      }
+      const attachedUnit = await this.requireAttachedUnit(tx, companyId, id);
       const asset = await tx.asset.findUnique({ where: { id: assetId } });
       if (!asset || asset.companyId !== companyId || asset.archivedAt) {
         throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
@@ -306,10 +285,7 @@ export class AttachedUnitsService {
   /** No-op (not an error) if the attached unit isn't currently paired with anything. */
   async unhitch(companyId: string, actorUserId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const attachedUnit = await tx.attachedUnit.findUnique({ where: { id } });
-      if (!attachedUnit || attachedUnit.companyId !== companyId) {
-        throw new NotFoundException({ code: 'ATTACHED_UNIT_NOT_FOUND', message: 'Attached unit not found.' });
-      }
+      const attachedUnit = await this.requireAttachedUnit(tx, companyId, id);
 
       const openPairing = await tx.graphRelationship.findFirst({
         where: {
@@ -337,5 +313,16 @@ export class AttachedUnitsService {
       const [withAsset] = await withCurrentAsset(tx, companyId, [attachedUnit]);
       return withAsset;
     });
+  }
+
+  async requireAttachedUnit(tx: Prisma.TransactionClient, companyId: string, id: string) {
+    const attachedUnit = await tx.attachedUnit.findUnique({ where: { id } });
+    if (!attachedUnit || attachedUnit.companyId !== companyId) {
+      throw new NotFoundException({
+        code: 'ATTACHED_UNIT_NOT_FOUND',
+        message: 'Attached unit not found.',
+      });
+    }
+    return attachedUnit;
   }
 }

@@ -15,6 +15,7 @@ import {
   UpdateMachineDto,
 } from './dto/machine.dto';
 import { CreateMachinePlanDto, UpdateMachinePlanDto } from './dto/machine-plan.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 /**
  * The Warehouse add-on: customer stock inventory + warehouse machines with
@@ -128,10 +129,14 @@ export class WarehouseService {
   async listStockAdjustments(companyId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       await this.requireStock(tx, companyId, id);
+      // Append-only ledger that only grows — cap the read so one heavily-adjusted
+      // stock item can't turn its history into an unbounded load. MAX_AGGREGATION_ROWS
+      // is far above any realistic per-item adjustment count.
       const items = await tx.stockAdjustment.findMany({
         where: { stockItemId: id },
         orderBy: [{ createdAt: 'desc' }],
         include: { actorUser: { select: { id: true, fullName: true } } },
+        take: MAX_AGGREGATION_ROWS,
       });
       return { items };
     });
@@ -283,10 +288,14 @@ export class WarehouseService {
   async listMachineLogs(companyId: string, machineId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       await this.requireMachine(tx, companyId, machineId);
+      // Machine logs are append-only and grow for the life of the machine — cap
+      // the read so a long-serviced machine's log can't become an unbounded load.
+      // MAX_AGGREGATION_ROWS is far above any realistic per-machine log count.
       const items = await tx.warehouseMachineLog.findMany({
         where: { machineId },
         orderBy: [{ occurredAt: 'desc' }],
         include: { createdByUser: { select: { id: true, fullName: true } } },
+        take: MAX_AGGREGATION_ROWS,
       });
       return { items };
     });

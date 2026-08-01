@@ -5,6 +5,7 @@ import { PermissionKey } from '../common/permissions/permission-catalog';
 import { NOTIFICATION_CHANNEL, type NotificationChannel } from './channels/notification-channel';
 import { PushService } from './push/push.service';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 export interface NotificationInput {
   type: string;
@@ -93,6 +94,29 @@ export class NotificationsService {
     for (const recipientUserId of recipients) {
       this.push.notifyUser(recipientUserId, { title: input.title, body: input.body, linkPath: input.linkPath });
     }
+  }
+
+  /**
+   * The users a `notifyPermissionInTx` call for the same `permissionKey` would
+   * reach, with the profile fields a caller needs to also send a companion
+   * email (`fullName`/`email`) — kept as a separate query rather than having
+   * `notifyPermissionInTx` return this itself, so a caller that only wants
+   * the in-app fan-out (the common case) doesn't pay for `fullName`/`email`
+   * it never uses. Relies on `tx` already being tenant-scoped (via
+   * `PrismaService.withTenant`) rather than filtering on companyId itself,
+   * matching `notifyPermissionInTx`'s own membership query.
+   */
+  async getPermissionHolders(
+    tx: Prisma.TransactionClient,
+    permissionKey: PermissionKey,
+  ): Promise<{ id: string; fullName: string; email: string | null }[]> {
+    const memberships = await tx.companyMembership.findMany({
+      where: { archivedAt: null, role: { archivedAt: null, permissions: { some: { permission: { key: permissionKey } } } } },
+      select: { userId: true },
+    });
+    const userIds = [...new Set(memberships.map((m) => m.userId))];
+    if (userIds.length === 0) return [];
+    return tx.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true, email: true } });
   }
 
   async listForUser(companyId: string, userId: string) {
@@ -201,9 +225,14 @@ export class NotificationsService {
   }
 
   private async computeDigest(tx: Prisma.TransactionClient) {
+    // Bounded read of the un-emailed backlog: sendDigest marks these emailed,
+    // so a subsequent run picks up anything past this cap — the digest just
+    // drains a very large backlog over a few runs rather than loading it all at
+    // once. previewDigest never marks, but only ever needs a representative page.
     const pending = await tx.notification.findMany({
       where: { emailedAt: null, readAt: null },
       orderBy: { createdAt: 'asc' },
+      take: MAX_AGGREGATION_ROWS,
     });
 
     const byRecipient = new Map<string, typeof pending>();

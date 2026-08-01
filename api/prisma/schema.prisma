@@ -34,6 +34,20 @@ model SchedulerLease {
   @@map("scheduler_leases")
 }
 
+/// Idempotency ledger for processed Stripe webhook events. Stripe explicitly
+/// documents that a webhook can be delivered more than once, so every event id
+/// is recorded here before its handler runs and a duplicate delivery is
+/// skipped. Not tenant data (an event is resolved to a company only inside its
+/// handler) — no RLS, written only via the privileged SystemPrismaService /
+/// fleetos_auth role, same treatment as scheduler_leases / audit_logs.
+model StripeWebhookEvent {
+  id         String   @id
+  type       String
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  @@map("stripe_webhook_events")
+}
+
 model Company {
   id                   String             @id @default(uuid()) @db.Uuid
   name                 String
@@ -41,6 +55,26 @@ model Company {
   /// today, but the column exists from day one per 08-Compliance/Jurisdiction_Model.md
   /// so a second jurisdiction is configuration, not a schema change.
   jurisdiction         String             @default("AU")
+  /// Auth/Billing Platform Phase 4 (registration depth): 11-digit Australian
+  /// Business Number, validated via IsAbn's ABR checksum at intake. Optional
+  /// — not every company provides one immediately, and companies provisioned
+  /// before this field existed have none.
+  abn                  String?            @map("abn")
+  /// Free-text business category collected at intake (e.g. "Courier & parcel
+  /// delivery") — descriptive only, never used to gate a feature.
+  industry             String?            @map("industry")
+  /// Business contact phone collected at intake — distinct from supportPhone
+  /// below, which is the driver-facing helpdesk fallback number.
+  phone                String?            @map("phone")
+  /// Rough fleet size at signup — an onboarding/lead-quality signal, not
+  /// reconciled against the company's actual Asset count anywhere.
+  fleetSizeEstimate    Int?               @map("fleet_size_estimate")
+  /// When this company's admin accepted the Terms of Service/Privacy Policy
+  /// (FleetOS-Playbook/20-Legal/Terms_of_Service.DRAFT.md,
+  /// Privacy_Policy.DRAFT.md) — required at signup (SignupCompanyDto's
+  /// `acceptedTerms`). `null` only for companies provisioned before this
+  /// field existed, or via internal dev/seed scripts.
+  termsAcceptedAt      DateTime?          @map("terms_accepted_at")
   /// FOUNDER_NOTES.md's Support/help pathway gap: a phone number/note an
   /// operator stuck mid-shift can fall back to when messaging the office
   /// isn't fast enough (or there's no connectivity for DriverOS's own
@@ -50,6 +84,14 @@ model Company {
   /// as notification preferences) — see 01-Product/Support_Help_Pathway.md.
   supportPhone         String?            @map("support_phone")
   supportNotes         String?            @map("support_notes")
+  /// FleetHQ internal administration platform (21-Admin-Platform/Overview.md):
+  /// a distinct lifecycle state from `archivedAt` below — suspended blocks
+  /// login/access temporarily (a billing or abuse action an admin can undo),
+  /// archived is the soft-delete end state. Set/cleared only via the admin
+  /// API's own RLS-bypassing connection (fleetos_admin), never by the
+  /// customer-facing API.
+  suspendedAt          DateTime?          @map("suspended_at")
+  suspensionReason     String?            @map("suspension_reason")
   /// Billing (FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing &
   /// subscription management spec"): one Stripe Customer + Subscription per
   /// Company, mirroring the Company-level singleton shape supportPhone/Notes
@@ -67,6 +109,31 @@ model Company {
   /// the source of truth for what a plan costs/includes, so there's nothing
   /// to keep in sync if pricing changes in the Stripe Dashboard.
   planPriceId          String?            @map("plan_price_id")
+  /// Auth/Billing Platform Phase 5 (full Stripe webhook coverage + failed-
+  /// payment handling): incremented on each `invoice.payment_failed` webhook,
+  /// reset to 0 on the next successful `invoice.paid`. Purely observational —
+  /// per 19-Billing/Billing_And_Subscriptions.md's "billing informs, never
+  /// hard-locks" v1 decision, a positive count does not by itself change
+  /// entitlements (subscriptionStatus going PAST_DUE already covers that).
+  paymentFailureCount  Int                @default(0) @map("payment_failure_count")
+  /// Timestamp of the most recent payment failure. Never cleared on recovery
+  /// (unlike paymentFailureCount) — kept as a historical marker of "has this
+  /// company ever had a failed payment," which a future support/dunning view
+  /// may want.
+  lastPaymentFailedAt  DateTime?          @map("last_payment_failed_at")
+  /// When Stripe will next automatically retry a failed invoice
+  /// (`invoice.next_payment_attempt`), or `null` once the retry schedule is
+  /// exhausted or the invoice is paid. Surfaced via GET /v1/billing/status so
+  /// the billing settings page can tell a customer exactly when the next
+  /// charge attempt will happen, not just "your payment failed."
+  nextPaymentAttemptAt DateTime?          @map("next_payment_attempt_at")
+  /// `created` timestamp of the most recent Stripe subscription-state webhook
+  /// event applied to this company. Guards against out-of-order delivery
+  /// (Stripe explicitly documents webhooks can arrive out of order): a
+  /// `customer.subscription.updated` older than this is ignored so a retried,
+  /// stale event can't revert subscriptionStatus/planPriceId after a newer one
+  /// already landed.
+  lastStripeEventAt    DateTime?          @map("last_stripe_event_at")
   /// Self-serve free-trial window. Set at signup (14 days) so a new company
   /// experiences the full product before subscribing; entitlements grant the
   /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
@@ -107,6 +174,7 @@ model Company {
   utilisationSnapshots         UtilisationSnapshot[]
   analyticsSetting             AnalyticsSetting?
   analyticsOverrides           AnalyticsOverride[]
+  securitySettings             CompanySecuritySettings?
   warehouseMachines            WarehouseMachine[]
   warehouseMachineLogs         WarehouseMachineLog[]
   fatigueRuleSets              FatigueRuleSet[]
@@ -322,6 +390,11 @@ model User {
   /// invalidates every existing session for the account (not just for the
   /// token's remaining lifetime).
   tokenVersion            Int       @default(0) @map("token_version")
+  /// When the active `passwordHash` was set (creation counts as a "set").
+  /// Compared against a company's `CompanySecuritySettings.passwordExpiryDays`
+  /// at login (Auth/Billing Platform Phase 3) to decide whether a rotation is
+  /// due — see AuthService's `finishLoginForMembership`.
+  passwordChangedAt       DateTime  @default(now()) @map("password_changed_at")
   /// Multi-factor auth (TOTP). `mfaSecret` is the base32 shared secret;
   /// `mfaEnabledAt` is set only once a code is confirmed, and MFA is enforced at
   /// login iff it is non-null (a secret without it is a pending enrolment).
@@ -351,6 +424,11 @@ model User {
   operatorLink            Operator?
   formSubmissions         FormSubmission[]      @relation("FormSubmittedByUser")
   authTokens              AuthToken[]
+  passwordHistory         PasswordHistory[]
+  sessions                UserSession[]
+  trustedDevices          UserTrustedDevice[]
+  oauthIdentities         OAuthIdentity[]
+  webauthnCredentials     WebauthnCredential[]
   documentsUploaded       Document[]            @relation("DocumentUploader")
   knowledgeArticles       KnowledgeArticle[]    @relation("KnowledgeAuthor")
   warehouseMachineLogs    WarehouseMachineLog[] @relation("WarehouseLogAuthor")
@@ -363,6 +441,11 @@ model User {
 enum AuthTokenType {
   EMAIL_VERIFY
   PASSWORD_RESET
+  /// A single-use passwordless-login link, per Auth/Billing Platform Phase 2
+  /// (22-Auth-Billing-Platform/Overview.md). Short-lived (15 minutes), unlike
+  /// EMAIL_VERIFY/PASSWORD_RESET's longer windows — it's a live login attempt,
+  /// not a link someone might reasonably open a day later.
+  MAGIC_LINK
 }
 
 /// Single-use, expiring tokens for email verification, password reset, and
@@ -375,7 +458,11 @@ model AuthToken {
   id        String        @id @default(uuid()) @db.Uuid
   userId    String        @map("user_id") @db.Uuid
   type      AuthTokenType
-  tokenHash String        @map("token_hash")
+  // Unique: a token hash is derived from a cryptographically random secret, so
+  // it identifies exactly one issued token. A unique constraint (not just an
+  // index) both documents that invariant and lets the DB reject an impossible
+  // collision, consistent with the other hash-keyed columns in the schema.
+  tokenHash String        @unique @map("token_hash")
   expiresAt DateTime      @map("expires_at")
   usedAt    DateTime?     @map("used_at")
   createdAt DateTime      @default(now()) @map("created_at")
@@ -384,6 +471,135 @@ model AuthToken {
 
   @@index([userId, type])
   @@map("auth_tokens")
+}
+
+/// Hashes that were once a User's active password, per Auth/Billing Platform
+/// Phase 3 (22-Auth-Billing-Platform/Overview.md) — a row is inserted for the
+/// OLD hash right before it's overwritten by a new one, and the table is
+/// trimmed to the most recent `PasswordPolicyService.HISTORY_LIMIT` rows per
+/// user. Checked on every password *change* (reset, self-service change,
+/// expiry-forced change — never on initial account creation, which has
+/// nothing to compare against) so a rotation can't just cycle back to a
+/// recently-used password. Same treatment as `auth_tokens`: no RLS, touched
+/// only by the pre-tenant-context fleetos_auth role.
+model PasswordHistory {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("user_password_history")
+}
+
+/// One issued login for a customer User — "session management"/"logout from
+/// all devices"/"session revocation". Mirrors AdminSession's shape exactly
+/// (see 21-Admin-Platform/Overview.md), but for customer accounts: the JWT
+/// carries this row's id (`sid`), and `revokedAt`/`expiresAt` are checked on
+/// every request independent of the JWT's own signed expiry, so revoking one
+/// device takes effect on its very next request rather than waiting out the
+/// token's remaining lifetime. `companyId`/`membershipId` pin the company
+/// context this session was issued for — a multi-company user's token (and
+/// so its session) is only ever valid for one company at a time
+/// (12-API/API_Architecture.md), the same rule the JWT payload itself
+/// already enforces. No RLS: touched only by the pre-tenant-context
+/// fleetos_auth role, the same treatment `users`/`auth_tokens` already get.
+model UserSession {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  companyId    String    @map("company_id") @db.Uuid
+  membershipId String    @map("membership_id") @db.Uuid
+  ipAddress    String    @map("ip_address")
+  userAgent    String?   @map("user_agent")
+  deviceLabel  String?   @map("device_label")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastSeenAt   DateTime  @default(now()) @map("last_seen_at")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_sessions")
+}
+
+/// "Remember this device" — skips the MFA challenge on a recognised device
+/// for `expiresAt` (30 days), independent of any one session's lifetime.
+/// Mirrors AdminTrustedDevice's shape/reasoning exactly.
+model UserTrustedDevice {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  /// A hash of a client-generated device id (never raw fingerprinting data at rest).
+  deviceFingerprint String   @map("device_fingerprint")
+  label             String?
+  lastUsedAt        DateTime @default(now()) @map("last_used_at")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceFingerprint])
+  @@map("user_trusted_devices")
+}
+
+enum OAuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+/// Links a customer User to an external identity provider account, per Auth/
+/// Billing Platform Phase 2 (22-Auth-Billing-Platform/Overview.md). Social
+/// login is sign-IN only in this product — there is no self-service signup
+/// path (00-Legal/Commercial_Priority.md's decision, see CompaniesController's
+/// doc comment), so a callback with no matching row and no matching verified
+/// email on an existing User is refused, never used to provision an account.
+/// `providerSubject` is the IdP's stable `sub` claim, not the (mutable,
+/// occasionally-shared) email address — the unique constraint is what makes a
+/// second login by the same external account resolve to the same User even if
+/// their email address changes at the provider.
+model OAuthIdentity {
+  id              String        @id @default(uuid()) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  provider        OAuthProvider
+  providerSubject String        @map("provider_subject")
+  /// The verified email at the time of linking — kept for support/audit
+  /// visibility only, never re-used to re-resolve the identity.
+  email           String
+  createdAt       DateTime      @default(now()) @map("created_at")
+  lastUsedAt      DateTime      @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([userId])
+  @@map("user_oauth_identities")
+}
+
+/// A registered WebAuthn/passkey credential (Auth/Billing Platform Phase 2).
+/// `credentialId` and `publicKey` are exactly what a WebAuthn RP must persist
+/// per the spec (webauthn.guide) to verify future authentication assertions;
+/// `signCount` is the authenticator's own replay counter — a future
+/// assertion whose counter doesn't strictly increase indicates a cloned
+/// authenticator and is rejected (see WebauthnService).
+model WebauthnCredential {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// Base64url, per @simplewebauthn/server — unique across all users since a
+  /// physical authenticator's credential id is globally unique by construction.
+  credentialId String    @unique @map("credential_id")
+  publicKey    Bytes     @map("public_key")
+  signCount    BigInt    @default(0) @map("sign_count")
+  transports   String[]  @default([])
+  deviceLabel  String?   @map("device_label")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastUsedAt   DateTime  @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_webauthn_credentials")
 }
 
 /// One browser/device's Web Push registration (04-DriverOS/DriverOS_Overview.md
@@ -688,6 +904,15 @@ model AssetMaintenancePlan {
   label         String
   intervalDays  Int       @map("interval_days")
   lastServiceAt DateTime? @map("last_service_at")
+  /// Idempotency marks for the maintenance-due alert sweep (SchedulerService),
+  /// mirroring ComplianceDocument.expiringAlertedAt / expiredAlertedAt. Set the
+  /// first time a plan's derived next-due date crosses into the "due soon"
+  /// window and the first time it crosses into "overdue", so the daily sweep
+  /// raises each alert exactly once per service cycle rather than every tick.
+  /// Reset to null when the plan is serviced or its due date is edited, so the
+  /// next service cycle starts a fresh alert lifecycle.
+  dueAlertedAt     DateTime? @map("due_alerted_at")
+  overdueAlertedAt DateTime? @map("overdue_alerted_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
   archivedAt    DateTime? @map("archived_at")
@@ -880,6 +1105,11 @@ model Depot {
   jobs    Job[]
 
   @@index([companyId])
+  // DB-level natural-key de-duplication (partial unique index, see migration
+  // 20260801100000): a company's live (non-archived) depots are unique by
+  // lower(name), so a re-import resolves to the existing row instead of
+  // inserting a duplicate. Filtered/expression index, so it lives only in the
+  // migration SQL.
   @@map("depots")
 }
 
@@ -987,6 +1217,11 @@ model Customer {
   jobStops JobStop[]
 
   @@index([companyId])
+  // DB-level natural-key de-duplication (partial unique index, see migration
+  // 20260801100000): a company's live (non-archived) customers are unique by
+  // lower(name), so a re-import resolves to the existing row instead of
+  // inserting a duplicate. Filtered/expression index, so it lives only in the
+  // migration SQL.
   @@map("customers")
 }
 
@@ -1086,9 +1321,9 @@ model StopParcel {
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  company     Company            @relation(fields: [companyId], references: [id])
-  stop        JobStop            @relation(fields: [stopId], references: [id])
-  scanEvents  BarcodeScanEvent[]
+  company    Company            @relation(fields: [companyId], references: [id])
+  stop       JobStop            @relation(fields: [stopId], references: [id])
+  scanEvents BarcodeScanEvent[]
 
   @@unique([stopId, reference])
   @@index([companyId, stopId])
@@ -1219,14 +1454,14 @@ model BarcodeScanConfig {
 }
 
 model BarcodeScanEvent {
-  id              String              @id @default(uuid()) @db.Uuid
-  companyId       String?             @map("company_id") @db.Uuid
-  userId          String?             @map("user_id") @db.Uuid
-  scannedValue    String              @map("scanned_value")
-  scanMode        BarcodeScanMode     @map("scan_mode")
+  id              String             @id @default(uuid()) @db.Uuid
+  companyId       String?            @map("company_id") @db.Uuid
+  userId          String?            @map("user_id") @db.Uuid
+  scannedValue    String             @map("scanned_value")
+  scanMode        BarcodeScanMode    @map("scan_mode")
   outcome         BarcodeScanOutcome
-  matchedParcelId String?             @map("matched_parcel_id") @db.Uuid
-  createdAt       DateTime            @default(now()) @map("created_at")
+  matchedParcelId String?            @map("matched_parcel_id") @db.Uuid
+  createdAt       DateTime           @default(now()) @map("created_at")
 
   matchedParcel StopParcel? @relation(fields: [matchedParcelId], references: [id])
 
@@ -1280,10 +1515,10 @@ model MaintenanceJob {
   approvedByUser     User?                     @relation("MaintenanceApprovedByUser", fields: [approvedByUserId], references: [id])
   partsUsed          MaintenanceJobPartUsage[]
 
+  @@unique([companyId, clientRequestId])
   @@index([companyId])
   // "All maintenance for this asset" — the asset detail / history page.
   @@index([companyId, assetId])
-  @@unique([companyId, clientRequestId])
   @@map("maintenance_jobs")
 }
 
@@ -1453,6 +1688,42 @@ model AnalyticsSetting {
   @@map("analytics_settings")
 }
 
+/// Per-company security policy (Auth/Billing Platform Phase 3,
+/// 22-Auth-Billing-Platform/Overview.md): absent row = platform defaults
+/// (MFA optional, no password expiry), same "no row = defaults" convention
+/// as AnalyticsSetting/BarcodeScanConfig. Unlike those two, this table must
+/// also be readable from the pre-tenant-context login path — AuthService
+/// resolves it via `PrismaService.withUser` (app.current_user_id, no company
+/// context chosen yet) right alongside the Company row itself, to decide
+/// whether *this* login needs to be redirected into forced MFA enrolment or
+/// a forced password change before a session is issued. So its RLS policy
+/// mirrors `companies`' own two-branch policy (current tenant OR a member of
+/// the company), not the plain single-branch shape every other per-company
+/// settings table uses.
+model CompanySecuritySettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @unique @map("company_id") @db.Uuid
+  /// Every member must have MFA (TOTP) enabled to finish a login. A verified
+  /// WebAuthn/passkey assertion also satisfies this — see
+  /// AuthService.completeWebauthnLogin's doc comment for why a passkey is
+  /// treated as already MFA-equivalent.
+  mfaRequired        Boolean  @default(false) @map("mfa_required")
+  /// A member's password must have been set within this many days of their
+  /// most recent login attempt, or the login is redirected into a forced
+  /// change first. `null` = no expiry (the default — most companies never
+  /// opt into this). Evaluated regardless of which first factor was used
+  /// (password, magic link, social, passkey) — the concern is a stale
+  /// password sitting there as a fallback credential, not which method this
+  /// particular login happened to use.
+  passwordExpiryDays Int?     @map("password_expiry_days")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("company_security_settings")
+}
+
 /// A manual override of a live dashboard percentage (utilisation / compliance-
 /// current / pre-start). One active row per (company, metric); the dashboard
 /// shows the overridden value with an "adjusted" marker and the note, so a
@@ -1617,7 +1888,11 @@ model ComplianceDocument {
   archivedAt        DateTime?              @map("archived_at")
 
   company        Company     @relation(fields: [companyId], references: [id])
-  asset          Asset?      @relation(fields: [assetId], references: [id])
+  // RESTRICT (not SET NULL): a CHECK constraint requires exactly one of
+  // asset/operator to be set, so nulling asset_id on an asset delete would
+  // violate it and surface an opaque constraint error. RESTRICT instead gives
+  // a clean "still referenced" failure, matching the pattern used elsewhere.
+  asset          Asset?      @relation(fields: [assetId], references: [id], onDelete: Restrict)
   operator       Operator?   @relation(fields: [operatorId], references: [id])
   fileAttachment Attachment? @relation("ComplianceDocumentFile", fields: [fileAttachmentId], references: [id])
 
@@ -1811,27 +2086,27 @@ enum MessageSenderType {
 /// Scoped down from the full spec: no attachments/photos, no read receipts, no
 /// group/broadcast threads, no push notifications — a plain two-party thread.
 model Message {
-  id           String            @id @default(uuid()) @db.Uuid
-  companyId    String            @map("company_id") @db.Uuid
-  operatorId   String            @map("operator_id") @db.Uuid
-  senderType   MessageSenderType @map("sender_type")
-  senderUserId String?           @map("sender_user_id") @db.Uuid
-  body         String
+  id              String            @id @default(uuid()) @db.Uuid
+  companyId       String            @map("company_id") @db.Uuid
+  operatorId      String            @map("operator_id") @db.Uuid
+  senderType      MessageSenderType @map("sender_type")
+  senderUserId    String?           @map("sender_user_id") @db.Uuid
+  body            String
   // Client-generated idempotency key so a DriverOS outbox replay after a lost
   // response can't post the same message twice. Null for office-sent messages.
-  clientRequestId String?        @map("client_request_id") @db.Uuid
-  createdAt    DateTime          @default(now()) @map("created_at")
+  clientRequestId String?           @map("client_request_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
 
   company    Company  @relation(fields: [companyId], references: [id])
   operator   Operator @relation(fields: [operatorId], references: [id])
   senderUser User?    @relation("MessageSender", fields: [senderUserId], references: [id])
 
-  @@index([companyId, operatorId])
-  // Thread read takes the most recent messages ordered by createdAt.
-  @@index([companyId, operatorId, createdAt])
   // Idempotency: at most one message per (company, clientRequestId). Postgres
   // treats NULLs as distinct, so office messages (null key) are unconstrained.
   @@unique([companyId, clientRequestId])
+  @@index([companyId, operatorId])
+  // Thread read takes the most recent messages ordered by createdAt.
+  @@index([companyId, operatorId, createdAt])
   @@map("messages")
 }
 
@@ -1953,16 +2228,21 @@ model FuelEntry {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
-  company           Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  // RESTRICT (not CASCADE): fuel_entries are financial/expense records, so a
+  // company delete must not silently destroy them — same protective default as
+  // maintenance jobs and checklist submissions. Companies are soft-deleted
+  // (archivedAt) in practice, so this never fires in normal operation; it's a
+  // guard against an accidental hard delete taking spend history with it.
+  company           Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
   asset             Asset?      @relation(fields: [assetId], references: [id])
   operator          Operator?   @relation(fields: [operatorId], references: [id])
   receiptAttachment Attachment? @relation(fields: [receiptAttachmentId], references: [id])
 
+  @@unique([companyId, clientRequestId])
   @@index([companyId, filledAt])
   @@index([companyId, assetId])
   @@index([operatorId])
   @@index([receiptAttachmentId])
-  @@unique([companyId, clientRequestId])
   @@map("fuel_entries")
 }
 
@@ -2201,8 +2481,8 @@ model IntegrationConnection {
   updatedAt      DateTime                 @updatedAt @map("updated_at")
   archivedAt     DateTime?                @map("archived_at")
 
-  company       Company                    @relation(fields: [companyId], references: [id])
-  credential    IntegrationCredential?     @relation(fields: [credentialId], references: [id])
+  company       Company                   @relation(fields: [companyId], references: [id])
+  credential    IntegrationCredential?    @relation(fields: [credentialId], references: [id])
   fieldMappings IntegrationFieldMapping[]
   webhooks      IntegrationWebhook[]
   syncRuns      IntegrationSyncRun[]
@@ -2330,4 +2610,288 @@ model IntegrationWebhookDelivery {
 
   @@index([webhookId, createdAt])
   @@map("integration_webhook_deliveries")
+}
+
+// ---------------------------------------------------------------------------
+// FleetHQ Internal Administration Platform (21-Admin-Platform/Overview.md)
+//
+// Deliberately platform-level, not tenant data: no companyId, no row-level
+// security. These tables are reachable only through the isolated admin API
+// surface (its own auth module, its own JWT audience/secret, its own DB
+// role — fleetos_admin, BYPASSRLS, see the migration adding it) — never
+// through any customer-facing route, the customer JWT, or the
+// fleetos_app/fleetos_auth roles. There is no relation from `User` to
+// `AdminUser` anywhere in this schema: a customer account can never become
+// an administrator, by construction, not by a runtime check that could be
+// buggy or bypassed.
+// ---------------------------------------------------------------------------
+
+/// The admin-side permission catalog — deliberately a separate table from
+/// `Permission` (the customer permission catalog) even though the shape is
+/// identical, so a bug or migration touching one can never accidentally
+/// grant/revoke the other.
+model AdminPermission {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique
+  category    String
+  description String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions AdminRolePermission[]
+
+  @@map("admin_permissions")
+}
+
+/// Two system templates ship (Super Admin, Support) but — matching the
+/// customer Role model's philosophy (14-Security/Permissions_Model.md) —
+/// roles are just named, editable/cloneable bundles of permissions, not a
+/// hardcoded enum.
+model AdminRole {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String   @unique
+  description      String
+  isSystemTemplate Boolean  @default(false) @map("is_system_template")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  permissions AdminRolePermission[]
+  admins      AdminUser[]
+
+  @@map("admin_roles")
+}
+
+model AdminRolePermission {
+  id           String @id @default(uuid()) @db.Uuid
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       AdminRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission AdminPermission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("admin_role_permissions")
+}
+
+/// A FleetHQ staff member. Created only via the internal bootstrap script or
+/// by an existing admin with the users:create permission — there is no
+/// public admin-signup endpoint anywhere, on purpose.
+model AdminUser {
+  id                String    @id @default(uuid()) @db.Uuid
+  username          String    @unique
+  email             String    @unique
+  passwordHash      String    @map("password_hash")
+  fullName          String    @map("full_name")
+  roleId            String    @map("role_id") @db.Uuid
+  /// Same brute-force throttle shape as the customer User model.
+  failedLoginCount  Int       @default(0) @map("failed_login_count")
+  lockedUntil       DateTime? @map("locked_until")
+  /// Session-revocation counter — bumped on password reset/rotation to
+  /// invalidate every existing session immediately, same mechanism as User.
+  tokenVersion      Int       @default(0) @map("token_version")
+  mfaSecret         String?   @map("mfa_secret")
+  mfaEnabledAt      DateTime? @map("mfa_enabled_at")
+  mfaBackupCodes    String[]  @default([]) @map("mfa_backup_codes")
+  /// Forced password rotation: set true by another admin (or a rotation
+  /// policy) to require a new password on next login before anything else
+  /// is reachable.
+  mustResetPassword Boolean   @default(false) @map("must_reset_password")
+  passwordChangedAt DateTime  @default(now()) @map("password_changed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  /// Soft delete / disable. A disabled admin's sessions are also revoked
+  /// immediately (see AdminAuthService.disable).
+  archivedAt        DateTime? @map("archived_at")
+
+  role              AdminRole               @relation(fields: [roleId], references: [id])
+  sessions          AdminSession[]
+  trustedDevices    AdminTrustedDevice[]
+  auditLogEntries   AdminAuditLog[]
+  organisationNotes AdminOrganisationNote[]
+  announcements     Announcement[]
+
+  @@map("admin_users")
+}
+
+/// One row per active login (not per request) — the "device tracking" +
+/// "session management"/"session revocation" material. The JWT itself
+/// carries this row's id; a request is rejected once `revokedAt` is set or
+/// `expiresAt` has passed, independent of the JWT's own exp claim, so a
+/// revoked session dies immediately rather than at token expiry.
+model AdminSession {
+  id          String    @id @default(uuid()) @db.Uuid
+  adminUserId String    @map("admin_user_id") @db.Uuid
+  ipAddress   String    @map("ip_address")
+  userAgent   String?   @map("user_agent")
+  deviceLabel String?   @map("device_label")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at")
+  expiresAt   DateTime  @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId])
+  @@map("admin_sessions")
+}
+
+/// "Remember trusted devices" — a longer-lived record independent of any one
+/// session's lifetime, so a recognised device can skip the MFA challenge on
+/// a fresh login for `expiresAt` (30 days), while the device's login
+/// history/sessions are still tracked normally either way.
+model AdminTrustedDevice {
+  id                String   @id @default(uuid()) @db.Uuid
+  adminUserId       String   @map("admin_user_id") @db.Uuid
+  /// A hash of client-supplied signals (User-Agent + a client-generated
+  /// device id cookie) — never raw fingerprinting data at rest.
+  deviceFingerprint String   @map("device_fingerprint")
+  label             String?
+  lastUsedAt        DateTime @default(now()) @map("last_used_at")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@unique([adminUserId, deviceFingerprint])
+  @@map("admin_trusted_devices")
+}
+
+/// Every login attempt, successful or not — "login history", "IP logging",
+/// and the source data for failed-login/brute-force and IP-anomaly
+/// detection. Kept even for a username that doesn't resolve to a real
+/// AdminUser (a stranger probing the login endpoint is exactly what this
+/// table needs to catch).
+model AdminLoginAttempt {
+  id            String   @id @default(uuid()) @db.Uuid
+  usernameTried String   @map("username_tried")
+  ipAddress     String   @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  success       Boolean
+  failureReason String?  @map("failure_reason")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([ipAddress, createdAt])
+  @@index([usernameTried, createdAt])
+  @@map("admin_login_attempts")
+}
+
+/// Every administrative mutation, no exceptions — "no destructive action
+/// without logging." `organisationId` is deliberately a plain indexed
+/// column, not a Company relation: an audit row must survive even if the
+/// organisation it refers to is later hard-deleted (never happens today,
+/// but the log's job is to outlive the data it describes).
+model AdminAuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  adminUserId    String?  @map("admin_user_id") @db.Uuid
+  ipAddress      String   @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  action         String
+  entityType     String   @map("entity_type")
+  entityId       String?  @map("entity_id")
+  organisationId String?  @map("organisation_id") @db.Uuid
+  beforeValue    Json?    @map("before_value")
+  afterValue     Json?    @map("after_value")
+  reason         String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser? @relation(fields: [adminUserId], references: [id])
+
+  @@index([adminUserId, createdAt])
+  @@index([organisationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("admin_audit_logs")
+}
+
+/// Internal-only, FleetHQ-staff-authored notes about an organisation
+/// ("support:view"/"support:manage" — 21-Admin-Platform/Overview.md, Phase
+/// 5a). Deliberately `admin_`-prefixed and never granted to `fleetos_app`:
+/// unlike Announcement below, a customer must never be able to read this —
+/// it's staff-internal context (support history, escalation flags), not
+/// tenant data. `companyId` is a plain indexed column, not a Company
+/// relation, matching AdminAuditLog's own reasoning: a note must survive
+/// even if the organisation it's about is later hard-deleted.
+model AdminOrganisationNote {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  adminUserId String?  @map("admin_user_id") @db.Uuid
+  body        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  adminUser AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@map("admin_organisation_notes")
+}
+
+enum AnnouncementSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/// A staff-authored banner shown to every customer (21-Admin-Platform/Overview.md,
+/// Phase 5a) — deliberately NOT `admin_`-prefixed and NOT row-level-secured:
+/// unlike every other table in this section, this one IS meant to be read by
+/// the customer-facing API (`fleetos_app` gets a plain read-only `GRANT
+/// SELECT`, since there's no tenant data here to leak — every row is shown to
+/// every company). Only `fleetos_admin` can write it. `startsAt`/`endsAt`
+/// being null means "starts immediately"/"never expires" respectively.
+model Announcement {
+  id                   String               @id @default(uuid()) @db.Uuid
+  title                String
+  body                 String
+  severity             AnnouncementSeverity @default(INFO)
+  active               Boolean              @default(true)
+  startsAt             DateTime?            @map("starts_at")
+  endsAt               DateTime?            @map("ends_at")
+  createdByAdminUserId String?              @map("created_by_admin_user_id") @db.Uuid
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  createdByAdminUser AdminUser? @relation(fields: [createdByAdminUserId], references: [id], onDelete: SetNull)
+
+  @@index([active, startsAt, endsAt])
+  @@map("announcements")
+}
+
+/// A staff-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b) —
+/// not created by seed data or a hardcoded enum; an admin creates a flag row
+/// for a `FeatureFlagGuard`-gated route to start meaning anything at all
+/// (see `RequireFeatureFlag` in the customer API). Like Announcement, this is
+/// global reference data with no tenant column, so `fleetos_app` gets a plain
+/// read-only `GRANT SELECT` — no RLS needed. `globalEnabled` is the default
+/// for every company; `FeatureFlagOverride` rows narrow that per company.
+model FeatureFlag {
+  id            String   @id @default(uuid()) @db.Uuid
+  key           String   @unique
+  name          String
+  description   String
+  globalEnabled Boolean  @default(true) @map("global_enabled")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  overrides FeatureFlagOverride[]
+
+  @@map("feature_flags")
+}
+
+/// Per-company exception to a FeatureFlag's `globalEnabled` default — e.g.
+/// disabling an in-rollout feature for one customer, or enabling a beta for a
+/// design-partner ahead of general availability. Unlike FeatureFlag itself,
+/// this DOES carry tenant data (which company has which override) and gets
+/// the identical `tenant_isolation` RLS policy every other tenant table has,
+/// so `fleetos_app`'s plain `GRANT SELECT` only ever returns the caller's own
+/// company's override rows — admin writes go through `fleetos_admin`
+/// (BYPASSRLS), same as everywhere else in this section.
+model FeatureFlagOverride {
+  id        String   @id @default(uuid()) @db.Uuid
+  flagId    String   @map("flag_id") @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  enabled   Boolean
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  flag FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+
+  @@unique([flagId, companyId])
+  @@map("feature_flag_overrides")
 }

@@ -7,6 +7,7 @@ import { AUDIT_ACTIONS, AuditService } from '../audit/audit.service';
 import { IntegrationCredentialsService } from './integration-credentials.service';
 import { IntegrationSyncEngine } from './integration-sync-engine.service';
 import { CreateWebhookDto, UpdateWebhookDto } from './dto/webhook.dto';
+import { safeFetch, SsrfBlockedError } from '../common/net/safe-fetch';
 
 const SIGNATURE_HEADER = 'x-fleethq-signature';
 /** Outgoing delivery is retried inline (bounded attempts, short backoff) rather than
@@ -154,13 +155,23 @@ export class IntegrationWebhookService {
       let responseStatus: number | undefined;
       let success = false;
       let errorMessage: string | undefined;
+      let blocked = false;
       try {
-        const response = await fetch(webhook.targetUrl, { method: 'POST', headers, body });
+        // safeFetch (not bare fetch): targetUrl is tenant-supplied, so it must
+        // be SSRF-validated before we POST from inside our own network. A
+        // blocked target is a permanent misconfiguration, not a transient
+        // error, so we record it and stop rather than retry-storming it.
+        const response = await safeFetch(webhook.targetUrl, { method: 'POST', headers, body });
         responseStatus = response.status;
         success = response.ok;
         if (!success) errorMessage = `Non-2xx response: ${response.status}`;
       } catch (err) {
-        errorMessage = err instanceof Error ? err.message : 'Request failed.';
+        if (err instanceof SsrfBlockedError) {
+          blocked = true;
+          errorMessage = `Blocked target URL: ${err.message}`;
+        } else {
+          errorMessage = err instanceof Error ? err.message : 'Request failed.';
+        }
       }
 
       await this.prisma.withTenant(companyId, (tx) =>
@@ -174,6 +185,9 @@ export class IntegrationWebhookService {
         return { success: true, attempts: attempt };
       }
       lastError = errorMessage;
+      // A blocked target URL is a permanent misconfiguration — retrying it
+      // would just repeat the same SSRF probe, so stop after recording it.
+      if (blocked) break;
       if (attempt < MAX_OUTGOING_ATTEMPTS) {
         await this.sleep(Math.min(OUTGOING_BACKOFF_CAP_MS, OUTGOING_BACKOFF_BASE_MS * 2 ** (attempt - 1)));
       }

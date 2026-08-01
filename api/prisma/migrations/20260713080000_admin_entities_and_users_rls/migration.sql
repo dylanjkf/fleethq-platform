@@ -53,10 +53,19 @@ CREATE POLICY tenant_isolation ON users
 -- read across all tenants for this one lookup.
 --
 -- Rather than give fleetos_app (or the running app process generally) that
--- power, fleetos_auth is BYPASSRLS but is granted SELECT on `users` and
--- nothing else — no other table, no write access. If this role were ever
--- misused, the entire blast radius is "read the users table." Used only by
--- AuthService's initial username lookup (see src/prisma/system-prisma.service.ts).
+-- power, fleetos_auth is BYPASSRLS but deliberately narrow. This migration
+-- establishes it with SELECT on `users` (the login lookup) and nothing else.
+-- Later migrations extend it — still narrowly — with the specific grants the
+-- pre-/cross-tenant auth and background paths need: SELECT on `companies`
+-- (scheduler enumeration), column-scoped UPDATE on `users`
+-- (password/lockout/MFA/token-version fields only), and table-scoped DML on the
+-- auth/background tables (auth_tokens, user_sessions, user_trusted_devices,
+-- user_oauth_identities, user_webauthn_credentials, user_password_history,
+-- audit_logs, scheduler_leases, gps_devices/gps_pings, stripe_webhook_events).
+-- Each is granted explicitly with its own `GRANT ... TO fleetos_auth` in the
+-- migration that adds the feature — it never becomes a schema owner or gains
+-- blanket read/write. Used by AuthService's username lookup and the handful of
+-- pre-tenant/background writes (see src/prisma/system-prisma.service.ts).
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fleetos_auth') THEN

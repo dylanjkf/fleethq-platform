@@ -36,3 +36,35 @@ export const REGISTRATION_THROTTLE = routeThrottle(30);
 
 /** Expensive data-export routes (full-tenant export / erasure). */
 export const EXPORT_THROTTLE = routeThrottle(5);
+
+/**
+ * Public, unauthenticated GPS ingest (`POST /v1/gps/ingest`). It carries a
+ * device key in the body, so an attacker guessing keys from one IP would
+ * otherwise get the full 300/min generic bucket. The per-device flood guard in
+ * GpsService only bounds a *resolved* device; guessed (invalid) keys resolve to
+ * no device, so this IP bucket is what caps key-guessing volume. Kept generous
+ * enough (120/min) not to break a legitimate handful of trackers behind one
+ * shared IP — a large aggregating gateway is the rare exception the WAF's
+ * distributed rule covers.
+ */
+export const GPS_INGEST_THROTTLE = routeThrottle(120);
+
+/**
+ * Public, unauthenticated inbound integration webhook
+ * (`POST /v1/integrations/webhooks/in/:token`). Signature-verified when an HMAC
+ * secret is configured, but a connection set up *without* one authenticates on
+ * the path token alone — so tighten the bucket the same way the credential
+ * routes are tightened. Inbound webhooks are low-frequency, so 60/min is ample.
+ */
+export const INBOUND_WEBHOOK_THROTTLE = routeThrottle(60);
+
+/**
+ * FleetHQ-staff admin-platform actions with real financial or account-
+ * takeover blast radius (billing mutations, impersonation, resetting a
+ * customer's MFA/lockout) — the app-wide 300/min default is far too loose
+ * for these; a genuine support workflow never needs more than a handful per
+ * minute. Deliberately separate from `admin-auth`'s own tighter
+ * `ADMIN_AUTH_THROTTLE` (10/min), which guards credential/code-checking
+ * routes specifically.
+ */
+export const ADMIN_SENSITIVE_ACTION_THROTTLE = routeThrottle(20);

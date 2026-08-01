@@ -2,6 +2,8 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { MaintenanceJobStatus, Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
+import { AssetsService } from '../assets/assets.service';
+import { OperatorsService } from '../operators/operators.service';
 import { ListQueryDto } from '../common/dto/list-query.dto';
 import { CreateMaintenanceJobDto } from './dto/create-maintenance-job.dto';
 import { UpdateMaintenanceJobDto } from './dto/update-maintenance-job.dto';
@@ -22,6 +24,8 @@ export class MaintenanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly timeline: TimelineService,
+    private readonly assets: AssetsService,
+    private readonly operators: OperatorsService,
   ) {}
 
   async create(companyId: string, actorUserId: string, dto: CreateMaintenanceJobDto) {
@@ -36,9 +40,12 @@ export class MaintenanceService {
         if (existing) return existing;
       }
 
-      await this.assertAssetExists(tx, companyId, dto.assetId);
+      // Reject archived assets/operators too (allowArchived: false) — a job
+      // can't be filed against a retired asset or reporter — matching the
+      // behaviour of the private guards these replaced.
+      await this.assets.requireAsset(tx, companyId, dto.assetId, { allowArchived: false });
       if (dto.reportedByOperatorId) {
-        await this.assertOperatorExists(tx, companyId, dto.reportedByOperatorId);
+        await this.operators.requireOperator(tx, companyId, dto.reportedByOperatorId, { allowArchived: false });
       }
 
       const job = await tx.maintenanceJob.create({
@@ -274,17 +281,4 @@ export class MaintenanceService {
     }
   }
 
-  private async assertAssetExists(tx: Prisma.TransactionClient, companyId: string, assetId: string) {
-    const asset = await tx.asset.findUnique({ where: { id: assetId } });
-    if (!asset || asset.companyId !== companyId || asset.archivedAt) {
-      throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-    }
-  }
-
-  private async assertOperatorExists(tx: Prisma.TransactionClient, companyId: string, operatorId: string) {
-    const operator = await tx.operator.findUnique({ where: { id: operatorId } });
-    if (!operator || operator.companyId !== companyId || operator.archivedAt) {
-      throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-    }
-  }
 }

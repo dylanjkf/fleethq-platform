@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, Res } 
 import type { Response } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { RequireFeature } from '../common/decorators/require-feature.decorator';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
 import { FormsService } from './forms.service';
@@ -9,6 +10,15 @@ import { CreateFormTemplateDto } from './dto/create-form-template.dto';
 import { UpdateFormTemplateDto } from './dto/update-form-template.dto';
 import { ListFormTemplatesDto } from './dto/list-form-templates.dto';
 
+/**
+ * Auth/Billing Platform Phase 9 (usage & feature limit depth): `forms` is a
+ * declared plan feature (`plans.ts`) that had never actually been enforced
+ * server-side — every tier's `features` array included/excluded it, but no
+ * `@RequireFeature` gate existed anywhere in this module, so a Free-tier
+ * company could reach it by calling the API directly. Mirrors Warehouse's
+ * own controller-level gate exactly; inert until `BILLING_ENFORCED=true`.
+ */
+@RequireFeature('forms')
 @Controller({ path: 'form-templates', version: '1' })
 export class FormTemplatesController {
   constructor(private readonly forms: FormsService) {}

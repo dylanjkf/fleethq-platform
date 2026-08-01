@@ -17,7 +17,7 @@ export class MessagesController {
   @Get()
   @RequirePermission(PERMISSIONS.MESSAGES_VIEW)
   list(@CurrentUser() user: AuthenticatedRequestUser, @Query() query: ListMessagesDto) {
-    return this.messages.list(user.companyId, user.userId, query.operatorId);
+    return this.messages.list(user.companyId, user.userId, query);
   }
 
   @Post()

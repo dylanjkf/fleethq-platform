@@ -1,11 +1,34 @@
 # FleetOS Security — Cyber Essentials-style control set
 
+> ## Scope note — what is built vs. what is target architecture
+>
+> FleetOS's **application-layer** security controls — PostgreSQL row-level
+> security (tenant isolation), RBAC deny-by-default, TOTP MFA, account lockout,
+> password policy, JWT auth + revocation, the append-only audit log, Australian
+> Privacy Act export/erasure, DTO input validation, per-route rate limiting,
+> attachment magic-byte sniffing, GPS device-key hashing, the SSRF safe-fetch
+> guard, and fail-fast env validation — are **implemented and inspectable in
+> this repository** (`api/`), gated by the `api-ci.yml` workflow and Dependabot.
+>
+> **Infrastructure-layer** controls — network segmentation / VPC, WAF, KMS
+> encryption-at-rest, managed monitoring (CloudWatch / GuardDuty / CloudTrail),
+> and multi-AZ / cross-region database — describe a **TARGET architecture** for
+> the planned Railway/AWS deployment. They are **not yet built: there is no
+> Terraform or other infrastructure-as-code in this repository.** Controls that
+> depend on them are labelled **⏳ Planned — target architecture, not yet
+> implemented** throughout this set, and any code-level `path:line` evidence
+> pointers they carry describe files that do not exist yet.
+>
+> **No control in this documentation is marked Implemented on the basis of a
+> file that does not exist.**
+
 This directory is FleetOS's **evidence-based security control documentation**,
 organised around the technical control themes of the UK Cyber Essentials scheme
 and mapped forward to ISO/IEC 27001:2022 Annex A and the SOC 2 (2017 TSC)
 Common Criteria. It is written to be read by an enterprise buyer's security
-team, a prospective auditor, or a new engineer — every control claim points at
-the code, migration, or infrastructure file that implements it.
+team, a prospective auditor, or a new engineer — every **implemented** control
+claim points at the code or migration file that implements it; target-architecture
+(infrastructure) controls are clearly labelled as planned.
 
 > **What this is.** A record of the technical controls that are *actually built
 > into the product*, with file-level evidence, plus an honest register of the
@@ -52,13 +75,24 @@ The vulnerability-disclosure channel lives at the repository root as
 
 ## Architecture at a glance
 
-FleetOS is a single-stack monorepo:
+FleetOS is split across three repositories; **this repo holds the API only**:
 
-- **`apps/api`** — NestJS 10 + Prisma 5 over **PostgreSQL**, the system of record.
-- **`apps/fleethq`** — React 19 + Vite SPA (the back-office web app).
-- **`apps/driveros`** — React PWA for drivers (offline-first, IndexedDB outbox).
-- **`infra/terraform`** — the AWS production topology (ECS Fargate, RDS,
-  CloudFront, Secrets Manager) as code.
+- **`api/`** (this repo) — NestJS 10 + Prisma 5 over **PostgreSQL**, the system
+  of record. Deployed to **Railway** (see the repo-root `README.md` →
+  Deployment). This is where every implemented control in this set lives.
+- **`fleethq-frontend`** (separate repo) — React 19 + Vite SPA (the back-office
+  web app, incl. the `admin/` console), deployed to **Vercel**.
+- **`fleethq-driveros`** (separate repo) — React PWA for drivers (offline-first,
+  IndexedDB outbox), installable as a PWA and packaged for the app stores.
+
+> **Note on the historical `apps/*` and `infra/terraform` paths.** Some control
+> documents in this set still carry `apps/api/...`-prefixed evidence pointers
+> from an earlier monorepo layout; the corresponding files now live under
+> `api/...` in this repo. There is **no `infra/terraform` (or any other IaC) in
+> this repository** — the AWS production topology (ECS Fargate, RDS, CloudFront,
+> WAF, KMS, Secrets Manager) it once described is a **planned target
+> architecture**, not built. Infrastructure-layer control claims are labelled
+> **⏳ Planned** accordingly.
 
 The two security foundations everything else builds on:
 

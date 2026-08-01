@@ -19,8 +19,11 @@ env:
   DATABASE_URL: postgresql://fleetos:fleetos_dev_only@localhost:5432/fleetos?schema=public
   APP_DATABASE_URL: postgresql://fleetos_app:fleetos_app_dev_only@localhost:5432/fleetos?schema=public
   AUTH_DATABASE_URL: postgresql://fleetos_auth:fleetos_auth_dev_only@localhost:5432/fleetos?schema=public
+  ADMIN_DATABASE_URL: postgresql://fleetos_admin:fleetos_admin_dev_only@localhost:5432/fleetos?schema=public
   JWT_SECRET: ci-test-secret
   JWT_EXPIRES_IN: 12h
+  ADMIN_JWT_SECRET: ci-test-admin-secret
+  ADMIN_JWT_EXPIRES_IN: 12h
   INTEGRATION_CREDENTIAL_KEY: "JdKT12mhp2Qmo/Hh9ml7kOgmb6CZsMeSe+wW6ViXam0="
 
 jobs:

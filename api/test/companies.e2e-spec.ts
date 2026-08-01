@@ -35,6 +35,7 @@ describe('Company signup', () => {
         adminUsername: `signup-admin-${suffix}`,
         adminPassword: 'a-strong-password',
         adminFullName: 'Signup Admin',
+        acceptedTerms: true,
       })
       .expect(201);
 
@@ -56,6 +57,99 @@ describe('Company signup', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ name: 'First Truck' })
       .expect(201);
+
+    // Auth/Billing Platform Phase 4's named role templates: every one of
+    // them, not just Administrator/Read Only, should exist from day one.
+    const roles = await request(app.getHttpServer())
+      .get('/v1/roles?pageSize=100')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    const roleNames = roles.body.items.map((r: { name: string }) => r.name);
+    expect(roleNames).toEqual(
+      expect.arrayContaining(['Administrator', 'Read Only', 'Driver', 'Dispatcher', 'Fleet/Workshop Manager', 'Compliance Officer', 'Accounts']),
+    );
+  });
+
+  it('rejects signup that has not accepted the Terms of Service/Privacy Policy', async () => {
+    const suffix = randomUUID();
+    const base = {
+      companyName: `No Terms Co ${suffix}`,
+      adminUsername: `no-terms-admin-${suffix}`,
+      adminPassword: 'a-strong-password',
+      adminFullName: 'No Terms Admin',
+    };
+
+    await request(app.getHttpServer()).post('/v1/companies').send(base).expect(400);
+    await request(app.getHttpServer())
+      .post('/v1/companies')
+      .send({ ...base, acceptedTerms: false })
+      .expect(400);
+  });
+
+  it('rejects signup with an invalid ABN, and accepts registration-depth fields with a valid one', async () => {
+    const suffix = randomUUID();
+    await request(app.getHttpServer())
+      .post('/v1/companies')
+      .send({
+        companyName: `Bad ABN Co ${suffix}`,
+        adminUsername: `bad-abn-admin-${suffix}`,
+        adminPassword: 'a-strong-password',
+        adminFullName: 'Bad ABN Admin',
+        acceptedTerms: true,
+        abn: '53004085617', // one digit off a real, checksum-valid ABN
+      })
+      .expect(400);
+
+    const res = await request(app.getHttpServer())
+      .post('/v1/companies')
+      .send({
+        companyName: `Good ABN Co ${suffix}`,
+        adminUsername: `good-abn-admin-${suffix}`,
+        adminPassword: 'a-strong-password',
+        adminFullName: 'Good ABN Admin',
+        acceptedTerms: true,
+        abn: '53 004 085 616',
+        industry: 'Courier & parcel delivery',
+        phone: '1300 555 111',
+        fleetSizeEstimate: 12,
+      })
+      .expect(201);
+    const token = res.body.accessToken as string;
+
+    const me = await request(app.getHttpServer())
+      .get('/v1/companies/me')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(me.body.abn).toBe('53 004 085 616');
+    expect(me.body.industry).toBe('Courier & parcel delivery');
+    expect(me.body.phone).toBe('1300 555 111');
+    expect(me.body.fleetSizeEstimate).toBe(12);
+    expect(me.body.termsAcceptedAt).toEqual(expect.any(String));
+  });
+
+  it('can update the registration-depth fields after signup', async () => {
+    const suffix = randomUUID();
+    const signup = await request(app.getHttpServer())
+      .post('/v1/companies')
+      .send({
+        companyName: `Update Depth Co ${suffix}`,
+        adminUsername: `update-depth-admin-${suffix}`,
+        adminPassword: 'a-strong-password',
+        adminFullName: 'Update Depth Admin',
+        acceptedTerms: true,
+      })
+      .expect(201);
+    const token = signup.body.accessToken as string;
+
+    const updated = await request(app.getHttpServer())
+      .patch('/v1/companies/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ abn: '53004085616', industry: 'Furniture removals', phone: '02 5555 0100', fleetSizeEstimate: 5 })
+      .expect(200);
+    expect(updated.body.abn).toBe('53004085616');
+    expect(updated.body.industry).toBe('Furniture removals');
+    expect(updated.body.phone).toBe('02 5555 0100');
+    expect(updated.body.fleetSizeEstimate).toBe(5);
   });
 
   it('does not grant a free trial on signup', async () => {
@@ -67,6 +161,7 @@ describe('Company signup', () => {
         adminUsername: `no-trial-admin-${suffix}`,
         adminPassword: 'a-strong-password',
         adminFullName: 'No Trial Admin',
+        acceptedTerms: true,
       })
       .expect(201);
     const token = res.body.accessToken as string;
@@ -87,6 +182,7 @@ describe('Company signup', () => {
       adminUsername: `dup-admin-${suffix}`,
       adminPassword: 'a-strong-password',
       adminFullName: 'Dup Admin',
+      acceptedTerms: true,
     };
     await request(app.getHttpServer()).post('/v1/companies').send(body).expect(201);
 
@@ -106,6 +202,7 @@ describe('Company signup', () => {
         adminUsername: `rename-admin-${suffix}`,
         adminPassword: 'a-strong-password',
         adminFullName: 'Rename Admin',
+        acceptedTerms: true,
       })
       .expect(201);
     const token = signup.body.accessToken as string;
@@ -143,6 +240,7 @@ describe('Company signup', () => {
         adminUsername: `support-admin-${suffix}`,
         adminPassword: 'a-strong-password',
         adminFullName: 'Support Admin',
+        acceptedTerms: true,
       })
       .expect(201);
     const token = signup.body.accessToken as string;

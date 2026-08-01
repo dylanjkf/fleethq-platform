@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { Module } from '@nestjs/common';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -18,6 +18,7 @@ import { WarehouseModule } from './warehouse/warehouse.module';
 import { MaintenanceSchedulesModule } from './maintenance-schedules/maintenance-schedules.module';
 import { DashboardLayoutsModule } from './dashboard-layouts/dashboard-layouts.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { SecuritySettingsModule } from './security-settings/security-settings.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { ChecklistsModule } from './checklists/checklists.module';
@@ -52,11 +53,24 @@ import { AuditModule } from './audit/audit.module';
 import { BarcodeModule } from './barcode/barcode.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { ContactModule } from './contact/contact.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
+import { AdminAuthModule } from './admin-auth/admin-auth.module';
+import { AdminOrganisationsModule } from './admin-organisations/admin-organisations.module';
+import { AdminCustomerUsersModule } from './admin-customer-users/admin-customer-users.module';
+import { AdminAnalyticsModule } from './admin-analytics/admin-analytics.module';
+import { AdminBillingModule } from './admin-billing/admin-billing.module';
+import { AdminSupportModule } from './admin-support/admin-support.module';
+import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
+import { AdminFeatureFlagsModule } from './admin-feature-flags/admin-feature-flags.module';
+import { AdminSystemModule } from './admin-system/admin-system.module';
+import { AdminFleetModule } from './admin-fleet/admin-fleet.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
 import { FeatureGuard } from './common/guards/feature.guard';
+import { FeatureFlagGuard } from './common/guards/feature-flag.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { DeprecationInterceptor } from './common/deprecation/deprecation.interceptor';
 import { validateEnv } from './config/env.validation';
 
 @Module({
@@ -140,6 +154,7 @@ import { validateEnv } from './config/env.validation';
     MaintenanceSchedulesModule,
     DashboardLayoutsModule,
     AnalyticsModule,
+    SecuritySettingsModule,
     ComplianceModule,
     ChecklistsModule,
     ChecklistBundlesModule,
@@ -173,6 +188,17 @@ import { validateEnv } from './config/env.validation';
     BarcodeModule,
     IntegrationsModule,
     ContactModule,
+    AdminAuthModule,
+    AdminOrganisationsModule,
+    AdminCustomerUsersModule,
+    AdminAnalyticsModule,
+    AdminBillingModule,
+    AdminSupportModule,
+    AnnouncementsModule,
+    FeatureFlagsModule,
+    AdminFeatureFlagsModule,
+    AdminSystemModule,
+    AdminFleetModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before
@@ -186,6 +212,13 @@ import { validateEnv } from './config/env.validation';
     // Paid-add-on paywall. Runs after permissions so "you can't do this at all"
     // (403) is answered before "your plan doesn't cover it" (402).
     { provide: APP_GUARD, useClass: FeatureGuard },
+    // Admin-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b)
+    // — a separate axis from FeatureGuard's billing entitlement check.
+    { provide: APP_GUARD, useClass: FeatureFlagGuard },
+    // Emits the RFC 8594 Deprecation/Sunset headers for any route marked
+    // `@Deprecated(...)` (12-API/API_Versioning_Policy.md's "signal at runtime").
+    // A no-op on undecorated routes.
+    { provide: APP_INTERCEPTOR, useClass: DeprecationInterceptor },
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
   ],
 })

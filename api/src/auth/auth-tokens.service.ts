@@ -6,6 +6,7 @@ import { SystemPrismaService } from '../prisma/system-prisma.service';
 const TTL_MS: Record<AuthTokenType, number> = {
   EMAIL_VERIFY: 24 * 60 * 60 * 1000, // a day to click a verification link
   PASSWORD_RESET: 60 * 60 * 1000, // an hour for a reset/invite link
+  MAGIC_LINK: 15 * 60 * 1000, // a live login attempt, not a link to open later
 };
 
 function hashToken(raw: string): string {

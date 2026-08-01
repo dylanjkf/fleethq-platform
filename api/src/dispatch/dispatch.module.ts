@@ -4,6 +4,8 @@ import { AttachmentsModule } from '../attachments/attachments.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CustomersModule } from '../customers/customers.module';
 import { DepotsModule } from '../depots/depots.module';
+import { AssetsModule } from '../assets/assets.module';
+import { OperatorsModule } from '../operators/operators.module';
 import { ComplianceModule } from '../compliance/compliance.module';
 import { JobsController } from './jobs.controller';
 import { JobsService } from './jobs.service';
@@ -13,7 +15,7 @@ import { PodReceiptService } from './pod-receipt.service';
 import { ParcelsService } from './parcels.service';
 
 @Module({
-  imports: [TimelineModule, AttachmentsModule, NotificationsModule, CustomersModule, DepotsModule, ComplianceModule],
+  imports: [TimelineModule, AttachmentsModule, NotificationsModule, CustomersModule, DepotsModule, AssetsModule, OperatorsModule, ComplianceModule],
   controllers: [JobsController],
   providers: [JobsSupportService, JobsService, JobStopsService, PodReceiptService, ParcelsService],
   exports: [JobsService, JobStopsService],

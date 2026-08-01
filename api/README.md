@@ -106,6 +106,8 @@ Postgres, not by inspection:
 | `npm run prisma:migrate:deploy` | Apply pending migrations (what CI/prod use) |
 | `npm run seed` | Bootstrap local dev data |
 | `npm run permissions:sync` | Grant any catalog permission added since a company was created to its Administrator/Read Only system-template roles — run after any deploy that adds a permission (`npm run seed` already does this for local dev) |
+| `npm run admin:permissions:sync` | Same drift guard for the FleetHQ internal admin platform's Super Admin/Support system-template roles (`npm run seed` already does this too) |
+| `npm run admin:bootstrap` | One-time creation of the first FleetHQ staff account (Super Admin role) — refuses to run if any admin account already exists; see `scripts/bootstrap-admin.ts` |
 
 ## Observability
 

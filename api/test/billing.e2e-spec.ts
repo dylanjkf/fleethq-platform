@@ -41,9 +41,19 @@ function signedWebhookRequest(app: INestApplication, eventBody: unknown) {
  * arbitrary Stripe ID without already knowing which company it's looking
  * for. See BillingService's own doc comment for the fuller story.
  */
+// Real Stripe events each carry a unique id and a strictly-increasing `created`
+// timestamp; the handler now relies on both (idempotency ledger + out-of-order
+// guard), so the fakes must too — a monotonic counter gives each event a
+// distinct id and a later `created` than the one before it.
+let eventSeq = 0;
+function nextEvent(): { id: string; created: number } {
+  eventSeq += 1;
+  return { id: `evt_${eventSeq}_${Math.random().toString(36).slice(2)}`, created: 1_700_000_000 + eventSeq };
+}
+
 function subscriptionUpdatedEvent(customerId: string, subscriptionId: string, status: string, priceId: string, companyId?: string) {
   return {
-    id: `evt_${subscriptionId}`,
+    ...nextEvent(),
     object: 'event',
     type: 'customer.subscription.updated',
     data: {
@@ -54,6 +64,40 @@ function subscriptionUpdatedEvent(customerId: string, subscriptionId: string, st
         status,
         items: { data: [{ price: { id: priceId } }] },
         metadata: companyId ? { fleetosCompanyId: companyId } : {},
+      },
+    },
+  };
+}
+
+/**
+ * Auth/Billing Platform Phase 5 (full Stripe webhook coverage +
+ * failed-payment handling). companyId travels the same way as the
+ * subscription events above — Stripe snapshots `subscription.metadata` onto
+ * `invoice.parent.subscription_details.metadata` at invoice finalization, so
+ * no extra Stripe API round-trip is needed to resolve it.
+ */
+function invoiceEvent(
+  type: 'invoice.payment_failed' | 'invoice.paid',
+  subscriptionId: string,
+  companyId?: string,
+  nextPaymentAttempt: number | null = null,
+) {
+  return {
+    id: `evt_${type}_${subscriptionId}_${Math.random()}`,
+    object: 'event',
+    type,
+    data: {
+      object: {
+        id: `in_${subscriptionId}`,
+        object: 'invoice',
+        next_payment_attempt: nextPaymentAttempt,
+        parent: {
+          type: 'subscription_details',
+          subscription_details: {
+            subscription: subscriptionId,
+            metadata: companyId ? { fleetosCompanyId: companyId } : {},
+          },
+        },
       },
     },
   };
@@ -198,5 +242,98 @@ describe('Billing / subscriptions', () => {
       app,
       subscriptionUpdatedEvent('cus_does_not_exist_anywhere', 'sub_orphan', 'active', 'price_test_standard'),
     ).expect(200);
+  });
+
+  it('is idempotent: a duplicate webhook delivery (same event id) is only applied once', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+    // Build one event and deliver the exact same payload (same event id) twice.
+    const event = invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId, Math.floor(Date.now() / 1000) + 86400);
+    await signedWebhookRequest(app, event).expect(200);
+    await signedWebhookRequest(app, event).expect(200);
+
+    const status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    // Without idempotency this would be 2; the duplicate delivery is skipped.
+    expect(status.body.paymentFailureCount).toBe(1);
+  });
+
+  it('ignores an out-of-order subscription event older than the last one applied', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW]);
+    const token = await login(tenant.username);
+    const stripeCustomerId = `cus_${tenant.companyId}`;
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+
+    // A newer "canceled" event lands first…
+    const newer = { ...subscriptionUpdatedEvent(stripeCustomerId, stripeSubscriptionId, 'canceled', 'price_test_standard', tenant.companyId), type: 'customer.subscription.deleted' };
+    // …then an older "active" event (lower `created`) arrives late.
+    const older = subscriptionUpdatedEvent(stripeCustomerId, stripeSubscriptionId, 'active', 'price_test_standard', tenant.companyId);
+    older.created = newer.created - 100;
+    older.id = `${older.id}_stale`;
+
+    await signedWebhookRequest(app, newer).expect(200);
+    await signedWebhookRequest(app, older).expect(200);
+
+    const status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    // The stale "active" event must NOT revert the company back to ACTIVE.
+    expect(status.body.subscriptionStatus).toBe('CANCELED');
+  });
+
+  it('records an invoice.payment_failed event and notifies billing:manage holders with the retry date', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+    const nextAttempt = Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId, nextAttempt)).expect(
+      200,
+    );
+
+    const status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(1);
+    expect(status.body.lastPaymentFailedAt).not.toBeNull();
+    expect(new Date(status.body.nextPaymentAttemptAt).getTime()).toBe(nextAttempt * 1000);
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    const types = (notifications.body.items as { type: string }[]).map((n) => n.type);
+    expect(types).toContain('billing.payment_failed');
+  });
+
+  it('increments paymentFailureCount across repeated failures, then resets it and notifies recovery on invoice.paid', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    let status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(2);
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    status = await request(app.getHttpServer()).get('/v1/billing/status').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(status.body.paymentFailureCount).toBe(0);
+    expect(status.body.nextPaymentAttemptAt).toBeNull();
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    const types = (notifications.body.items as { type: string }[]).map((n) => n.type);
+    expect(types).toContain('billing.payment_recovered');
+  });
+
+  it('does not send a recovery notification for a routine invoice.paid with no prior failure', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const token = await login(tenant.username);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', stripeSubscriptionId, tenant.companyId)).expect(200);
+
+    const notifications = await request(app.getHttpServer()).get('/v1/notifications').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(notifications.body.items).toHaveLength(0);
+  });
+
+  it('does nothing (no error) for an invoice event with no fleetosCompanyId metadata', async () => {
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', 'sub_orphan')).expect(200);
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', 'sub_orphan')).expect(200);
   });
 });

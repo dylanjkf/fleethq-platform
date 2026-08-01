@@ -1,5 +1,17 @@
 # FleetOS Compliance & ISMS
 
+> **Scope note (built vs. target).** FleetOS's **application-layer** security
+> controls (RLS tenant isolation, RBAC, MFA, audit logging, Privacy Act
+> export/erasure, input validation, rate limiting, fail-fast config) are
+> implemented and inspectable in `api/`. **Infrastructure-layer** controls
+> (network segmentation, WAF, KMS encryption-at-rest, managed monitoring,
+> multi-AZ / cross-region database) describe a **target architecture** for the
+> planned Railway/AWS deployment and are **not yet built — there is no Terraform
+> or other IaC in this repository.** Throughout these documents such controls are
+> marked **⏳ Planned**. No control here is marked Implemented on the basis of a
+> file that does not exist. See [readiness.md](./readiness.md) for the full
+> built-vs-planned breakdown.
+
 This directory is the **governance layer** of FleetOS security — the
 Information Security Management System (ISMS) artefacts that ISO/IEC 27001 and
 SOC 2 auditors require *in addition to* the technical controls documented under

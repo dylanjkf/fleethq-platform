@@ -56,15 +56,19 @@ export class ImportsService {
     );
   }
 
+  // Depots + Customers de-duplicate by natural key (case-insensitive name)
+  // instead of blindly inserting: re-importing the same directory (or a
+  // scheduled Integration Sync re-running) matches the existing row rather than
+  // creating a duplicate — see DepotsService/CustomersService.importByName.
   importDepots(companyId: string, actorUserId: string | undefined, dto: ImportRowsDto): Promise<ImportResult> {
     return this.importRows(companyId, actorUserId, dto, CreateDepotDto, (companyId, actorUserId, row) =>
-      this.depotsService.create(companyId, actorUserId, row),
+      this.depotsService.importByName(companyId, actorUserId, row),
     );
   }
 
   importCustomers(companyId: string, actorUserId: string | undefined, dto: ImportRowsDto): Promise<ImportResult> {
     return this.importRows(companyId, actorUserId, dto, CreateCustomerDto, (companyId, actorUserId, row) =>
-      this.customersService.create(companyId, actorUserId, row),
+      this.customersService.importByName(companyId, actorUserId, row),
     );
   }
 
@@ -85,7 +89,11 @@ export class ImportsService {
     actorUserId: string | undefined,
     dto: ImportRowsDto,
     dtoClass: Type<T>,
-    create: (companyId: string, actorUserId: string | undefined, row: T) => Promise<{ id: string }>,
+    // `created` distinguishes a fresh insert from a natural-key de-dup match
+    // (Depots/Customers) — the row is still `valid`, just not newly created.
+    // Row creators that always insert (Assets/Operators/…) omit it → treated as
+    // created.
+    create: (companyId: string, actorUserId: string | undefined, row: T) => Promise<{ id: string; created?: boolean }>,
   ): Promise<ImportResult> {
     const dryRun = dto.dryRun ?? false;
     const rows: ImportRowResult[] = [];
@@ -102,8 +110,8 @@ export class ImportsService {
         continue;
       }
       try {
-        const created = await create(companyId, actorUserId, instance);
-        rows.push({ index, valid: true, created: true, errors: [], id: created.id });
+        const result = await create(companyId, actorUserId, instance);
+        rows.push({ index, valid: true, created: result.created ?? true, errors: [], id: result.id });
       } catch (err) {
         rows.push({ index, valid: false, created: false, errors: [describeImportRowError(err)] });
       }

@@ -3,6 +3,8 @@ import { JobStatus, Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { DepotsService } from '../depots/depots.service';
+import { AssetsService } from '../assets/assets.service';
+import { OperatorsService } from '../operators/operators.service';
 import { FatigueService } from '../compliance/fatigue.service';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -37,14 +39,16 @@ export class JobsService {
     private readonly prisma: PrismaService,
     private readonly timeline: TimelineService,
     private readonly depots: DepotsService,
+    private readonly assets: AssetsService,
+    private readonly operators: OperatorsService,
     private readonly fatigue: FatigueService,
     private readonly support: JobsSupportService,
   ) {}
 
   async create(companyId: string, actorUserId: string, dto: CreateJobDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      if (dto.assetId) await this.assertAssetExists(tx, companyId, dto.assetId);
-      if (dto.operatorId) await this.assertOperatorExists(tx, companyId, dto.operatorId);
+      if (dto.assetId) await this.assets.requireAsset(tx, companyId, dto.assetId, { allowArchived: false });
+      if (dto.operatorId) await this.operators.requireOperator(tx, companyId, dto.operatorId, { allowArchived: false });
       if (dto.pickupDepotId) await this.depots.requireDepot(tx, companyId, dto.pickupDepotId);
 
       const status = dto.assetId || dto.operatorId ? JobStatus.ASSIGNED : JobStatus.UNASSIGNED;
@@ -296,8 +300,8 @@ export class JobsService {
       const nextOperatorId = dto.operatorId === undefined ? existing.operatorId : dto.operatorId;
       const nextPickupDepotId = dto.pickupDepotId === undefined ? existing.pickupDepotId : dto.pickupDepotId;
 
-      if (nextAssetId) await this.assertAssetExists(tx, companyId, nextAssetId);
-      if (nextOperatorId) await this.assertOperatorExists(tx, companyId, nextOperatorId);
+      if (nextAssetId) await this.assets.requireAsset(tx, companyId, nextAssetId, { allowArchived: false });
+      if (nextOperatorId) await this.operators.requireOperator(tx, companyId, nextOperatorId, { allowArchived: false });
       if (nextPickupDepotId) await this.depots.requireDepot(tx, companyId, nextPickupDepotId);
 
       const fatigueStatus = await this.resolveFatigueGate(companyId, dto, nextOperatorId);
@@ -437,17 +441,4 @@ export class JobsService {
     return { ...notTerminal, OR: [{ scheduledAt: null }, { scheduledAt: { lte: endOfToday } }] };
   }
 
-  private async assertAssetExists(tx: Prisma.TransactionClient, companyId: string, assetId: string) {
-    const asset = await tx.asset.findUnique({ where: { id: assetId } });
-    if (!asset || asset.companyId !== companyId || asset.archivedAt) {
-      throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-    }
-  }
-
-  private async assertOperatorExists(tx: Prisma.TransactionClient, companyId: string, operatorId: string) {
-    const operator = await tx.operator.findUnique({ where: { id: operatorId } });
-    if (!operator || operator.companyId !== companyId || operator.archivedAt) {
-      throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-    }
-  }
 }

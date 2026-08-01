@@ -3,6 +3,8 @@ import { MaintenanceJobStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ImpactReportDto } from './dto/impact-report.dto';
 import { OperationsReportDto } from './dto/operations-report.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
+import { mergeDowntimeMsByAsset } from './report-aggregation';
 
 const DEFAULT_RANGE_DAYS = 7;
 const DEFAULT_IMPACT_MONTHS = 6;
@@ -88,10 +90,14 @@ export class ReportsService {
           tx.maintenanceJob.count({ where: { status: { not: MaintenanceJobStatus.COMPLETE } } }),
           // Uptime: a maintenance job takes its asset out of service while open.
           // A job overlapping the window counts, clipped to the window's edges.
-          // Bounded by concurrently-open jobs (small), so this stays a row load.
+          // Rows are merged into per-asset downtime intervals in JS, so cap the
+          // load at MAX_AGGREGATION_ROWS — far above the jobs that realistically
+          // overlap a report window, but a hard bound so a pathological backlog
+          // of long-open jobs can't turn this into an unbounded scan.
           tx.maintenanceJob.findMany({
             where: { createdAt: { lte: to }, OR: [{ completedAt: null }, { completedAt: { gte: from } }] },
             select: { assetId: true, createdAt: true, completedAt: true },
+            take: MAX_AGGREGATION_ROWS,
           }),
           tx.asset.count({ where: { archivedAt: null } }),
         ]);
@@ -148,34 +154,7 @@ export class ReportsService {
       // double-counted, then express the remainder as a percentage of the
       // window.
       const rangeMs = to.getTime() - from.getTime();
-      const intervalsByAsset = new Map<string, { start: number; end: number }[]>();
-      for (const job of openFaultWindows) {
-        const start = Math.max(job.createdAt.getTime(), from.getTime());
-        const end = Math.min((job.completedAt ?? to).getTime(), to.getTime());
-        if (end <= start) continue;
-        const arr = intervalsByAsset.get(job.assetId) ?? [];
-        arr.push({ start, end });
-        intervalsByAsset.set(job.assetId, arr);
-      }
-      const downtimeMsByAsset = new Map<string, number>();
-      for (const [assetId, intervals] of intervalsByAsset) {
-        intervals.sort((a, b) => a.start - b.start);
-        let mergedMs = 0;
-        let curStart = intervals[0].start;
-        let curEnd = intervals[0].end;
-        for (let i = 1; i < intervals.length; i++) {
-          const iv = intervals[i];
-          if (iv.start <= curEnd) {
-            curEnd = Math.max(curEnd, iv.end);
-          } else {
-            mergedMs += curEnd - curStart;
-            curStart = iv.start;
-            curEnd = iv.end;
-          }
-        }
-        mergedMs += curEnd - curStart;
-        downtimeMsByAsset.set(assetId, mergedMs);
-      }
+      const downtimeMsByAsset = mergeDowntimeMsByAsset(openFaultWindows, from, to);
       // Only fetch names for the (small) set of assets that actually had
       // downtime, rather than loading the whole fleet — and keep the original
       // rule that an archived asset's downtime doesn't count.

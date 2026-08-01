@@ -8,6 +8,7 @@ import { IntegrationMappingEngine } from './integration-mapping-engine.service';
 import { IntegrationCredentialsService } from './integration-credentials.service';
 import { computeNextCronRun } from './integration-cron.util';
 import { TargetEntity } from './dto/allowed-target-entities';
+import { safeFetch, SsrfBlockedError } from '../common/net/safe-fetch';
 
 /** Dead-letter retry backoff: 2^attempts minutes, capped at one day. Documented constants — not configurable per task scope. */
 const MAX_DEAD_LETTER_ATTEMPTS = 5;
@@ -138,7 +139,20 @@ export class IntegrationSyncEngine {
       this.applyAuth(headers, authType, secretValue, config);
     }
 
-    const response = await fetch(url, { method: 'GET', headers });
+    // safeFetch (not bare fetch): `url` is tenant-supplied, so it must be
+    // validated against the SSRF blocklist before we make a request from
+    // inside our own network — otherwise a connector pointed at the cloud
+    // metadata endpoint or an internal host would faithfully import that
+    // response into ordinary FleetHQ records via the mapping engine.
+    let response: Response;
+    try {
+      response = await safeFetch(url, { method: 'GET', headers });
+    } catch (err) {
+      if (err instanceof SsrfBlockedError) {
+        throw new BadRequestException({ code: 'INTEGRATION_URL_NOT_ALLOWED', message: err.message });
+      }
+      throw err;
+    }
     if (!response.ok) {
       throw new Error(`REST connector request failed: ${response.status} ${response.statusText}`);
     }

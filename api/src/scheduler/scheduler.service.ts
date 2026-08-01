@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ComplianceService } from '../compliance/compliance.service';
+import { MaintenanceSchedulesService } from '../maintenance-schedules/maintenance-schedules.service';
 import { RetentionService } from '../retention/retention.service';
 import { DashboardMetricsService } from '../dashboard-layouts/dashboard-metrics.service';
 import { IntegrationSyncEngine } from '../integrations/integration-sync-engine.service';
@@ -12,6 +13,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DIGEST_TASK = 'notification_digest';
 const COMPLIANCE_SWEEP_TASK = 'compliance_expiry_sweep';
+const MAINTENANCE_SWEEP_TASK = 'maintenance_due_sweep';
 const GPS_RETENTION_TASK = 'gps_retention_purge';
 const UTILISATION_SNAPSHOT_TASK = 'utilisation_snapshot';
 const INTEGRATION_SYNC_TASK = 'integration_scheduled_sync';
@@ -47,6 +49,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly systemPrisma: SystemPrismaService,
     private readonly notifications: NotificationsService,
     private readonly compliance: ComplianceService,
+    private readonly maintenanceSchedules: MaintenanceSchedulesService,
     private readonly retention: RetentionService,
     private readonly dashboardMetrics: DashboardMetricsService,
     private readonly integrationSyncEngine: IntegrationSyncEngine,
@@ -60,6 +63,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     const digestIntervalMs = Number(this.config.get<string>('SCHEDULER_DIGEST_INTERVAL_MS')) || DAY_MS;
     const complianceIntervalMs = Number(this.config.get<string>('SCHEDULER_COMPLIANCE_INTERVAL_MS')) || DAY_MS;
+    const maintenanceIntervalMs = Number(this.config.get<string>('SCHEDULER_MAINTENANCE_INTERVAL_MS')) || DAY_MS;
     const retentionIntervalMs = Number(this.config.get<string>('SCHEDULER_RETENTION_INTERVAL_MS')) || DAY_MS;
     // Utilisation samples several times a day by default so each day's stored
     // figure is a real average, not one arbitrary reading; the (company, day)
@@ -75,6 +79,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Scheduler enabled — notification digest every ${Math.round(digestIntervalMs / 60000)} min, ` +
         `compliance-expiry sweep every ${Math.round(complianceIntervalMs / 60000)} min, ` +
+        `maintenance-due sweep every ${Math.round(maintenanceIntervalMs / 60000)} min, ` +
         `GPS retention purge every ${Math.round(retentionIntervalMs / 60000)} min, ` +
         `utilisation snapshot every ${Math.round(utilisationIntervalMs / 60000)} min, ` +
         `integration sync every ${Math.round(integrationSyncIntervalMs / 60000)} min, ` +
@@ -82,6 +87,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     );
     this.timers.push(this.scheduleTask(DIGEST_TASK, digestIntervalMs, () => this.runNotificationDigests()));
     this.timers.push(this.scheduleTask(COMPLIANCE_SWEEP_TASK, complianceIntervalMs, () => this.runComplianceExpirySweeps()));
+    this.timers.push(this.scheduleTask(MAINTENANCE_SWEEP_TASK, maintenanceIntervalMs, () => this.runMaintenanceDueSweeps()));
     this.timers.push(this.scheduleTask(GPS_RETENTION_TASK, retentionIntervalMs, () => this.retention.runGpsRetention()));
     this.timers.push(this.scheduleTask(UTILISATION_SNAPSHOT_TASK, utilisationIntervalMs, () => this.runUtilisationSnapshots()));
     this.timers.push(this.scheduleTask(INTEGRATION_SYNC_TASK, integrationSyncIntervalMs, () => this.runIntegrationScheduledSyncs()));
@@ -171,6 +177,33 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     this.logger.log(`Compliance sweep complete: ${companyIds.length} companies, ${expiring} expiring, ${expired} expired, ${failures} failures.`);
     return { companies: companyIds.length, expiring, expired, failures };
+  }
+
+  /**
+   * Raise per-company maintenance-due alerts (per-asset plans newly due-soon or
+   * overdue). Same cross-tenant shape as the compliance sweep: enumerate
+   * companies via the privileged read-only client, then re-scope to each tenant
+   * through the per-company sweep, which is idempotent (its alert marks make a
+   * re-run a no-op). One tenant's failure is logged and skipped so it can't
+   * stall the rest.
+   */
+  async runMaintenanceDueSweeps(): Promise<{ companies: number; due: number; overdue: number; failures: number }> {
+    const companyIds = await this.systemPrisma.listActiveCompanyIds();
+    let due = 0;
+    let overdue = 0;
+    let failures = 0;
+    for (const companyId of companyIds) {
+      try {
+        const result = await this.maintenanceSchedules.sweepDue(companyId);
+        due += result.due;
+        overdue += result.overdue;
+      } catch (err) {
+        failures += 1;
+        this.logger.error(`Maintenance sweep failed for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.logger.log(`Maintenance sweep complete: ${companyIds.length} companies, ${due} due, ${overdue} overdue, ${failures} failures.`);
+    return { companies: companyIds.length, due, overdue, failures };
   }
 
   /**
