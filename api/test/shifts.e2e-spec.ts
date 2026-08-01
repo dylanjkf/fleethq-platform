@@ -80,6 +80,15 @@ describe('Shifts (start/end + day summary)', () => {
     const list = await request(app.getHttpServer()).get('/v1/shifts').set('Authorization', `Bearer ${token}`).expect(200);
     expect(list.body.items).toHaveLength(1);
     expect(list.body.items[0].operator.fullName).toBe('Dana Driver');
+
+    // Shift history now accepts the shared page/pageSize params (previously a
+    // hard 400) and returns the standard paginated envelope.
+    const paged = await request(app.getHttpServer())
+      .get('/v1/shifts?page=1&pageSize=10')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(paged.body).toMatchObject({ total: 1, page: 1, pageSize: 10 });
+    expect(paged.body.items).toHaveLength(1);
   });
 
   it('is tenant-isolated and requires shifts:view for the summary/history endpoints', async () => {

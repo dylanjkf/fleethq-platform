@@ -87,12 +87,17 @@ export class ShiftsService {
           ...(query.to ? { lte: endOfDay(new Date(query.to)) } : {}),
         };
       }
-      const items = await tx.operatorShift.findMany({
-        where,
-        include: { operator: { select: { id: true, fullName: true } } },
-        orderBy: { startedAt: 'desc' },
-      });
-      return { items };
+      const [items, total] = await Promise.all([
+        tx.operatorShift.findMany({
+          where,
+          include: { operator: { select: { id: true, fullName: true } } },
+          orderBy: { startedAt: 'desc' },
+          skip: query.skip,
+          take: query.take,
+        }),
+        tx.operatorShift.count({ where }),
+      ]);
+      return { items, total, page: query.page ?? 1, pageSize: query.take };
     });
   }
 

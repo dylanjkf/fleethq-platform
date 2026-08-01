@@ -100,6 +100,15 @@ describe('Messages (DriverOS messaging v0)', () => {
       .set('Authorization', `Bearer ${officeToken}`)
       .expect(200);
     expect(thread.body.items).toHaveLength(1);
+
+    // The thread now accepts the shared page/pageSize params (previously a hard
+    // 400) and returns the standard paginated envelope alongside the messages.
+    const paged = await request(app.getHttpServer())
+      .get(`/v1/messages?operatorId=${operatorId}&page=1&pageSize=10`)
+      .set('Authorization', `Bearer ${officeToken}`)
+      .expect(200);
+    expect(paged.body).toMatchObject({ operatorId, total: 1, page: 1, pageSize: 10 });
+    expect(paged.body.items).toHaveLength(1);
   });
 
   it('requires an operator when an office user sends with none specified', async () => {

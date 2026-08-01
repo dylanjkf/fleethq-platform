@@ -5,6 +5,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { SendMessageDto } from './dto/send-message.dto';
 import { BroadcastMessageDto } from './dto/broadcast-message.dto';
+import { ListMessagesDto } from './dto/list-messages.dto';
 
 /** Most-recent messages returned per thread — keeps the read bounded on a hot table. */
 const MESSAGE_THREAD_LIMIT = 200;
@@ -24,21 +25,26 @@ export class MessagesService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async list(companyId: string, actorUserId: string, requestedOperatorId?: string) {
+  async list(companyId: string, actorUserId: string, query: ListMessagesDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const operatorId = await this.resolveThreadOperatorId(tx, companyId, actorUserId, requestedOperatorId);
-      // A chat thread grows without bound over months; cap the read to the most
-      // recent MESSAGE_THREAD_LIMIT and return them in chronological order. This
-      // keeps the query bounded on a hot table without changing the UX (the
-      // recent conversation is what's shown). Older history is out of scope for
-      // v1 — add cursor paging here if "load earlier" is ever needed.
-      const recent = await tx.message.findMany({
-        where: { operatorId },
-        include: { senderUser: { select: { id: true, fullName: true } } },
-        orderBy: { createdAt: 'desc' },
-        take: MESSAGE_THREAD_LIMIT,
-      });
-      return { operatorId, items: recent.reverse() };
+      const operatorId = await this.resolveThreadOperatorId(tx, companyId, actorUserId, query.operatorId);
+      // A chat thread grows without bound over months, so the read is always
+      // bounded to one page. `page` 1 is the most recent window (default 200,
+      // the shared row cap); `page` > 1 walks progressively older history.
+      // Results are returned oldest-first within the page, matching the display.
+      const pageSize = query.take ?? MESSAGE_THREAD_LIMIT;
+      const skip = query.skip ?? 0;
+      const [recent, total] = await Promise.all([
+        tx.message.findMany({
+          where: { operatorId },
+          include: { senderUser: { select: { id: true, fullName: true } } },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: pageSize,
+        }),
+        tx.message.count({ where: { operatorId } }),
+      ]);
+      return { operatorId, items: recent.reverse(), total, page: query.page ?? 1, pageSize };
     });
   }
 

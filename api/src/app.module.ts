@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { Module } from '@nestjs/common';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -70,6 +70,7 @@ import { PermissionGuard } from './common/guards/permission.guard';
 import { FeatureGuard } from './common/guards/feature.guard';
 import { FeatureFlagGuard } from './common/guards/feature-flag.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { DeprecationInterceptor } from './common/deprecation/deprecation.interceptor';
 import { validateEnv } from './config/env.validation';
 
 @Module({
@@ -214,6 +215,10 @@ import { validateEnv } from './config/env.validation';
     // Admin-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b)
     // — a separate axis from FeatureGuard's billing entitlement check.
     { provide: APP_GUARD, useClass: FeatureFlagGuard },
+    // Emits the RFC 8594 Deprecation/Sunset headers for any route marked
+    // `@Deprecated(...)` (12-API/API_Versioning_Policy.md's "signal at runtime").
+    // A no-op on undecorated routes.
+    { provide: APP_INTERCEPTOR, useClass: DeprecationInterceptor },
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
   ],
 })

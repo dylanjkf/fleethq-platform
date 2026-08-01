@@ -39,6 +39,11 @@ When something must be removed or changed incompatibly:
    `API_Reference.md`), and add it to the `CHANGELOG.md`.
 2. **Signal at runtime.** Deprecated routes return a `Deprecation: true` header
    and a `Sunset: <date>` header (RFC 8594) indicating the earliest removal date.
+   Implemented by the `@Deprecated({ sunset, link? })` decorator
+   (`api/src/common/deprecation/deprecated.decorator.ts`) and a globally
+   registered `DeprecationInterceptor` — annotate the handler (or controller)
+   and the headers (plus an optional `Link: …; rel="deprecation"`) are emitted
+   automatically; undecorated routes are unaffected.
 3. **Overlap.** Keep the deprecated behaviour working for a **minimum 90-day**
    window (longer for anything third parties depend on) alongside its
    replacement, so integrators can migrate without downtime.

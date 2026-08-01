@@ -10,6 +10,7 @@ import { ListChecklistTemplatesDto } from './dto/list-checklist-templates.dto';
 import { SubmitChecklistDto } from './dto/submit-checklist.dto';
 import { ListChecklistSubmissionsDto } from './dto/list-checklist-submissions.dto';
 import { ChecklistItemDto } from './dto/checklist-item.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 /** The normalized item shape persisted in `items` / `template_snapshot` JSON. */
 interface NormalizedItem {
@@ -370,6 +371,11 @@ export class ChecklistsService {
             template: { select: { name: true } },
             operator: { select: { fullName: true } },
           },
+          // Bounded: this loads today's submissions to reduce to latest-per-asset
+          // in JS. MAX_AGGREGATION_ROWS is far above any fleet's daily pre-start
+          // volume; ordered newest-first, so the latest-per-asset result is
+          // unaffected until a tenant is doing tens of thousands of checks a day.
+          take: MAX_AGGREGATION_ROWS,
         }),
       ]);
 

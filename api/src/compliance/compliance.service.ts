@@ -8,6 +8,7 @@ import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { CreateComplianceDocumentDto } from './dto/create-compliance-document.dto';
 import { UpdateComplianceDocumentDto } from './dto/update-compliance-document.dto';
 import { ListComplianceDocumentsDto } from './dto/list-compliance-documents.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 const DOCUMENT_INCLUDE = { asset: true, operator: true, fileAttachment: { select: { id: true, filename: true, contentType: true, byteSize: true } } } satisfies Prisma.ComplianceDocumentInclude;
 
@@ -216,18 +217,22 @@ export class ComplianceService {
       const [assetTotal, operatorTotal, currentAssetDocs, currentLicences, prestartAssets, delivered, failed] = await Promise.all([
         tx.asset.count({ where: { archivedAt: null } }),
         tx.operator.count({ where: { archivedAt: null } }),
-        // One row per (asset, type) that has a still-valid doc of a vehicle type.
+        // One row per (asset, type) that has a still-valid doc of a vehicle
+        // type. Capped: this counts a fleet's currently-valid docs in JS, so
+        // MAX_AGGREGATION_ROWS bounds it well above any real fleet's size.
         tx.complianceDocument.findMany({
           where: { archivedAt: null, expiresAt: { gte: now }, assetId: { not: null }, documentType: { in: ['ROADWORTHY', 'INSURANCE', 'REGISTRATION'] } },
           select: { assetId: true, documentType: true },
           distinct: ['assetId', 'documentType'],
+          take: MAX_AGGREGATION_ROWS,
         }),
         tx.complianceDocument.findMany({
           where: { archivedAt: null, expiresAt: { gte: now }, operatorId: { not: null }, documentType: 'LICENCE' },
           select: { operatorId: true },
           distinct: ['operatorId'],
+          take: MAX_AGGREGATION_ROWS,
         }),
-        tx.checklistSubmission.findMany({ where: { submittedAt: { gte: dayStart } }, select: { assetId: true }, distinct: ['assetId'] }),
+        tx.checklistSubmission.findMany({ where: { submittedAt: { gte: dayStart } }, select: { assetId: true }, distinct: ['assetId'], take: MAX_AGGREGATION_ROWS }),
         tx.jobStop.count({ where: { outcome: 'DELIVERED' } }),
         tx.jobStop.count({ where: { outcome: 'FAILED' } }),
       ]);

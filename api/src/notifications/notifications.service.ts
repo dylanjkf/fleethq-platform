@@ -5,6 +5,7 @@ import { PermissionKey } from '../common/permissions/permission-catalog';
 import { NOTIFICATION_CHANNEL, type NotificationChannel } from './channels/notification-channel';
 import { PushService } from './push/push.service';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 export interface NotificationInput {
   type: string;
@@ -224,9 +225,14 @@ export class NotificationsService {
   }
 
   private async computeDigest(tx: Prisma.TransactionClient) {
+    // Bounded read of the un-emailed backlog: sendDigest marks these emailed,
+    // so a subsequent run picks up anything past this cap — the digest just
+    // drains a very large backlog over a few runs rather than loading it all at
+    // once. previewDigest never marks, but only ever needs a representative page.
     const pending = await tx.notification.findMany({
       where: { emailedAt: null, readAt: null },
       orderBy: { createdAt: 'asc' },
+      take: MAX_AGGREGATION_ROWS,
     });
 
     const byRecipient = new Map<string, typeof pending>();

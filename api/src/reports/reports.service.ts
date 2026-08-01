@@ -3,6 +3,7 @@ import { MaintenanceJobStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ImpactReportDto } from './dto/impact-report.dto';
 import { OperationsReportDto } from './dto/operations-report.dto';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 const DEFAULT_RANGE_DAYS = 7;
 const DEFAULT_IMPACT_MONTHS = 6;
@@ -88,10 +89,14 @@ export class ReportsService {
           tx.maintenanceJob.count({ where: { status: { not: MaintenanceJobStatus.COMPLETE } } }),
           // Uptime: a maintenance job takes its asset out of service while open.
           // A job overlapping the window counts, clipped to the window's edges.
-          // Bounded by concurrently-open jobs (small), so this stays a row load.
+          // Rows are merged into per-asset downtime intervals in JS, so cap the
+          // load at MAX_AGGREGATION_ROWS — far above the jobs that realistically
+          // overlap a report window, but a hard bound so a pathological backlog
+          // of long-open jobs can't turn this into an unbounded scan.
           tx.maintenanceJob.findMany({
             where: { createdAt: { lte: to }, OR: [{ completedAt: null }, { completedAt: { gte: from } }] },
             select: { assetId: true, createdAt: true, completedAt: true },
+            take: MAX_AGGREGATION_ROWS,
           }),
           tx.asset.count({ where: { archivedAt: null } }),
         ]);
