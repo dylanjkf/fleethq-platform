@@ -2,6 +2,34 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-01 — Enterprise Production Readiness Audit remediation (initiative complete)
+
+Remediation of the independent *FleetHQ Enterprise Production Readiness Audit*, treated as the source of truth. Every confirmed, in-scope finding was fixed and verified across the three repositories (`fleethq-platform`, `fleethq-frontend`, `fleethq-driveros`); an adversarial re-verification pass (multi-agent, read-only) re-checked all 103 audit items against the committed code before this entry was written (51 already-satisfied, 18 real in-scope gaps, the rest out-of-scope/roadmap/other-repo).
+
+Batches landed:
+
+- **A — Critical security**: SSRF blocklist + redirect hardening on the Integration Hub outbound/webhook fetch (private-IP/metadata/loopback rejection via a `safe-fetch` guard); fail-fast boot guards in `NODE_ENV=production` for dev-only DB-role passwords, the in-repo `INTEGRATION_CREDENTIAL_KEY` placeholder, and unguarded demo/enterprise seed scripts.
+- **B — Billing integrity**: Stripe `priceId` allowlist; webhook idempotency ledger + out-of-order watermark; Stripe idempotency keys; same-origin redirect allowlist; `charge.refunded` handling.
+- **C — Auth**: admin-tier MFA enforcement (`ENFORCE_ADMIN_MFA`); uniform-404 username/link enumeration fix; JWT `HS256` alg pin; per-route GPS-ingest and inbound-webhook throttles.
+- **D — Schema integrity**: `onDelete: Restrict` on FuelEntry/ComplianceDocument FKs; unique `auth_tokens.token_hash`; S3-object purge after commit in Privacy-Act erasure.
+- **E — API design**: shared pagination on shifts/messages; `MAX_AGGREGATION_ROWS` caps; RFC 8594 deprecation/sunset interceptor.
+- **F — Frontend/a11y**: WCAG-AA status-badge contrast; admin-app Sentry error boundary; accessible modals + aria-labels; office SW `/admin` guard.
+- **G — DevOps/config**: Dependabot across all repos; `npm ci` on Vercel; Docker base-image digest pinning; migrate-on-boot decoupling (`RUN_MIGRATIONS_ON_BOOT`).
+- **H — Code quality**: shared per-service ownership helper; maintenance-due notification sweep (+migration); audit-log CSV export; dead-service removal.
+- **I — Mobile/DriverOS**: iOS/Android native permission usage descriptions; size-bounded SW asset cache; Background Sync outbox drain; checklist autosave error surfacing; orientation unlock + release-versioning convention.
+- **J — Documentation & API-reference integrity**: reclassified every fabricated "✅ Implemented" infrastructure control in the SOC 2 matrix / Statement of Applicability / risk register / readiness / Cyber-Essentials set to "⏳ Planned — target architecture, not yet built (no IaC in repo)", with a built-vs-target scope-note banner and status legend on every doc; rewrote the go-live runbooks to the real Railway path; added a scheduled `restore-drill.yml`; built a dependency-free API-reference generator and regenerated `API_Reference.md` (51→69 controllers, 270→387 routes); corrected the stale `fleetos_auth` BYPASSRLS comment. Frontend UX: MessagesPage error/retry state, a reusable picker-error affordance across 17 pickers, and mobile hamburger+drawer navigation.
+
+**Deliberately not changed (with reasons):**
+
+- **Public marketing site over-claiming (SSO/SCIM/99.9% SLA/"Melbourne hosting")** — lives in the separate `FleetHQWebsite` repo, which is not accessible to this workspace. Flagged as the audit's highest-priority item; must be corrected there.
+- **SSO/SAML/OIDC and SCIM** — net-new features (roadmap), not defects.
+- **JWT in `localStorage` (office + admin, same origin)** — an accepted design trade-off given the deliberate single-origin `/admin` deployment (Auth/Billing Phase 8); a move to httpOnly-cookie sessions or an isolated admin subdomain is a tracked architectural follow-up, not a same-session fix.
+- **Full closed-app Background-Sync replay in the service worker** — Batch I ships the proportionate client-wake drain; porting the ordered-replay/dead-letter engine into the SW is safety-critical and a deliberate follow-up.
+- **Tablet/landscape multi-column DriverOS redesign** — the orientation lock is removed (landscape now works and reflows); a tablet-optimised layout is a tracked follow-up.
+- **Batch J5 code-quality polish** (customer/depot import de-dup, remaining `findMany` caps, cross-service ownership-helper DRY, pure-logic unit tests) — Medium/Low audit items; the subagent implementing them was interrupted by a session limit mid-refactor, so the incomplete/unverified changes were reverted rather than shipped half-done. Tracked for a follow-up pass.
+
+**Verification**: `fleethq-platform` `tsc -b`/`eslint` clean and the full `jest` suite green on CI (the two specs that time out only in the slow local sandbox — `integrations` webhook, `reconcile-permissions` — pass in isolation and on CI hardware); `fleethq-frontend` office `tsc`/`build`/`vitest` (38/38) and admin `tsc`/`build` clean; `fleethq-driveros` `tsc`/`vitest` (9/9 sync-engine) clean, `sw.js` valid.
+
 ## 2026-07-31 — Auth/Billing Platform, Phase 11 (final verify, docs, CHANGELOG — initiative complete)
 
 Closing phase of the 11-phase Authentication, Billing & Subscription Platform initiative — no new functionality, a whole-initiative verification pass plus documentation.
