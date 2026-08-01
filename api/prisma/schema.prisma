@@ -1105,6 +1105,11 @@ model Depot {
   jobs    Job[]
 
   @@index([companyId])
+  // DB-level natural-key de-duplication (partial unique index, see migration
+  // 20260801100000): a company's live (non-archived) depots are unique by
+  // lower(name), so a re-import resolves to the existing row instead of
+  // inserting a duplicate. Filtered/expression index, so it lives only in the
+  // migration SQL.
   @@map("depots")
 }
 
@@ -1212,6 +1217,11 @@ model Customer {
   jobStops JobStop[]
 
   @@index([companyId])
+  // DB-level natural-key de-duplication (partial unique index, see migration
+  // 20260801100000): a company's live (non-archived) customers are unique by
+  // lower(name), so a re-import resolves to the existing row instead of
+  // inserting a duplicate. Filtered/expression index, so it lives only in the
+  // migration SQL.
   @@map("customers")
 }
 

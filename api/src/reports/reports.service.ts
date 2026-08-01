@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ImpactReportDto } from './dto/impact-report.dto';
 import { OperationsReportDto } from './dto/operations-report.dto';
 import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
+import { mergeDowntimeMsByAsset } from './report-aggregation';
 
 const DEFAULT_RANGE_DAYS = 7;
 const DEFAULT_IMPACT_MONTHS = 6;
@@ -153,34 +154,7 @@ export class ReportsService {
       // double-counted, then express the remainder as a percentage of the
       // window.
       const rangeMs = to.getTime() - from.getTime();
-      const intervalsByAsset = new Map<string, { start: number; end: number }[]>();
-      for (const job of openFaultWindows) {
-        const start = Math.max(job.createdAt.getTime(), from.getTime());
-        const end = Math.min((job.completedAt ?? to).getTime(), to.getTime());
-        if (end <= start) continue;
-        const arr = intervalsByAsset.get(job.assetId) ?? [];
-        arr.push({ start, end });
-        intervalsByAsset.set(job.assetId, arr);
-      }
-      const downtimeMsByAsset = new Map<string, number>();
-      for (const [assetId, intervals] of intervalsByAsset) {
-        intervals.sort((a, b) => a.start - b.start);
-        let mergedMs = 0;
-        let curStart = intervals[0].start;
-        let curEnd = intervals[0].end;
-        for (let i = 1; i < intervals.length; i++) {
-          const iv = intervals[i];
-          if (iv.start <= curEnd) {
-            curEnd = Math.max(curEnd, iv.end);
-          } else {
-            mergedMs += curEnd - curStart;
-            curStart = iv.start;
-            curEnd = iv.end;
-          }
-        }
-        mergedMs += curEnd - curStart;
-        downtimeMsByAsset.set(assetId, mergedMs);
-      }
+      const downtimeMsByAsset = mergeDowntimeMsByAsset(openFaultWindows, from, to);
       // Only fetch names for the (small) set of assets that actually had
       // downtime, rather than loading the whole fleet — and keep the original
       // rule that an archived asset's downtime doesn't count.

@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 import type { JwtPayload } from './jwt-payload.interface';
 import type { AuthContext } from './auth.service';
 
@@ -85,6 +86,10 @@ export class AuthSessionsService {
     const sessions = await this.systemPrisma.userSession.findMany({
       where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
       orderBy: { lastSeenAt: 'desc' },
+      // Bounded to MAX_ACTIVE_SESSIONS_PER_USER by enforceSessionCap in practice;
+      // MAX_AGGREGATION_ROWS is a defensive backstop so a session table anomaly
+      // can't turn this list read into an unbounded load.
+      take: MAX_AGGREGATION_ROWS,
     });
     return sessions.map((s) => ({
       id: s.id,
@@ -160,6 +165,9 @@ export class AuthSessionsService {
       where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
       orderBy: { lastSeenAt: 'desc' },
       select: { id: true },
+      // Steady state holds ≤ MAX_ACTIVE_SESSIONS_PER_USER live sessions; the far
+      // higher MAX_AGGREGATION_ROWS is a hard backstop against an unbounded read.
+      take: MAX_AGGREGATION_ROWS,
     });
     if (active.length < MAX_ACTIVE_SESSIONS_PER_USER) return;
     const toEvict = active.slice(MAX_ACTIVE_SESSIONS_PER_USER - 1).map((s) => s.id);

@@ -287,9 +287,22 @@ export class AssetsService {
     return this.complianceService.getDocumentFile(companyId, documentId, { assetId });
   }
 
-  async requireAsset(tx: Prisma.TransactionClient, companyId: string, id: string) {
+  /**
+   * The shared asset-ownership guard reused across services (a 404s for an
+   * unknown/cross-tenant asset). `allowArchived` defaults to `true` — this
+   * service's own update/archive callers accept an archived asset — but a
+   * caller that must reject archived assets too (Compliance/Jobs/Maintenance,
+   * where you can't file a document or job against a retired asset) passes
+   * `{ allowArchived: false }` to fold that check in without a second lookup.
+   */
+  async requireAsset(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    id: string,
+    { allowArchived = true }: { allowArchived?: boolean } = {},
+  ) {
     const asset = await tx.asset.findUnique({ where: { id } });
-    if (!asset || asset.companyId !== companyId) {
+    if (!asset || asset.companyId !== companyId || (!allowArchived && asset.archivedAt)) {
       throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
     }
     return asset;

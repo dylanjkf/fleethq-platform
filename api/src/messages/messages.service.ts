@@ -1,7 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { MessageSenderType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { OperatorsService } from '../operators/operators.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { SendMessageDto } from './dto/send-message.dto';
 import { BroadcastMessageDto } from './dto/broadcast-message.dto';
@@ -23,6 +24,7 @@ export class MessagesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly operators: OperatorsService,
   ) {}
 
   async list(companyId: string, actorUserId: string, query: ListMessagesDto) {
@@ -77,7 +79,7 @@ export class MessagesService {
             message: 'An operator must be specified to send a message.',
           });
         }
-        await this.assertOperatorExists(tx, companyId, dto.operatorId);
+        await this.operators.requireOperator(tx, companyId, dto.operatorId, { allowArchived: false });
         operatorId = dto.operatorId;
         senderType = MessageSenderType.OFFICE;
       }
@@ -173,18 +175,11 @@ export class MessagesService {
         message: 'An operator must be specified to view a thread.',
       });
     }
-    await this.assertOperatorExists(tx, companyId, requestedOperatorId);
+    await this.operators.requireOperator(tx, companyId, requestedOperatorId, { allowArchived: false });
     return requestedOperatorId;
   }
 
   private async callerOperator(tx: Prisma.TransactionClient, actorUserId: string) {
     return tx.operator.findFirst({ where: { userId: actorUserId, archivedAt: null } });
-  }
-
-  private async assertOperatorExists(tx: Prisma.TransactionClient, companyId: string, operatorId: string) {
-    const operator = await tx.operator.findUnique({ where: { id: operatorId } });
-    if (!operator || operator.companyId !== companyId || operator.archivedAt) {
-      throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-    }
   }
 }

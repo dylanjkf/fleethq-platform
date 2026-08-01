@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 /**
  * Password-reuse prevention (Auth/Billing Platform Phase 3,
@@ -50,6 +51,10 @@ export class PasswordPolicyService {
       orderBy: { createdAt: 'desc' },
       skip: PasswordPolicyService.HISTORY_LIMIT,
       select: { id: true },
+      // This trims on every change, so `stale` is ~1 row in steady state; the
+      // MAX_AGGREGATION_ROWS cap bounds the one-off read that clears a history
+      // which accumulated before trimming existed (any excess is cleared next call).
+      take: MAX_AGGREGATION_ROWS,
     });
     if (stale.length > 0) {
       await this.systemPrisma.passwordHistory.deleteMany({ where: { id: { in: stale.map((s) => s.id) } } });

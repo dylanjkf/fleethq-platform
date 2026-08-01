@@ -6,19 +6,7 @@ import { UpdateBarcodeScanConfigDto } from './dto/barcode-config.dto';
 import { CreateSearchableFieldDto, UpdateSearchableFieldDto } from './dto/searchable-field.dto';
 import { CreateFieldMappingDto, UpdateFieldMappingDto } from './dto/field-mapping.dto';
 import { CreateFromScanDto, ScanDto } from './dto/scan.dto';
-
-/** The six built-in searchable keys (see BarcodeSearchableField doc comment on
- *  the schema) and the StopParcel column each maps to. A non-custom
- *  searchable field's `key` must be one of these — everything else has to go
- *  through `isCustom` + `customFields`. */
-const BUILTIN_FIELD_COLUMNS: Record<string, keyof Prisma.StopParcelUncheckedCreateInput> = {
-  reference: 'reference',
-  trackingNumber: 'trackingNumber',
-  consignmentNumber: 'consignmentNumber',
-  manifestNumber: 'manifestNumber',
-  internalId: 'internalId',
-  customerReference: 'customerReference',
-};
+import { BUILTIN_FIELD_COLUMNS, buildMatchConditions, decodeScan } from './barcode-matching';
 
 const DEFAULT_SEARCHABLE_FIELDS: { key: string; label: string }[] = [
   { key: 'reference', label: 'Barcode' },
@@ -256,7 +244,7 @@ export class BarcodeService {
       // MVP decode only — full GS1 Application-Identifier parsing is a
       // follow-up, not attempted here (see Barcode_Scanning.md decode step).
       const decoded =
-        config.scanMode === 'DATABASE_LOOKUP' ? { scan: dto.scannedValue } : this.decodeScan(dto.scannedValue);
+        config.scanMode === 'DATABASE_LOOKUP' ? { scan: dto.scannedValue } : decodeScan(dto.scannedValue);
 
       const matchedParcel = await this.findMatch(tx, companyId, config.scanMode, decoded, dto.scannedValue, searchableFields);
       const populatedFields = this.buildPopulatedFields(mappings, decoded, matchedParcel);
@@ -371,51 +359,6 @@ export class BarcodeService {
     return stop;
   }
 
-  /** Attempts JSON, then `key:value;key2:value2` pairs; falls back to the raw
-   *  string under the `'scan'` key either way, since a mapping might target
-   *  `sourceField: 'scan'` to mean "the whole payload" regardless of whether
-   *  it also happened to parse into named fields. */
-  private decodeScan(scannedValue: string): Record<string, string> {
-    const result: Record<string, string> = { scan: scannedValue };
-    try {
-      const parsed: unknown = JSON.parse(scannedValue);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) result[k] = String(v);
-        return result;
-      }
-    } catch {
-      // not JSON — fall through to key:value pairs
-    }
-    if (scannedValue.includes(':')) {
-      const pairs = scannedValue
-        .split(';')
-        .map((p) => p.trim())
-        .filter(Boolean);
-      if (pairs.length > 0 && pairs.every((p) => p.includes(':'))) {
-        for (const pair of pairs) this.applyKeyValuePair(result, pair);
-      }
-    }
-    return result;
-  }
-
-  private applyKeyValuePair(result: Record<string, string>, pair: string): void {
-    const idx = pair.indexOf(':');
-    const key = pair.slice(0, idx).trim();
-    const value = pair.slice(idx + 1).trim();
-    if (key) result[key] = value;
-  }
-
-  private columnCondition(
-    field: { key: string; isCustom: boolean },
-    value: string,
-  ): Prisma.StopParcelWhereInput | null {
-    if (field.isCustom) {
-      return { customFields: { path: [field.key], equals: value } };
-    }
-    const column = BUILTIN_FIELD_COLUMNS[field.key];
-    return column ? ({ [column]: value } as Prisma.StopParcelWhereInput) : null;
-  }
-
   /**
    * DATABASE_LOOKUP always searches the raw scanned text against every active
    * searchable column. ENCODED_BARCODE searches only the fields the decode
@@ -436,12 +379,7 @@ export class BarcodeService {
   ): Promise<MatchedParcel | null> {
     if (searchableFields.length === 0) return null;
 
-    const targetedOr = searchableFields
-      .map((f) => (decoded[f.key] !== undefined ? this.columnCondition(f, decoded[f.key]) : null))
-      .filter((c): c is Prisma.StopParcelWhereInput => c !== null);
-    const rawOr = searchableFields
-      .map((f) => this.columnCondition(f, rawValue))
-      .filter((c): c is Prisma.StopParcelWhereInput => c !== null);
+    const { targetedOr, rawOr } = buildMatchConditions(searchableFields, decoded, rawValue);
 
     const include = { stop: { include: { job: true, customer: true } } } as const;
 

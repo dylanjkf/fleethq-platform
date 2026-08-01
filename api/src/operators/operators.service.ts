@@ -235,9 +235,23 @@ export class OperatorsService {
     });
   }
 
-  async requireOperator(tx: Prisma.TransactionClient, companyId: string, id: string) {
+  /**
+   * The shared operator-ownership guard reused across services (a 404s for an
+   * unknown/cross-tenant operator). `allowArchived` defaults to `true` — this
+   * service's own update/archive callers accept an archived operator — but a
+   * caller that must reject archived operators too (Compliance/Jobs/Maintenance/
+   * Messages, where you can't file a document, assign work, or message a retired
+   * operator) passes `{ allowArchived: false }` to fold that check in without a
+   * second lookup.
+   */
+  async requireOperator(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    id: string,
+    { allowArchived = true }: { allowArchived?: boolean } = {},
+  ) {
     const operator = await tx.operator.findUnique({ where: { id } });
-    if (!operator || operator.companyId !== companyId) {
+    if (!operator || operator.companyId !== companyId || (!allowArchived && operator.archivedAt)) {
       throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
     }
     return operator;

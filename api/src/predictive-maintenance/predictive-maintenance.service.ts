@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 const PATTERN_WINDOW_DAYS = 180;
 const RECURRING_FAULT_MIN_COUNT = 2;
@@ -54,9 +55,14 @@ export class PredictiveMaintenanceService {
     return this.prisma.withTenant(companyId, async (tx) => {
       const windowStart = new Date(Date.now() - PATTERN_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
+      // Every fault in the pattern window is loaded and reduced in JS (grouped by
+      // asset/title below), so cap the read: MAX_AGGREGATION_ROWS is far above any
+      // real fleet's fault count in a 180-day window, but a hard bound so a
+      // pathological history can't turn this into an unbounded scan.
       const faults: FaultRow[] = await tx.maintenanceJob.findMany({
         where: { createdAt: { gte: windowStart } },
         select: { id: true, assetId: true, title: true, createdAt: true },
+        take: MAX_AGGREGATION_ROWS,
       });
 
       const pairings = await tx.graphRelationship.findMany({

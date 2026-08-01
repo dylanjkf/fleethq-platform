@@ -131,4 +131,42 @@ export class DepotsService {
     }
     return depot;
   }
+
+  /** Finds an active depot by exact (case-insensitive) name — the import de-dup matcher. */
+  async findByName(tx: Prisma.TransactionClient, companyId: string, name: string) {
+    return tx.depot.findFirst({
+      where: { companyId, archivedAt: null, name: { equals: name, mode: 'insensitive' } },
+    });
+  }
+
+  /**
+   * Natural-key upsert used by the CSV bulk-import / Integration Sync path: an
+   * incoming row whose (case-insensitive) name already matches a live depot is
+   * treated as that existing depot rather than inserted again, so re-importing
+   * the same directory is idempotent (the audit found re-imports duplicated
+   * every row). A genuinely new name is created exactly as `create()` would
+   * (same write + Timeline event). The `depots_company_id_name_active_key`
+   * partial-unique index (migration 20260801100000) is the race-safe backstop:
+   * a concurrent insert that wins the same name surfaces as P2002, which is
+   * re-resolved to the now-existing row. `created` lets the importer report an
+   * insert vs. a de-dup skip without a new result field.
+   */
+  async importByName(
+    companyId: string,
+    actorUserId: string | undefined,
+    dto: CreateDepotDto,
+  ): Promise<{ id: string; created: boolean }> {
+    const existing = await this.prisma.withTenant(companyId, (tx) => this.findByName(tx, companyId, dto.name));
+    if (existing) return { id: existing.id, created: false };
+    try {
+      const depot = await this.create(companyId, actorUserId, dto);
+      return { id: depot.id, created: true };
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const raced = await this.prisma.withTenant(companyId, (tx) => this.findByName(tx, companyId, dto.name));
+        if (raced) return { id: raced.id, created: false };
+      }
+      throw err;
+    }
+  }
 }
