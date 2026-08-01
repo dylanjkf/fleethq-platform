@@ -50,19 +50,21 @@ memory.
   only and creates no demo accounts. `apps/api/prisma/seed.ts:22` (the default
   password constant) and `apps/api/prisma/seed.ts:162-165` (the production
   short-circuit).
-- **The production deploy runs the seed with `NODE_ENV=production` so only the
-  safe half executes.** The deploy workflow's seed step sets
-  `NODE_ENV: production` explicitly, so a production deploy runs the reference-
-  data + system-role reconciliation path (`seedReferenceData`) and nothing that
-  plants an account. `.github/workflows/deploy-api.yml:110-117` and the
-  reference-only path at `apps/api/prisma/seed.ts:139-150`. Together these two
-  controls close what would otherwise be a canonical Cyber Essentials failure —
-  default credentials on a live system.
-- **No long-lived platform credentials sit in the pipeline.** The deploy job
-  assumes an AWS role via OIDC (`permissions: id-token: write`, no stored access
-  keys) and pulls the real database and app secrets from Secrets Manager at run
-  time, then rotates the app/auth DB role passwords as an idempotent step.
-  `.github/workflows/deploy-api.yml:18-20`, `:36-40`, and `:77-87`.
+- **The production seed only runs its safe half when `NODE_ENV=production`.** The
+  reference-data + system-role reconciliation path (`seedReferenceData`) runs and
+  nothing that plants an account does. `apps/api/prisma/seed.ts` (production
+  short-circuit). On Railway the migrations run automatically on deploy
+  (`api/docker-entrypoint.sh`); the operator sets `NODE_ENV=production` in the
+  service's environment. Together with the demo-tenant gate above, this closes
+  what would otherwise be a canonical Cyber Essentials failure — default
+  credentials on a live system.
+- **No default database credentials survive to production.** Runtime secrets are
+  supplied as **Railway Variables** (not baked into the image or repo), and the DB
+  app/auth role passwords are rotated out of their dev defaults with
+  `npm run db:rotate-role-passwords`; env fail-fast refuses to boot if a
+  known dev-only password remains. *(A keyless OIDC deploy pipeline pulling
+  secrets from a managed secret store — AWS Secrets Manager — is ⏳ planned, not
+  the current arrangement.)*
 
 ### Hardened HTTP surface
 
@@ -109,7 +111,7 @@ memory.
 
 | Gap | Severity | Plan |
 |-----|----------|------|
-| The schema-owning `DATABASE_URL` (the high-privilege, RLS-bypassing owner role) is required at boot for the serving process (`REQUIRED_ALWAYS`, `apps/api/src/config/env.validation.ts:37-42`) and injected into the long-running request-serving ECS task, even though no request-path code reads it — `PrismaService` binds `APP_DATABASE_URL` and `SystemPrismaService` binds `AUTH_DATABASE_URL`. This needlessly keeps an RLS-defeating credential in the request process's environment (widening RCE/SSRF/log-leak blast radius). | medium | Stop injecting `DATABASE_URL` into the runtime task definition (`infra/terraform/modules/api-service/main.tf`), scoping it to the migrate/seed/rotate job only, and change `validateEnv` to require it for tooling contexts (e.g. a `MIGRATE` flag) rather than for the serving process. |
+| The schema-owning `DATABASE_URL` (the high-privilege, RLS-bypassing owner role) is required at boot for the serving process (`REQUIRED_ALWAYS`, `apps/api/src/config/env.validation.ts:37-42`) and is present in the serving process's environment, even though no request-path code reads it — `PrismaService` binds `APP_DATABASE_URL` and `SystemPrismaService` binds `AUTH_DATABASE_URL`. This needlessly keeps an RLS-defeating credential in the request process's environment (widening RCE/SSRF/log-leak blast radius). | medium | Scope `DATABASE_URL` to the migrate/seed/rotate context only (not the serving process's environment), and change `validateEnv` to require it for tooling contexts (e.g. a `MIGRATE` flag) rather than for the serving process. |
 | `NODE_ENV` is never validated against an allowlist. The production-only hardening in `validateEnv` — the JWT strength/placeholder gate and the dev-DB-password gate — is keyed on the exact string `NODE_ENV === 'production'` (`apps/api/src/config/env.validation.ts:46`), so a deploy that sets `prod`, `Production`, or leaves it unset would evaluate `isProduction = false` and silently skip both checks with no error. | low | In `validateEnv`, assert `NODE_ENV` is one of an allowed set (`production`/`staging`/`development`/`test`) and fail closed on anything else, so a misspelt environment cannot quietly disable production hardening. |
 | The 15 MB JSON body limit is applied globally (`app.useBodyParser('json', { limit: '15mb' })`, `apps/api/src/main.ts:29`), so every endpoint — not just base64 photo/attachment routes — accepts up to 15 MB, a wider memory/DoS amplification surface than necessary. | low | Keep a small default JSON limit globally (e.g. 256 KB–1 MB) and raise 15 MB only on the specific attachment/photo-ingest routes via a scoped body-parser. |
 

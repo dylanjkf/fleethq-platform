@@ -11,18 +11,28 @@
 Every control an auditor tests points to concrete, retrievable evidence. This is
 where each lives.
 
+Evidence pointers use the `api/…` layout of this repository. Rows marked
+**⏳ Planned** describe a target architecture that is **not yet built** (there is
+no Terraform / IaC in this repo) — do not present them to an auditor as
+implemented controls.
+
 | Control area | Evidence | Where / how to retrieve |
 |--------------|----------|--------------------------|
-| Tenant isolation (RLS) | Policy definitions + passing isolation test | `apps/api/prisma/migrations/*rls*`; `test/tenant-isolation.e2e-spec.ts`; live: `pg_policies` |
-| Access control / RBAC | Permission catalogue + guard + tests | `apps/api/src/common/permissions/`; `permission.guard.ts`; `docs/security/cyber-essentials/03-access-control.md` |
-| MFA | Implementation + tests | `apps/api/src/auth/mfa/`; `test/mfa.e2e-spec.ts` |
-| Audit trail | Append-only table + read endpoint + tests | migration `*_audit_log`; `src/audit/`; `test/audit-log.e2e-spec.ts`; live: query `audit_logs` |
-| Encryption (rest/transit) | IaC (KMS, force_ssl, TLS policies) | `infra/terraform/modules/{database,api-service,frontend}` |
-| CI security gates | Workflow runs (SAST/SCA/secret/IaC scans) | `.github/workflows/`; GitHub Actions run history |
-| Change management | PR history + required checks + migrations | GitHub PRs; `apps/api/prisma/migrations/`; CODEOWNERS |
-| Backup/DR | IaC + (once run) restore-drill record | `docs/security/cyber-essentials/backup-and-disaster-recovery.md`; drill log |
-| Monitoring/alerting | Metric filters + alarms + SNS | `infra/terraform/modules/monitoring` |
-| Data retention/erasure | Retention job + erasure code + tests | `src/retention/`; `src/privacy/`; `test/retention.e2e-spec.ts` |
+| Tenant isolation (RLS) | Policy definitions + passing isolation test | `api/prisma/migrations/*rls*`; `api/test/tenant-isolation.e2e-spec.ts`; live: `pg_policies` |
+| Access control / RBAC | Permission catalogue + guard + tests | `api/src/common/permissions/`; `api/src/common/guards/permission.guard.ts`; `docs/security/cyber-essentials/03-access-control.md` |
+| MFA | Implementation + tests | `api/src/auth/mfa/`; `api/test/mfa.e2e-spec.ts` |
+| Audit trail | Append-only table + read endpoint + tests | migration `*_audit_log`; `api/src/audit/`; `api/test/audit-log.e2e-spec.ts`; live: query `audit_logs` |
+| Privacy Act export/erasure | Export + erasure code + audit events | `api/src/privacy/privacy.service.ts` |
+| Input validation / rate limiting | DTO whitelist + throttler | `api/src/main.ts` (ValidationPipe); `api/src/app.module.ts` (ThrottlerModule) |
+| Encryption (rest/transit) | **⏳ Planned** — target IaC (KMS, force_ssl, TLS policies) does **not** exist. In transit is provided by the managed edge (Railway/Vercel) + `sslmode=require` in the DB URLs; at rest is the managed platform's default. | No repo artifact — reclassified to Planned |
+| Application CI gate | Workflow runs (lint/typecheck/migrate/seed/build/test) | `.github/workflows/api-ci.yml`; GitHub Actions run history |
+| Supply-chain updates | Dependabot config + PRs | `.github/dependabot.yml`; GitHub Dependabot PRs |
+| SAST / secret / IaC scan gates | **⏳ Planned** — no `security-scan.yml` / `terraform-ci.yml`; CodeQL, gitleaks, and tfsec are not wired | No repo artifact — reclassified to Planned |
+| Change management | PR history + required checks + migrations | GitHub PRs; `api/prisma/migrations/` *(no CODEOWNERS committed yet — Planned)* |
+| Restore-drill (schema round-trip) | Scheduled dump/restore drill | `.github/workflows/restore-drill.yml`; `api/scripts/restore-drill.sh`; Actions run history |
+| Backup/DR (managed DB) | **⏳ Planned** — PITR / cross-region / multi-AZ IaC does **not** exist | `docs/security/cyber-essentials/backup-and-disaster-recovery.md` |
+| Monitoring/alerting | **⏳ Planned** — metric filters + alarms + SNS not built (no monitoring IaC) | reclassified to Planned |
+| Data retention/erasure | Erasure code + tests | `api/src/privacy/`; retention job (verify present) |
 | Risk management | Risk register | `docs/compliance/risk-register.md` |
 | Policies + approvals | Policy set + sign-off log | `docs/compliance/security-policies.md`; `governance-execution.md` §2.2 |
 | Incident management | Plan + (any) incident records | `docs/security/cyber-essentials/incident-response.md` |

@@ -12,6 +12,7 @@
     "start": "node dist/main.js",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "typecheck": "tsc --noEmit",
+    "docs:api": "node scripts/generate-api-reference.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "prisma:generate": "prisma generate",

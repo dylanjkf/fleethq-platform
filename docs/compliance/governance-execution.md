@@ -61,9 +61,12 @@ personal data (drafts exist in `FleetOS-Playbook/20-Legal`).
 
 | Sub-processor | Purpose | Data shared | DPA status | Last reviewed |
 |---------------|---------|-------------|-----------|---------------|
-| Amazon Web Services (ap-southeast-2) | Hosting, storage, DB | All tenant data (encrypted) | ☐ Execute | ______ |
-| Stripe | Billing / payments | Billing contact, card (Stripe-held) | ☐ Execute | ______ |
-| AWS SES | Transactional email | Recipient email, message content | ☐ Execute (covered by AWS DPA) | ______ |
+| Railway | API hosting + managed Postgres | All tenant data | ☐ Execute | ______ |
+| Vercel | Frontend (SPA) hosting | No tenant data at rest (static assets); requests proxied to the API | ☐ Execute | ______ |
+| Stripe (when billing enabled) | Billing / payments | Billing contact, card (Stripe-held) | ☐ Execute | ______ |
+| Email provider, e.g. AWS SES (when email enabled) | Transactional email | Recipient email, message content | ☐ Execute | ______ |
+| Sentry (when error-tracking enabled) | Error monitoring | Error diagnostics (scrubbed) | ☐ Execute | ______ |
+| *(AWS-hosted topology)* | *Planned future option — not currently used* | — | *n/a until adopted* | ______ |
 
 Each sub-processor is itself ISO 27001 / SOC 2 attested; retain their current
 reports on file and review annually.
@@ -88,7 +91,7 @@ Complete for every staff member / contractor with access to FleetOS systems.
 - ☐ FleetOS access revoked (membership deactivated — immediate + audited)
 - ☐ Tokens invalidated (tokenVersion bump / password reset)
 - ☐ Company assets returned
-- ☐ Removed from sub-processor consoles (AWS/Stripe/etc.)
+- ☐ Removed from sub-processor consoles (Railway/Vercel/Stripe/etc.)
 
 ## Status
 

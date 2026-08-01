@@ -16,19 +16,21 @@ that access to it is controlled and recorded.
   filtered in application code. `apps/api/src/prisma/prisma.service.ts`; see
   [03-access-control.md](./03-access-control.md). Exercised by
   `apps/api/test/tenant-isolation.e2e-spec.ts`.
-- **Encryption at rest.** RDS storage is encrypted with a customer-managed KMS
-  key with rotation enabled (`infra/terraform/modules/database/main.tf` —
-  `aws_kms_key.rds`, `storage_encrypted`). S3 attachment and site buckets use
-  SSE-KMS, are versioned, and have full public-access blocks
-  (`infra/terraform/modules/api-service/main.tf`,
-  `infra/terraform/modules/frontend/main.tf`).
-- **Encryption in transit.** TLS 1.2/1.3 is terminated at CloudFront/ALB with
-  HTTP→HTTPS redirect and HSTS (preload), and connections to the database are now
-  forced onto TLS (`rds.force_ssl=1` + `sslmode=require`). See
+- **Encryption at rest.** ⏳ **Planned — not built in this repo.** The target is
+  RDS storage encrypted with a customer-managed, rotating KMS key and SSE-KMS,
+  versioned, public-access-blocked S3 buckets — but there is **no IaC** defining
+  any of it. At-rest encryption today is whatever the managed platform (Railway
+  Postgres, and S3 if `ATTACHMENTS_BUCKET` is configured) provides by default.
+- **Encryption in transit.** TLS 1.2/1.3 is terminated by the managed edge
+  (Railway/Vercel) with HTTP→HTTPS redirect, the API advertises strong HSTS, and
+  DB connection strings request `sslmode=require`. Server-side forced DB TLS
+  (`rds.force_ssl`) is ⏳ planned. See
   [01-secure-network-architecture.md](./01-secure-network-architecture.md).
 - **Secrets never at rest in the app image.** Database credentials and the JWT
-  secret are injected from AWS Secrets Manager at container start, never baked
-  into the image or task definition. `infra/terraform/modules/api-service/main.tf`.
+  secret are supplied as **environment variables (Railway Variables)** at runtime,
+  never baked into the image or the repository. Env fail-fast rejects a dev-only
+  credential in production. (A managed secret store such as AWS Secrets Manager is
+  a ⏳ planned option, not currently used.)
 - **Australian Privacy Act access & erasure.** An admin-initiated path exports
   an Operator's personal data (a machine-readable access request) and erases it
   by field-level redaction that keeps referencing records resolving —
@@ -52,17 +54,19 @@ that access to it is controlled and recorded.
 | **No retention or purge for GPS breadcrumb history.** `gps_pings` is append-only and grows unbounded; there is no policy that trims location history, which is personal information. | high | Add a retention window and a scheduled purge job for `gps_pings`, and document the retention period. |
 | Export/erase covers only the Operator data subject and only single records — there is no customer-subject path and no tenant-wide export. | medium | Extend the data-subject tooling to Customer PII and add a tenant-level export for offboarding. |
 | No formal data classification. Sensitive fields (operator email/phone, customer contacts, compliance document numbers) are not tagged with a classification that drives handling rules. | medium | Introduce a lightweight data-classification scheme and map fields to it, informing masking, logging, and retention. |
-| The attachments bucket lacks an object **lifecycle** policy (old noncurrent versions are retained indefinitely). *(A TLS-only `aws:SecureTransport` deny bucket policy is now in place — `infra/terraform/modules/api-service`.)* | low | Add a lifecycle policy to expire noncurrent versions after the erasure/retention window. |
+| The attachments bucket (once configured) would lack an object **lifecycle** policy, and a TLS-only `aws:SecureTransport` deny bucket policy is **⏳ planned, not built** (no IaC / no bucket defined in this repo). | low | When the S3 backend is provisioned, add the TLS-only bucket policy and a lifecycle policy to expire noncurrent versions after the erasure/retention window. |
 
 ## Standards mapping
 
-**Cyber Essentials:** *Secure configuration* (data protection). Encryption in
-transit and at rest, tenant isolation, and a deletion path are in place; erasure
-completeness and retention are the open items.
+**Cyber Essentials:** *Secure configuration* (data protection). Tenant isolation,
+in-transit encryption (managed edge), and a deletion path are in place;
+encryption **at rest** is ⏳ planned (no KMS/IaC — currently the platform default),
+and erasure completeness and retention are open items.
 
-**ISO/IEC 27001:2022 Annex A:** A.8.24 (cryptography) — met; A.8.10 (information
-deletion) — partial (erasure defeated by S3 versioning); A.5.12 (classification)
-— not yet implemented; A.8.11/8.12 (masking / leakage prevention) — partial.
+**ISO/IEC 27001:2022 Annex A:** A.8.24 (cryptography) — partial (in-transit met;
+KMS-at-rest planned); A.8.10 (information deletion) — partial (erasure defeated by
+S3 versioning where S3 is used); A.5.12 (classification) — not yet implemented;
+A.8.11/8.12 (masking / leakage prevention) — partial.
 
 **SOC 2 (2017 TSC):** CC6.5/CC6.7 (data protection & disposal), and the
 Confidentiality criteria C1.1/C1.2 (identification and disposal of confidential

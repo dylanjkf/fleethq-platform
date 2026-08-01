@@ -1,0 +1,88 @@
+name: restore-drill
+
+# Scheduled proof that the database dump/restore path still works end to end.
+#
+# Backups being *configured* is not the same as a restore being *proven*. This
+# workflow stands up a throwaway Postgres, applies the real migrations and seed,
+# then runs api/scripts/restore-drill.sh — which dumps the database, restores the
+# dump into a scratch database, and fails if the restored copy does not match the
+# source row-for-row on the key tables. A schema/restore drift (e.g. a migration
+# that does not round-trip through pg_dump/pg_restore) therefore fails this
+# scheduled run instead of being discovered during a real recovery.
+#
+# NOTE: this drills the dump/restore *script* against a freshly-seeded database in
+# CI. It does NOT prove production RPO/RTO against a live managed database — that
+# requires a timed restore in the real (Railway/AWS) environment and is still an
+# open item (see docs/security/cyber-essentials/backup-and-disaster-recovery.md).
+
+on:
+  schedule:
+    # 03:00 UTC every Monday.
+    - cron: '0 3 * * 1'
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: api
+
+env:
+  # Mirrors api-ci.yml. DATABASE_URL is the schema-owner/superuser connection the
+  # drill needs: restore-drill.sh runs CREATE/DROP DATABASE (needs CREATEDB) and
+  # pg_dump/pg_restore, so it must not be one of the low-privilege runtime roles.
+  DATABASE_URL: postgresql://fleetos:fleetos_dev_only@localhost:5432/fleetos?schema=public
+  APP_DATABASE_URL: postgresql://fleetos_app:fleetos_app_dev_only@localhost:5432/fleetos?schema=public
+  AUTH_DATABASE_URL: postgresql://fleetos_auth:fleetos_auth_dev_only@localhost:5432/fleetos?schema=public
+  ADMIN_DATABASE_URL: postgresql://fleetos_admin:fleetos_admin_dev_only@localhost:5432/fleetos?schema=public
+  JWT_SECRET: ci-test-secret
+  JWT_EXPIRES_IN: 12h
+  ADMIN_JWT_SECRET: ci-test-admin-secret
+  ADMIN_JWT_EXPIRES_IN: 12h
+  INTEGRATION_CREDENTIAL_KEY: "JdKT12mhp2Qmo/Hh9ml7kOgmb6CZsMeSe+wW6ViXam0="
+
+jobs:
+  restore-drill:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fleetos
+          POSTGRES_PASSWORD: fleetos_dev_only
+          POSTGRES_DB: fleetos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleetos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install a matching PostgreSQL 16 client (pg_dump/pg_restore/psql)
+        # pg_dump must be >= the server major version; pin the client to 16 to
+        # match the postgres:16 service regardless of the runner's default.
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply migrations (creates schema, RLS policies, and the fleetos_* roles)
+        run: npm run prisma:migrate:deploy
+
+      - name: Seed (reference data + a representative dataset for the drill to restore)
+        run: npm run seed
+
+      - name: Restore drill (dump -> restore into scratch DB -> row-count parity)
+        # DATABASE_URL (env, above) is the connection restore-drill.sh dumps and
+        # creates the scratch database from; ADMIN_URL defaults inside the script
+        # to the same host's `postgres` maintenance DB for CREATE/DROP DATABASE.
+        run: ./scripts/restore-drill.sh

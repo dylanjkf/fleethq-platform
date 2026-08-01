@@ -58,7 +58,8 @@ cross-tenant, pre-authentication events (failed logins) an auditor needs.
     canonical `AUDIT_ACTIONS` catalog, so a new audited action must be declared
     there — an ad-hoc/typo'd action string fails to compile. High-signal actions
     (privilege changes, data export/erase) are additionally mirrored to stdout
-    (`STDOUT_MIRRORED_ACTIONS`) so the CloudWatch alarms below can see them.
+    (`STDOUT_MIRRORED_ACTIONS`) so that a log-based alerting layer can key on them
+    *once one exists* (see Gaps — no such alerting is wired today).
 - **Tenant-scoped read path.** `GET /v1/audit-logs` returns the calling company's
   own trail, paginated and filterable by action, outcome, actor, target type, and
   a from/to date range, RLS-scoped so one tenant can never read another's events,
@@ -82,16 +83,19 @@ cross-tenant, pre-authentication events (failed logins) an auditor needs.
   into structured (`nestjs-pino`) logs, so an audit event, an application log line,
   and an error report can be correlated. `apps/api/src/main.ts` and the logging
   setup.
-- **Error monitoring wiring.** Sentry is integrated for 5xx responses.
-  `apps/api/src/instrument.ts`.
-- **Infrastructure alarms.** CloudWatch alarms cover infrastructure health (ECS
-  task health, database, load balancer). `infra/terraform/modules/monitoring/main.tf`.
+- **Error monitoring wiring.** Sentry is integrated for 5xx responses (inert
+  until `SENTRY_DSN` is set). `apps/api/src/instrument.ts`.
+- **Infrastructure alarms.** ⏳ **Planned — not built.** CloudWatch (or
+  equivalent) alarms over infrastructure health (task health, database, load
+  balancer) require the managed-monitoring infrastructure, which does not exist
+  in this repo (no IaC). The managed platform (Railway) surfaces basic service
+  health, but no repo-defined alarms are configured.
 
 ## Gaps & residual risk
 
 | Gap | Severity | Plan |
 |-----|----------|------|
-| ~~No alerting on any security signal.~~ **Resolved.** CloudWatch metric filters over the application logs now alarm on failed-login spikes, account-lockout bursts, permission-denial spikes (authz probing), privilege-change bursts, and personal-data export/erase bursts, wired to the alerts SNS topic. Account-level threat detection (GuardDuty findings → alerts topic) and a tamper-evident multi-region CloudTrail were also added. `infra/terraform/modules/monitoring/{main,threat-detection}.tf`. | resolved | Remaining polish: alert specifically on audit-*write-failure* log lines. |
+| **No alerting on any security signal.** The audit log *records* failed-login spikes, account-lockout bursts, permission-denial spikes (authz probing), privilege-change bursts, and personal-data export/erase bursts — but nothing evaluates or alerts on them. The previously-claimed CloudWatch metric filters + SNS, GuardDuty threat detection, and multi-region CloudTrail are **⏳ planned target infrastructure and do NOT exist** (no IaC, no `infra/terraform/modules/monitoring`). | high | Build the managed monitoring/alerting layer (metric filters on the mirrored log lines → an alerts channel; account-level threat detection; a tamper-evident audit trail off-box), or an equivalent on the managed platform. |
 | Application-level error alerting is inert by default. `SENTRY_DSN` is unset until a Sentry project exists, so 5xx errors are captured to logs but do not page anyone. | medium | Create the Sentry project and set the DSN secret; add a release-health alert rule. |
 | System/pre-tenant events (failed logins, lockouts) have no in-app review surface — they are `company_id = null` and invisible to `/v1/audit-logs` by design. | medium | Add a platform-operator (super-admin) view over the system-level audit rows, distinct from the tenant endpoint. |
 | No defined retention, archival, or tamper-evidence beyond the append-only grants. The table cannot be edited from the app, but there is no retention policy, off-box archival, or cryptographic chaining. | low | Define an audit-log retention/archival policy (e.g. ship to immutable object storage with object-lock); consider hash-chaining for tamper-evidence. |
