@@ -119,6 +119,66 @@ describe('Security audit log', () => {
     await request(app.getHttpServer()).get('/v1/audit-logs').set('Authorization', `Bearer ${auth}`).expect(403);
   });
 
+  it('exports the audit log as a CSV download with the expected header row and the tenant\'s events', async () => {
+    const tenant = await createTestTenant(FULL);
+    const auth = await token(tenant.username);
+
+    // Generate a deterministic, synchronously-recorded event to appear in the CSV.
+    const operator = await request(app.getHttpServer())
+      .post('/v1/operators')
+      .set('Authorization', `Bearer ${auth}`)
+      .send({ fullName: 'Export Target' })
+      .expect(201);
+    await request(app.getHttpServer())
+      .get(`/v1/operators/${operator.body.id}/data-export`)
+      .set('Authorization', `Bearer ${auth}`)
+      .expect(200);
+
+    const res = await request(app.getHttpServer())
+      .get('/v1/audit-logs/export')
+      .set('Authorization', `Bearer ${auth}`)
+      .expect(200);
+
+    expect(res.headers['content-type']).toContain('text/csv');
+    expect(res.headers['content-disposition']).toMatch(/attachment; filename="audit-log-.*\.csv"/);
+
+    const lines = res.text.split('\r\n');
+    expect(lines[0]).toBe('id,createdAt,action,outcome,actorUserId,actorLabel,targetType,targetId,ip,requestId,metadata');
+    // The privacy export event is in the CSV body, scoped to this tenant.
+    expect(res.text).toContain('privacy.data_exported');
+    expect(res.text).toContain(operator.body.id);
+  });
+
+  it('honours the same filters as the browse when exporting', async () => {
+    const tenant = await createTestTenant(FULL);
+    const auth = await token(tenant.username);
+    const operator = await request(app.getHttpServer())
+      .post('/v1/operators')
+      .set('Authorization', `Bearer ${auth}`)
+      .send({ fullName: 'Filter Target' })
+      .expect(201);
+    await request(app.getHttpServer())
+      .get(`/v1/operators/${operator.body.id}/data-export`)
+      .set('Authorization', `Bearer ${auth}`)
+      .expect(200);
+
+    // A filter that matches no rows yields a header-only CSV.
+    const res = await request(app.getHttpServer())
+      .get('/v1/audit-logs/export')
+      .query({ action: 'auth.mfa_disabled' })
+      .set('Authorization', `Bearer ${auth}`)
+      .expect(200);
+    const lines = res.text.split('\r\n').filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    expect(res.text).not.toContain('privacy.data_exported');
+  });
+
+  it('requires audit:view to export the log', async () => {
+    const noPerm = await createTestTenant([PERMISSIONS.OPERATORS_CREATE]);
+    const auth = await token(noPerm.username);
+    await request(app.getHttpServer()).get('/v1/audit-logs/export').set('Authorization', `Bearer ${auth}`).expect(403);
+  });
+
   it('is tenant-isolated — one company never sees another company\'s events', async () => {
     const a = await createTestTenant(FULL);
     const b = await createTestTenant(FULL);

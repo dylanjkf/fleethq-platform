@@ -3,6 +3,7 @@ import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 import { ListAuditLogsDto } from './dto/list-audit-logs.dto';
 
 /** Canonical action names for the security audit log (dot-namespaced). */
@@ -174,21 +175,71 @@ export class AuditService {
   /** A tenant's audit log, newest first — company-scoped by RLS. */
   async list(companyId: string, query: ListAuditLogsDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const createdAt: Prisma.DateTimeFilter = {};
-      if (query.from) createdAt.gte = new Date(query.from);
-      if (query.to) createdAt.lte = new Date(query.to);
-      const where: Prisma.AuditLogWhereInput = {
-        ...(query.action ? { action: query.action } : {}),
-        ...(query.outcome ? { outcome: query.outcome } : {}),
-        ...(query.actorUserId ? { actorUserId: query.actorUserId } : {}),
-        ...(query.targetType ? { targetType: query.targetType } : {}),
-        ...(query.from || query.to ? { createdAt } : {}),
-      };
+      const where = this.buildWhere(query);
       const [items, total] = await Promise.all([
         tx.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, skip: query.skip, take: query.take }),
         tx.auditLog.count({ where }),
       ]);
       return { items, total, page: query.page ?? 1, pageSize: query.take };
     });
+  }
+
+  /**
+   * The same audit trail as `list`, but the whole filtered set as a downloadable
+   * CSV (an auditor hands a spreadsheet to compliance rather than paging a UI).
+   * Same RLS tenant-scoping and same filters (action/outcome/actor/target/date
+   * window) — it just drops pagination and streams every matching row, bounded
+   * by MAX_AGGREGATION_ROWS so a pathological trail can't load unboundedly.
+   */
+  async exportCsv(companyId: string, query: ListAuditLogsDto): Promise<{ filename: string; csv: string }> {
+    const rows = await this.prisma.withTenant(companyId, (tx) =>
+      tx.auditLog.findMany({
+        where: this.buildWhere(query),
+        orderBy: { createdAt: 'desc' },
+        take: MAX_AGGREGATION_ROWS,
+      }),
+    );
+
+    const header = ['id', 'createdAt', 'action', 'outcome', 'actorUserId', 'actorLabel', 'targetType', 'targetId', 'ip', 'requestId', 'metadata'];
+    const lines = [header.join(',')];
+    for (const row of rows) {
+      lines.push(
+        [
+          row.id,
+          row.createdAt.toISOString(),
+          row.action,
+          row.outcome,
+          row.actorUserId ?? '',
+          row.actorLabel ?? '',
+          row.targetType ?? '',
+          row.targetId ?? '',
+          row.ip ?? '',
+          row.requestId ?? '',
+          row.metadata === null || row.metadata === undefined ? '' : JSON.stringify(row.metadata),
+        ]
+          .map((value) => this.csvCell(value))
+          .join(','),
+      );
+    }
+    const filename = `audit-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    return { filename, csv: lines.join('\r\n') };
+  }
+
+  private buildWhere(query: ListAuditLogsDto): Prisma.AuditLogWhereInput {
+    const createdAt: Prisma.DateTimeFilter = {};
+    if (query.from) createdAt.gte = new Date(query.from);
+    if (query.to) createdAt.lte = new Date(query.to);
+    return {
+      ...(query.action ? { action: query.action } : {}),
+      ...(query.outcome ? { outcome: query.outcome } : {}),
+      ...(query.actorUserId ? { actorUserId: query.actorUserId } : {}),
+      ...(query.targetType ? { targetType: query.targetType } : {}),
+      ...(query.from || query.to ? { createdAt } : {}),
+    };
+  }
+
+  /** RFC 4180 escaping: quote a field that contains a comma, quote or newline, doubling any inner quote. */
+  private csvCell(value: string): string {
+    return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
   }
 }

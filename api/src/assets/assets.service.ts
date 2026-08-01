@@ -114,10 +114,7 @@ export class AssetsService {
 
   async update(companyId: string, actorUserId: string, id: string, dto: UpdateAssetDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.asset.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-      }
+      const existing = await this.requireAsset(tx, companyId, id);
 
       const changed: Record<string, { from: unknown; to: unknown }> = {};
       const scalarFields = [
@@ -181,10 +178,7 @@ export class AssetsService {
 
   async archive(companyId: string, actorUserId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await tx.asset.findUnique({ where: { id } });
-      if (!existing || existing.companyId !== companyId) {
-        throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-      }
+      const existing = await this.requireAsset(tx, companyId, id);
       if (existing.archivedAt) {
         return existing;
       }
@@ -291,6 +285,14 @@ export class AssetsService {
   async getGloveboxDocumentFile(companyId: string, assetId: string, documentId: string) {
     await this.findOne(companyId, assetId); // 404s a cross-tenant / unknown asset first.
     return this.complianceService.getDocumentFile(companyId, documentId, { assetId });
+  }
+
+  async requireAsset(tx: Prisma.TransactionClient, companyId: string, id: string) {
+    const asset = await tx.asset.findUnique({ where: { id } });
+    if (!asset || asset.companyId !== companyId) {
+      throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
+    }
+    return asset;
   }
 
   /**

@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { CreatePlanDto, CreateTemplateDto, DeployTemplateDto, UpdatePlanDto, UpdateTemplateDto } from './dto/schedule.dto';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -21,7 +23,82 @@ interface ScheduleItem {
  */
 @Injectable()
 export class MaintenanceSchedulesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  /**
+   * Alert the office about per-asset maintenance plans that have just crossed
+   * into "due soon" or "overdue". Called per-company by the leader-elected
+   * SchedulerService (opt-in), the exact counterpart to
+   * ComplianceService.sweepExpiries. Idempotent: each plan carries
+   * dueAlertedAt / overdueAlertedAt marks, so an alert fires exactly once per
+   * stage over a service cycle — running the sweep twice, or every day, never
+   * re-notifies. Servicing a plan (or editing its due date) resets the marks,
+   * starting a fresh alert lifecycle for the next cycle. Fans out to every user
+   * holding maintenance:view, the same permission the schedules read uses.
+   *
+   * A plan's next-due date is derived (baseline + intervalDays), not a stored
+   * column, so — unlike the compliance sweep's DB-level expiry filter — the
+   * candidate set is the active, not-yet-alerted plans and due-ness is computed
+   * in JS, matching how listAllPlans already derives status. Runs inside a
+   * single per-tenant transaction (RLS scopes every query).
+   */
+  async sweepDue(companyId: string): Promise<{ due: number; overdue: number }> {
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const now = new Date();
+
+      // Overdue: past due and never alerted for it — the escalated case.
+      const overdueCandidates = await tx.assetMaintenancePlan.findMany({
+        where: { archivedAt: null, overdueAlertedAt: null },
+        include: { asset: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+      });
+      let overdue = 0;
+      for (const plan of overdueCandidates) {
+        const nextDueAt = this.nextDueAt(plan);
+        if (nextDueAt.getTime() >= now.getTime()) continue;
+        await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.MAINTENANCE_VIEW, {
+          type: 'maintenance_overdue',
+          title: `${plan.label} for ${plan.asset.name} is overdue`,
+          body: `Was due ${nextDueAt.toLocaleDateString('en-AU')}.`,
+          linkPath: '/maintenance-schedules',
+        });
+        await tx.assetMaintenancePlan.update({ where: { id: plan.id }, data: { overdueAlertedAt: now } });
+        overdue += 1;
+      }
+
+      // Due soon: in the [today .. +14d] window, not yet alerted for due, and
+      // not already past due (handled as overdue above).
+      const dueCandidates = await tx.assetMaintenancePlan.findMany({
+        where: { archivedAt: null, dueAlertedAt: null },
+        include: { asset: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+      });
+      let due = 0;
+      for (const plan of dueCandidates) {
+        const nextDueAt = this.nextDueAt(plan);
+        const daysUntilDue = Math.round((nextDueAt.getTime() - now.getTime()) / DAY_MS);
+        if (daysUntilDue < 0 || daysUntilDue > DUE_SOON_DAYS) continue;
+        await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.MAINTENANCE_VIEW, {
+          type: 'maintenance_due',
+          title: `${plan.label} for ${plan.asset.name} is due in ${daysUntilDue} day${daysUntilDue === 1 ? '' : 's'}`,
+          body: `Due ${nextDueAt.toLocaleDateString('en-AU')}.`,
+          linkPath: '/maintenance-schedules',
+        });
+        await tx.assetMaintenancePlan.update({ where: { id: plan.id }, data: { dueAlertedAt: now } });
+        due += 1;
+      }
+
+      return { due, overdue };
+    });
+  }
+
+  private nextDueAt(plan: { lastServiceAt: Date | null; createdAt: Date; intervalDays: number }): Date {
+    const baseline = plan.lastServiceAt ?? plan.createdAt;
+    return new Date(baseline.getTime() + plan.intervalDays * DAY_MS);
+  }
 
   /** Starter presets a customer can seed a template from (basic + heavy). */
   presets() {
@@ -203,23 +280,32 @@ export class MaintenanceSchedulesService {
   async updatePlan(companyId: string, id: string, dto: UpdatePlanDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
       await this.requirePlan(tx, companyId, id);
+      // Editing the interval or last-service date moves the derived next-due
+      // date, so a stale alert mark would wrongly suppress the next cycle's
+      // alert — reset both marks to start a fresh alert lifecycle, the same as
+      // a renewed compliance document being a new row.
+      const dueDateChanged = dto.intervalDays !== undefined || dto.lastServiceAt !== undefined;
       const plan = await tx.assetMaintenancePlan.update({
         where: { id },
         data: {
           label: dto.label?.trim(),
           intervalDays: dto.intervalDays,
           lastServiceAt: dto.lastServiceAt === undefined ? undefined : dto.lastServiceAt ? new Date(dto.lastServiceAt) : null,
+          ...(dueDateChanged ? { dueAlertedAt: null, overdueAlertedAt: null } : {}),
         },
       });
       return this.withStatus(plan, new Date());
     });
   }
 
-  /** Mark serviced now — resets the clock. */
+  /** Mark serviced now — resets the clock (and the alert lifecycle). */
   async servicePlan(companyId: string, id: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       await this.requirePlan(tx, companyId, id);
-      const plan = await tx.assetMaintenancePlan.update({ where: { id }, data: { lastServiceAt: new Date() } });
+      const plan = await tx.assetMaintenancePlan.update({
+        where: { id },
+        data: { lastServiceAt: new Date(), dueAlertedAt: null, overdueAlertedAt: null },
+      });
       return this.withStatus(plan, new Date());
     });
   }

@@ -904,6 +904,15 @@ model AssetMaintenancePlan {
   label         String
   intervalDays  Int       @map("interval_days")
   lastServiceAt DateTime? @map("last_service_at")
+  /// Idempotency marks for the maintenance-due alert sweep (SchedulerService),
+  /// mirroring ComplianceDocument.expiringAlertedAt / expiredAlertedAt. Set the
+  /// first time a plan's derived next-due date crosses into the "due soon"
+  /// window and the first time it crosses into "overdue", so the daily sweep
+  /// raises each alert exactly once per service cycle rather than every tick.
+  /// Reset to null when the plan is serviced or its due date is edited, so the
+  /// next service cycle starts a fresh alert lifecycle.
+  dueAlertedAt     DateTime? @map("due_alerted_at")
+  overdueAlertedAt DateTime? @map("overdue_alerted_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
   archivedAt    DateTime? @map("archived_at")
