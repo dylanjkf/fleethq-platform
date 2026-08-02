@@ -33,6 +33,23 @@ describe('isBlockedAddress', () => {
     }
   });
 
+  it('blocks NAT64-synthesised internal/metadata addresses (well-known 64:ff9b::/96)', () => {
+    for (const ip of [
+      '64:ff9b::a9fe:a9fe', // hex form of 169.254.169.254 (cloud metadata)
+      '64:ff9b::169.254.169.254', // dotted form of the same
+      '64:ff9b::7f00:1', // 127.0.0.1 loopback
+      '64:ff9b::10.0.0.1', // 10.0.0.1 private
+      '64:ff9b:0:0:0:0:a9fe:a9fe', // fully-expanded hex form
+    ]) {
+      expect(isBlockedAddress(ip)).toBe(true);
+    }
+  });
+
+  it('allows a NAT64 address whose embedded IPv4 is public', () => {
+    expect(isBlockedAddress('64:ff9b::808:808')).toBe(false); // 8.8.8.8
+    expect(isBlockedAddress('64:ff9b::8.8.8.8')).toBe(false);
+  });
+
   it('allows a public IPv6 address', () => {
     expect(isBlockedAddress('2001:4860:4860::8888')).toBe(false);
   });
@@ -60,7 +77,11 @@ describe('assertUrlAllowed', () => {
     await expect(assertUrlAllowed('not a url')).rejects.toBeInstanceOf(SsrfBlockedError);
   });
 
-  it('allows a public literal IP (resolves without external DNS, so hermetic)', async () => {
-    await expect(assertUrlAllowed('https://8.8.8.8/webhook')).resolves.toBeInstanceOf(URL);
+  it('allows a public literal IP (resolves without external DNS, so hermetic) and pins its address', async () => {
+    const result = await assertUrlAllowed('https://8.8.8.8/webhook');
+    expect(result.url).toBeInstanceOf(URL);
+    expect(result.url.href).toBe('https://8.8.8.8/webhook');
+    // The validated address is returned so safeFetch can pin the connection to it.
+    expect(result.addresses).toContain('8.8.8.8');
   });
 });

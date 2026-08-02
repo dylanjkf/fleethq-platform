@@ -39,4 +39,62 @@ export class BillingMailService {
       body: `Hi ${fullName},\n\nYour most recent payment for ${companyName}'s FleetOS subscription succeeded, and the account is no longer past due.\n\n${this.billingSettingsLink()}`,
     });
   }
+
+  /**
+   * Native (no-card) free-trial ending reminder — the email companion to the
+   * scheduled `BillingService.remindTrialEnding` in-app notification. Sent once
+   * per trial window (the notification marker guards against repeats).
+   */
+  async sendTrialEndingReminder(to: string, fullName: string, companyName: string, trialEndsAt: Date): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: `${companyName}'s FleetOS free trial ends on ${trialEndsAt.toLocaleDateString('en-AU')}`,
+      body: `Hi ${fullName},\n\n${companyName}'s FleetOS free trial ends on ${trialEndsAt.toLocaleDateString('en-AU')}. Choose a plan before then to keep full access to your fleet — nothing is deleted, but paid features become unavailable once the trial ends.\n\n${this.billingSettingsLink()}`,
+    });
+  }
+
+  /**
+   * Stripe-trial (card-on-file) conversion reminder — the email companion to the
+   * `customer.subscription.trial_will_end` webhook notification. Distinct from
+   * the native reminder above: here a payment method is on file and will be
+   * charged when the trial converts.
+   */
+  async sendTrialWillEnd(to: string, fullName: string, companyName: string, trialEnd: Date | null): Promise<void> {
+    const whenLine = trialEnd
+      ? `The trial ends on ${trialEnd.toLocaleDateString('en-AU')}, after which your payment method on file will be charged.`
+      : `The trial is ending soon, after which your payment method on file will be charged.`;
+    await this.channel.sendEmail({
+      to,
+      subject: `${companyName}'s FleetOS trial is ending soon`,
+      body: `Hi ${fullName},\n\n${whenLine} Review your plan or update your payment details if anything needs to change.\n\n${this.billingSettingsLink()}`,
+    });
+  }
+
+  /**
+   * Subscription-paused notice — the email companion to the
+   * `customer.subscription.paused` webhook notification.
+   */
+  async sendSubscriptionPaused(to: string, fullName: string, companyName: string): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: `${companyName}'s FleetOS subscription has been paused`,
+      body: `Hi ${fullName},\n\n${companyName}'s FleetOS subscription is currently paused and will not be billed until it resumes. Some paid features may be unavailable while it is paused.\n\nIf this was unexpected, review your billing settings or get in touch:\n\n${this.billingSettingsLink()}`,
+    });
+  }
+
+  /**
+   * Chargeback / payment-dispute alert — the URGENT email companion to the
+   * `charge.dispute.created` webhook notification. Disputes are time-boxed by
+   * Stripe, so this must reach billing:manage holders, not sit silently in-app.
+   */
+  async sendDisputeCreated(to: string, fullName: string, companyName: string, amount: string, dueBy: Date | null): Promise<void> {
+    const deadlineLine = dueBy
+      ? `Evidence must be submitted in Stripe before ${dueBy.toLocaleDateString('en-AU')}`
+      : `Evidence must be submitted in Stripe before the response deadline`;
+    await this.channel.sendEmail({
+      to,
+      subject: `Urgent: a ${amount} payment for ${companyName} was disputed`,
+      body: `Hi ${fullName},\n\nA cardholder has disputed a ${amount} payment on ${companyName}'s FleetOS account (a chargeback). ${deadlineLine}, or the disputed amount plus a dispute fee will be lost.\n\nReview and respond from your Stripe dashboard as soon as possible.\n\n${this.billingSettingsLink()}`,
+    });
+  }
 }

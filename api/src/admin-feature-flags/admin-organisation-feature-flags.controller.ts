@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Put, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Put, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
@@ -18,7 +18,7 @@ export class AdminOrganisationFeatureFlagsController {
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.FEATURE_FLAGS_VIEW)
   @Get()
-  list(@Param('companyId') companyId: string) {
+  list(@Param('companyId', ParseUUIDPipe) companyId: string) {
     return this.featureFlags.listForOrganisation(companyId);
   }
 
@@ -26,7 +26,7 @@ export class AdminOrganisationFeatureFlagsController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.FEATURE_FLAGS_MANAGE)
   @Put(':flagKey')
   setOverride(
-    @Param('companyId') companyId: string,
+    @Param('companyId', ParseUUIDPipe) companyId: string,
     @Param('flagKey') flagKey: string,
     @Body() dto: SetOverrideDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
@@ -41,7 +41,7 @@ export class AdminOrganisationFeatureFlagsController {
   @Delete(':flagKey')
   @HttpCode(HttpStatus.OK)
   async clearOverride(
-    @Param('companyId') companyId: string,
+    @Param('companyId', ParseUUIDPipe) companyId: string,
     @Param('flagKey') flagKey: string,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,

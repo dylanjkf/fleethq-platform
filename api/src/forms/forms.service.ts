@@ -10,6 +10,7 @@ import { SubmitFormDto } from './dto/submit-form.dto';
 import { ListFormSubmissionsDto } from './dto/list-form-submissions.dto';
 import { FormFieldDto, FormFieldType, isSelectType } from './dto/form-field.dto';
 import { FormAnswerDto } from './dto/form-answer.dto';
+import { assertOwnership } from '../common/ownership';
 
 /** The normalized field shape persisted in `fields` / `template_snapshot` JSON. */
 interface NormalizedField {
@@ -61,10 +62,11 @@ export class FormsService {
 
   /** Same guard as KnowledgeService: a cross-tenant id reads as "not found". */
   private async requireDocument(tx: Prisma.TransactionClient, companyId: string, documentId: string) {
-    const document = await tx.document.findUnique({ where: { id: documentId }, select: { companyId: true } });
-    if (!document || document.companyId !== companyId) {
-      throw new NotFoundException({ code: 'DOCUMENT_NOT_FOUND', message: 'Document not found.' });
-    }
+    await assertOwnership(tx.document, documentId, companyId, {
+      code: 'DOCUMENT_NOT_FOUND',
+      message: 'Document not found.',
+      allowArchived: true,
+    });
   }
 
   // ---- Templates (office-managed, FleetHQ) --------------------------------
@@ -457,30 +459,32 @@ export class FormsService {
         if (typeof value !== 'string') {
           throw new BadRequestException({ code: 'FORM_INVALID_VALUE', message: `Field "${field.label}" must reference an asset.` });
         }
-        const asset = await tx.asset.findUnique({ where: { id: value } });
-        if (!asset || asset.companyId !== companyId) {
-          throw new NotFoundException({ code: 'FORM_ASSET_NOT_FOUND', message: `Field "${field.label}" references an asset that doesn't exist.` });
-        }
+        await assertOwnership(tx.asset, value, companyId, {
+          code: 'FORM_ASSET_NOT_FOUND',
+          message: `Field "${field.label}" references an asset that doesn't exist.`,
+          allowArchived: true,
+        });
         return value;
       }
       case 'operator_ref': {
         if (typeof value !== 'string') {
           throw new BadRequestException({ code: 'FORM_INVALID_VALUE', message: `Field "${field.label}" must reference an operator.` });
         }
-        const operator = await tx.operator.findUnique({ where: { id: value } });
-        if (!operator || operator.companyId !== companyId) {
-          throw new NotFoundException({ code: 'FORM_OPERATOR_NOT_FOUND', message: `Field "${field.label}" references an operator that doesn't exist.` });
-        }
+        await assertOwnership(tx.operator, value, companyId, {
+          code: 'FORM_OPERATOR_NOT_FOUND',
+          message: `Field "${field.label}" references an operator that doesn't exist.`,
+          allowArchived: true,
+        });
         return value;
       }
     }
   }
 
-  private async requireTemplate(tx: Prisma.TransactionClient, companyId: string, id: string) {
-    const template = await tx.formTemplate.findUnique({ where: { id } });
-    if (!template || template.companyId !== companyId) {
-      throw new NotFoundException({ code: 'FORM_TEMPLATE_NOT_FOUND', message: 'Form template not found.' });
-    }
-    return template;
+  private requireTemplate(tx: Prisma.TransactionClient, companyId: string, id: string) {
+    return assertOwnership(tx.formTemplate, id, companyId, {
+      code: 'FORM_TEMPLATE_NOT_FOUND',
+      message: 'Form template not found.',
+      allowArchived: true,
+    });
   }
 }

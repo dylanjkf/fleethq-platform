@@ -10,6 +10,9 @@
 import './load-env';
 import { PrismaClient, AssetClassKey, JobStatus, MaintenanceSeverity, MaintenanceJobStatus } from '@prisma/client';
 import { provisionCompany } from '../src/companies/provision-company';
+import { assertSafeToSeed } from './seed-guard';
+
+assertSafeToSeed('seed-load-test-data');
 
 const prisma = new PrismaClient();
 

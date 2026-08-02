@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
@@ -9,6 +9,7 @@ import { CurrentAdmin } from '../admin-auth/decorators/current-admin.decorator';
 import { AuthenticatedAdminRequestUser } from '../admin-auth/admin-jwt-payload.interface';
 import { ADMIN_PERMISSIONS } from '../common/permissions/admin-permission-catalog';
 import { AdminCustomerUsersService } from './admin-customer-users.service';
+import { SearchCustomerUsersDto } from './dto/search-customer-users.dto';
 
 /** See AdminAuthController's docstring for why every route here is `@Public()` from the customer stack's perspective. */
 @Public()
@@ -16,10 +17,22 @@ import { AdminCustomerUsersService } from './admin-customer-users.service';
 export class AdminCustomerUsersController {
   constructor(private readonly customerUsers: AdminCustomerUsersService) {}
 
+  /**
+   * Cross-tenant customer-user search — the "who is this email?" entry point
+   * support starts a ticket from. Declared before the `:userId` route so a
+   * bare `GET /admin/customer-users?email=…` isn't captured as a user id.
+   */
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_VIEW)
+  @Get()
+  search(@Query() query: SearchCustomerUsersDto) {
+    return this.customerUsers.search(query);
+  }
+
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_VIEW)
   @Get(':userId')
-  getById(@Param('userId') userId: string) {
+  getById(@Param('userId', ParseUUIDPipe) userId: string) {
     return this.customerUsers.getById(userId);
   }
 
@@ -27,7 +40,7 @@ export class AdminCustomerUsersController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
   @Post(':userId/disable')
   @HttpCode(HttpStatus.OK)
-  async disable(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  async disable(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     await this.customerUsers.disable(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
     return { ok: true };
   }
@@ -36,7 +49,7 @@ export class AdminCustomerUsersController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
   @Post(':userId/reactivate')
   @HttpCode(HttpStatus.OK)
-  async reactivate(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  async reactivate(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     await this.customerUsers.reactivate(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
     return { ok: true };
   }
@@ -46,7 +59,7 @@ export class AdminCustomerUsersController {
   @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':userId/unlock')
   @HttpCode(HttpStatus.OK)
-  async unlock(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  async unlock(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     await this.customerUsers.unlock(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
     return { ok: true };
   }
@@ -56,7 +69,7 @@ export class AdminCustomerUsersController {
   @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':userId/reset-mfa')
   @HttpCode(HttpStatus.OK)
-  async resetMfa(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  async resetMfa(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     await this.customerUsers.resetMfa(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
     return { ok: true };
   }
@@ -65,7 +78,7 @@ export class AdminCustomerUsersController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
   @Post(':userId/send-password-reset')
   @HttpCode(HttpStatus.OK)
-  sendPasswordReset(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  sendPasswordReset(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     return this.customerUsers.sendPasswordReset(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
   }
 
@@ -73,7 +86,7 @@ export class AdminCustomerUsersController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.SUPPORT_MANAGE)
   @Post(':userId/resend-verification')
   @HttpCode(HttpStatus.OK)
-  resendVerification(@Param('userId') userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  resendVerification(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     return this.customerUsers.resendVerification(userId, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
   }
 }

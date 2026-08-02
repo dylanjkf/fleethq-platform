@@ -11,6 +11,7 @@ import { SubmitChecklistDto } from './dto/submit-checklist.dto';
 import { ListChecklistSubmissionsDto } from './dto/list-checklist-submissions.dto';
 import { ChecklistItemDto } from './dto/checklist-item.dto';
 import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
+import { assertOwnership } from '../common/ownership';
 import { evaluateAnswers } from './checklist-evaluation';
 
 /** The normalized item shape persisted in `items` / `template_snapshot` JSON. */
@@ -481,12 +482,12 @@ export class ChecklistsService {
     return template;
   }
 
-  private async requireAsset(tx: Prisma.TransactionClient, companyId: string, assetId: string) {
-    const asset = await tx.asset.findUnique({ where: { id: assetId } });
-    if (!asset || asset.companyId !== companyId || asset.archivedAt) {
-      throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-    }
-    return asset;
+  private requireAsset(tx: Prisma.TransactionClient, companyId: string, assetId: string) {
+    return assertOwnership(tx.asset, assetId, companyId, {
+      code: 'ASSET_NOT_FOUND',
+      message: 'Asset not found.',
+      allowArchived: false,
+    });
   }
 
   /** Re-fetch a template with its class + the ids of the assets it's assigned to. */

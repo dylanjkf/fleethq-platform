@@ -1,9 +1,10 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, TimelineEntityType } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
 import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthMailService } from '../auth/auth-mail.service';
+import { TimelineService } from '../timeline/timeline.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
 
@@ -17,6 +18,7 @@ export class AdminOrganisationsService {
     private readonly audit: AdminAuditService,
     private readonly sessions: AuthSessionsService,
     private readonly mail: AuthMailService,
+    private readonly timeline: TimelineService,
   ) {}
 
   private statusWhere(status: AdminOrganisationsQueryDto['status']): Prisma.CompanyWhereInput {
@@ -254,6 +256,27 @@ export class AdminOrganisationsService {
       ip: context.ip,
       userAgent: context.userAgent,
       afterValue: { username: membership.user.username, expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN },
+    });
+
+    // The admin_audit_logs entry above is FleetHQ's own record; the tenant's
+    // own history would otherwise show nothing about a staff member acting as
+    // one of their users. Write a SYSTEM-actored marker into the tenant's
+    // timeline so the account holder can see who accessed the account via
+    // impersonation and when — fleetos_admin (BYPASSRLS) can INSERT this row,
+    // and TimelineService only inserts (matching the append-only grant).
+    await this.timeline.record(this.adminPrisma, {
+      companyId: id,
+      entityType: TimelineEntityType.USER,
+      entityId: userId,
+      eventType: 'impersonated',
+      summary: `FleetHQ support accessed this account by impersonating "${membership.user.username}".`,
+      payload: {
+        via: 'fleethq_admin',
+        adminUserId: context.adminUserId,
+        ip: context.ip ?? null,
+        expiresIn: IMPERSONATION_TOKEN_EXPIRES_IN,
+        at: new Date().toISOString(),
+      },
     });
     // Auth/Billing Platform Phase 10: the audit trail above already records
     // this for FleetOS's own side — this is the customer-facing half, so the

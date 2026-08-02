@@ -143,12 +143,31 @@ export class AuthController {
     return this.authService.beginWebauthnRegistration(user.userId);
   }
 
+  /**
+   * Verify and store a new passkey. Adding a passkey is as sensitive as
+   * changing the password or toggling MFA, so the body must also carry a
+   * step-up re-auth proof (current password or a live MFA code) — see
+   * AuthService.completeWebauthnRegistration.
+   */
   @AuthenticatedOnly()
   @Throttle(AUTH_THROTTLE)
   @Post('webauthn/register/verify')
   @HttpCode(HttpStatus.OK)
-  async verifyWebauthnRegistration(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: WebauthnRegisterVerifyDto) {
-    await this.authService.completeWebauthnRegistration(user.userId, dto.challengeToken, dto.response, dto.deviceLabel);
+  async verifyWebauthnRegistration(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Body() dto: WebauthnRegisterVerifyDto,
+    @Ip() ip: string,
+    @Req() req: Request & { id?: string },
+  ) {
+    await this.authService.completeWebauthnRegistration(
+      user.userId,
+      user.sessionId,
+      dto.challengeToken,
+      dto.response,
+      { currentPassword: dto.currentPassword, mfaCode: dto.mfaCode },
+      dto.deviceLabel,
+      { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id },
+    );
     return { ok: true };
   }
 
@@ -161,8 +180,13 @@ export class AuthController {
   @AuthenticatedOnly()
   @Delete('webauthn/credentials/:id')
   @HttpCode(HttpStatus.OK)
-  async removeWebauthnCredential(@CurrentUser() user: AuthenticatedRequestUser, @Param('id') id: string) {
-    await this.authService.removeWebauthnCredential(user.userId, id);
+  async removeWebauthnCredential(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param('id') id: string,
+    @Ip() ip: string,
+    @Req() req: Request & { id?: string },
+  ) {
+    await this.authService.removeWebauthnCredential(user.userId, id, { ip, userAgent: req.get('user-agent') ?? null, requestId: req.id });
     return { ok: true };
   }
 

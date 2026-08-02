@@ -65,6 +65,10 @@ export class PredictiveMaintenanceService {
         take: MAX_AGGREGATION_ROWS,
       });
 
+      // Paired-with relationships are reduced in JS (grouped by attached unit
+      // below), so bound the read the same way as the fault history: far above
+      // any real fleet's pairing count, but a hard ceiling so a pathological
+      // graph can't turn this into an unbounded scan.
       const pairings = await tx.graphRelationship.findMany({
         where: {
           relationshipType: 'PAIRED_WITH',
@@ -72,6 +76,7 @@ export class PredictiveMaintenanceService {
           targetType: TimelineEntityType.ASSET,
         },
         select: { sourceId: true, targetId: true, validFrom: true },
+        take: MAX_AGGREGATION_ROWS,
       });
 
       const relevantAssetIds = new Set<string>([...faults.map((f) => f.assetId), ...pairings.map((p) => p.targetId)]);

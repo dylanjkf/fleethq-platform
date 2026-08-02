@@ -116,6 +116,38 @@ export class AuthMailService {
     });
   }
 
+  /**
+   * Fires when a new passkey (WebAuthn credential) is enrolled on the account.
+   * Adding a passkey is a durable, standalone way back into the account — as
+   * sensitive as enabling MFA or changing the password — so the account holder
+   * is always told, on the same transparency principle as every other security
+   * email here: a passkey the owner didn't add is a strong compromise signal.
+   */
+  async sendPasskeyAdded(to: string, fullName: string, deviceLabel?: string | null): Promise<void> {
+    const which = deviceLabel ? ` ("${deviceLabel}")` : '';
+    await this.channel.sendEmail({
+      to,
+      subject: 'A new passkey was added to your FleetOS account',
+      body: `Hi ${fullName},\n\nA new passkey${which} was just added to your FleetOS account. It can be used to sign in without a password.\n\nIf this was you, no action is needed. If you didn't add this passkey, contact your company administrator immediately and remove it from your account security settings — your account may be compromised.`,
+    });
+  }
+
+  /**
+   * Fires the first time a verified external sign-in identity (Google or
+   * Microsoft) is auto-linked to an existing account by matching email. After
+   * this, that provider can sign the account in directly, so — like a new
+   * passkey — the owner must be told the moment the new sign-in method is
+   * attached. Includes the provider name and the time it happened.
+   */
+  async sendOAuthLinked(to: string, fullName: string, providerName: string, linkedAt: Date): Promise<void> {
+    const when = `${linkedAt.toLocaleTimeString('en-AU')} on ${linkedAt.toLocaleDateString('en-AU')}`;
+    await this.channel.sendEmail({
+      to,
+      subject: `${providerName} sign-in was linked to your FleetOS account`,
+      body: `Hi ${fullName},\n\nA new sign-in method was just linked to your FleetOS account: you can now sign in with ${providerName}.\n\nWhen: ${when}\n\nIf this was you, no action is needed. If you didn't link ${providerName}, contact your company administrator immediately — your account may be compromised.`,
+    });
+  }
+
   /** Best-effort security alert — fires when repeated failed logins lock an account (a credential-stuffing/brute-force indicator). */
   async sendAccountLocked(to: string, fullName: string, unlockAt: Date): Promise<void> {
     await this.channel.sendEmail({

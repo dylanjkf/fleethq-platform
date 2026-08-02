@@ -83,11 +83,18 @@ export class UsersService {
           ],
         });
       } catch (err) {
+        // Usernames are globally unique, so a P2002 here means the username
+        // already belongs to some User — possibly one in *another* tenant this
+        // caller must not be able to probe for. A distinguishable
+        // `409 USERNAME_TAKEN` turned this endpoint into a cross-tenant
+        // username-enumeration oracle. Return the exact same generic not-found
+        // that `linkExisting`/`resolveLinkTarget` returns, so "username already
+        // exists elsewhere" is indistinguishable from any other unresolvable
+        // identity: a caller can only ever act on an account they already know
+        // (via the `link` flow, which additionally requires the matching
+        // email). A genuinely-new username is unaffected and still creates.
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-          throw new ConflictException({
-            code: 'USERNAME_TAKEN',
-            message: 'That username is already in use.',
-          });
+          throw new NotFoundException({ code: 'USER_NOT_FOUND', message: 'No active user matching those details exists.' });
         }
         throw err;
       }

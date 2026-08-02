@@ -7,6 +7,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** Default GPS breadcrumb retention: 18 months. Location history is personal
  *  information, so it is not kept indefinitely (data-retention policy §4). */
 const DEFAULT_GPS_RETENTION_DAYS = 540;
+/** Default Stripe webhook idempotency-ledger retention: 90 days. The ledger only
+ *  needs to span Stripe's own redelivery/retry window (days), not forever — an
+ *  unbounded table is the concern, so anything comfortably past that window is
+ *  safe to purge. */
+const DEFAULT_STRIPE_EVENT_RETENTION_DAYS = 90;
 
 /**
  * Data-retention enforcement (ISMS data-retention policy / ISO A.8.10). The
@@ -32,6 +37,25 @@ export class RetentionService {
   private gpsRetentionMs(): number {
     const days = Number(this.config.get<string>('GPS_PING_RETENTION_DAYS')) || DEFAULT_GPS_RETENTION_DAYS;
     return days * DAY_MS;
+  }
+
+  private stripeEventRetentionMs(): number {
+    const days = Number(this.config.get<string>('STRIPE_WEBHOOK_EVENT_RETENTION_DAYS')) || DEFAULT_STRIPE_EVENT_RETENTION_DAYS;
+    return days * DAY_MS;
+  }
+
+  /**
+   * Purge Stripe webhook idempotency-ledger rows older than the retention floor.
+   * Unlike the GPS purge this is a single global (non-tenant) table with no RLS,
+   * so it runs once via the privileged `fleetos_auth` role (SystemPrismaService)
+   * — the same role that writes the ledger in `BillingService.alreadyProcessed`
+   * — rather than per-company. Returns the number of rows deleted.
+   */
+  async purgeStripeWebhookEvents(now: Date = new Date()): Promise<number> {
+    const cutoff = new Date(now.getTime() - this.stripeEventRetentionMs());
+    const { count } = await this.systemPrisma.stripeWebhookEvent.deleteMany({ where: { receivedAt: { lt: cutoff } } });
+    this.logger.log(`Stripe webhook event ledger purge complete: ${count} rows older than ${cutoff.toISOString()} deleted.`);
+    return count;
   }
 
   /** Delete one company's GPS breadcrumbs older than the retention floor. */

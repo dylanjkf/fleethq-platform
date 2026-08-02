@@ -46,6 +46,10 @@ export const ADMIN_AUDIT_ACTIONS = {
   FEATURE_FLAG_DELETED: 'feature_flags.deleted',
   FEATURE_FLAG_OVERRIDE_SET: 'feature_flags.override_set',
   FEATURE_FLAG_OVERRIDE_CLEARED: 'feature_flags.override_cleared',
+  ADMIN_USER_CREATED: 'admin_users.created',
+  ADMIN_USER_ROLE_CHANGED: 'admin_users.role_changed',
+  ADMIN_USER_DEACTIVATED: 'admin_users.deactivated',
+  ADMIN_USER_REACTIVATED: 'admin_users.reactivated',
 } as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[keyof typeof ADMIN_AUDIT_ACTIONS];

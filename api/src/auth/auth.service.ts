@@ -31,6 +31,12 @@ export interface CompanyChoice {
   name: string;
 }
 
+/** Step-up re-auth proof for a sensitive self-service action (e.g. adding a passkey). */
+export interface StepUpReauth {
+  currentPassword?: string;
+  mfaCode?: string;
+}
+
 export type LoginResult =
   | { status: 'authenticated'; accessToken: string; company: CompanyChoice }
   | { status: 'choose_company'; preAuthToken: string; companies: CompanyChoice[] }
@@ -239,6 +245,14 @@ export class AuthService {
       }
       user = candidates[0];
       await this.systemPrisma.oAuthIdentity.create({ data: { userId: user.id, provider, providerSubject: identity.subject, email: identity.email } });
+      // First-time auto-link (this identity was NOT previously linked): a new
+      // sign-in method has just been attached to the account purely on a
+      // verified-email match, which — like a new passkey — the owner must be
+      // told about. Audited and emailed on the same transparency principle as
+      // every other security-footprint change (sendMfaEnabled / passkey add).
+      if (!user.archivedAt) {
+        this.notifyOAuthIdentityLinked(user, provider, context);
+      }
     }
 
     if (!user || user.archivedAt) {
@@ -247,6 +261,28 @@ export class AuthService {
 
     const loginMethod: LoginMethod = provider === 'GOOGLE' ? 'oauth_google' : 'oauth_microsoft';
     return this.proceedPastFirstFactor(user, deviceFingerprint, rememberMe, loginMethod, context);
+  }
+
+  /**
+   * Alert + audit when a verified external identity is auto-linked to an
+   * existing account for the first time. Best-effort (never blocks the login),
+   * mirroring how sendNewDeviceLogin / sendMfaEnabled are fired and how the
+   * audit trail records other credential-footprint changes.
+   */
+  private notifyOAuthIdentityLinked(user: User, provider: OAuthProvider, context: AuthContext): void {
+    const providerName = provider === OAuthProvider.GOOGLE ? 'Google' : 'Microsoft';
+    const linkedAt = new Date();
+    void this.audit.recordSystem({
+      action: AUDIT_ACTIONS.OAUTH_IDENTITY_LINKED,
+      actorUserId: user.id,
+      actorLabel: user.username,
+      targetType: 'user',
+      targetId: user.id,
+      ip: context.ip,
+      requestId: context.requestId,
+      metadata: { provider: providerName },
+    });
+    if (user.email) void this.mail.sendOAuthLinked(user.email, user.fullName, providerName, linkedAt).catch(() => undefined);
   }
 
   /**
@@ -667,8 +703,63 @@ export class AuthService {
     return this.webauthn.generateRegistrationOptionsFor(user.id, user.username, user.fullName);
   }
 
-  async completeWebauthnRegistration(userId: string, challengeToken: string, response: RegistrationResponseJSON, deviceLabel?: string): Promise<void> {
-    await this.webauthn.verifyRegistration(userId, challengeToken, response, deviceLabel);
+  /**
+   * Enrol a new passkey. Adding a passkey creates a durable, standalone way
+   * back into the account, so it gets the exact same discipline as a
+   * self-service password change or an MFA enable/disable:
+   *  - step-up re-authentication (current password OR a live MFA code), so a
+   *    merely-valid — possibly 12h/30-day-old — access token isn't enough on
+   *    its own (mirrors AuthRecoveryService.changePassword / MfaService.disable);
+   *  - every *other* session revoked, same as changePassword/MFA-change, since
+   *    enrolling a new credential is exactly when a stale session an attacker
+   *    may hold should be forced back through login;
+   *  - a notification email to the account owner (mirrors sendMfaEnabled);
+   *  - an audit-log entry (written inside WebauthnService.verifyRegistration,
+   *    mirroring MfaService.confirmEnrollment's MFA_ENABLED record).
+   */
+  async completeWebauthnRegistration(
+    userId: string,
+    currentSessionId: string,
+    challengeToken: string,
+    response: RegistrationResponseJSON,
+    reauth: StepUpReauth,
+    deviceLabel?: string,
+    context: AuthContext = {},
+  ): Promise<void> {
+    const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await this.assertStepUpReauth(user, reauth);
+    await this.webauthn.verifyRegistration(userId, challengeToken, response, deviceLabel, {
+      actorLabel: user.username,
+      ip: context.ip,
+      requestId: context.requestId,
+    });
+    // Same "kill every other session on a credential change" treatment as a
+    // self-service password change / MFA enable; the current device stays.
+    await this.sessions.revokeOtherSessions(userId, currentSessionId);
+    if (user.email) void this.mail.sendPasskeyAdded(user.email, user.fullName, deviceLabel ?? null).catch(() => undefined);
+  }
+
+  /**
+   * Re-prove a live credential before a sensitive self-service action. Accepts
+   * the current password (as AuthRecoveryService.changePassword does) OR a
+   * current MFA code (TOTP/backup, as MfaService.disable does) for accounts
+   * with MFA enabled. Neither valid ⇒ rejected — a bare access token is never
+   * sufficient on its own.
+   */
+  private async assertStepUpReauth(user: User, reauth: StepUpReauth): Promise<void> {
+    if (reauth.currentPassword) {
+      if (await bcrypt.compare(reauth.currentPassword, user.passwordHash)) return;
+      throw new UnauthorizedException({ code: 'REAUTH_REQUIRED', message: 'That current password is incorrect.' });
+    }
+    if (reauth.mfaCode && user.mfaEnabledAt) {
+      const result = await this.mfa.verifyChallenge(user, reauth.mfaCode);
+      if (result.ok) return;
+      throw new UnauthorizedException({ code: 'REAUTH_REQUIRED', message: 'That verification code is incorrect.' });
+    }
+    throw new UnauthorizedException({
+      code: 'REAUTH_REQUIRED',
+      message: 'Re-enter your current password or a verification code to add a passkey.',
+    });
   }
 
   async beginWebauthnLogin() {
@@ -688,8 +779,13 @@ export class AuthService {
     return this.webauthn.listCredentials(userId);
   }
 
-  removeWebauthnCredential(userId: string, credentialId: string): Promise<void> {
-    return this.webauthn.removeCredential(userId, credentialId);
+  async removeWebauthnCredential(userId: string, credentialId: string, context: AuthContext = {}): Promise<void> {
+    const user = await this.systemPrisma.user.findUnique({ where: { id: userId }, select: { username: true } });
+    await this.webauthn.removeCredential(userId, credentialId, {
+      actorLabel: user?.username ?? null,
+      ip: context.ip,
+      requestId: context.requestId,
+    });
   }
 
   // ── A2 auth completeness: lockout ────────────────────────────────────────────

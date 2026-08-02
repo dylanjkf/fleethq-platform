@@ -8,6 +8,7 @@ import { MaintenanceSchedulesService } from '../maintenance-schedules/maintenanc
 import { RetentionService } from '../retention/retention.service';
 import { DashboardMetricsService } from '../dashboard-layouts/dashboard-metrics.service';
 import { IntegrationSyncEngine } from '../integrations/integration-sync-engine.service';
+import { BillingService } from '../billing/billing.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -15,6 +16,8 @@ const DIGEST_TASK = 'notification_digest';
 const COMPLIANCE_SWEEP_TASK = 'compliance_expiry_sweep';
 const MAINTENANCE_SWEEP_TASK = 'maintenance_due_sweep';
 const GPS_RETENTION_TASK = 'gps_retention_purge';
+const STRIPE_EVENT_RETENTION_TASK = 'stripe_webhook_event_retention_purge';
+const TRIAL_REMINDER_TASK = 'native_trial_ending_reminder';
 const UTILISATION_SNAPSHOT_TASK = 'utilisation_snapshot';
 const INTEGRATION_SYNC_TASK = 'integration_scheduled_sync';
 const INTEGRATION_DEAD_LETTER_RETRY_TASK = 'integration_dead_letter_retry';
@@ -53,6 +56,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly retention: RetentionService,
     private readonly dashboardMetrics: DashboardMetricsService,
     private readonly integrationSyncEngine: IntegrationSyncEngine,
+    private readonly billing: BillingService,
   ) {}
 
   onModuleInit(): void {
@@ -65,6 +69,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     const complianceIntervalMs = Number(this.config.get<string>('SCHEDULER_COMPLIANCE_INTERVAL_MS')) || DAY_MS;
     const maintenanceIntervalMs = Number(this.config.get<string>('SCHEDULER_MAINTENANCE_INTERVAL_MS')) || DAY_MS;
     const retentionIntervalMs = Number(this.config.get<string>('SCHEDULER_RETENTION_INTERVAL_MS')) || DAY_MS;
+    const trialReminderIntervalMs = Number(this.config.get<string>('SCHEDULER_TRIAL_REMINDER_INTERVAL_MS')) || DAY_MS;
     // Utilisation samples several times a day by default so each day's stored
     // figure is a real average, not one arbitrary reading; the (company, day)
     // row accumulates, so cadence just controls how many samples fold in.
@@ -81,6 +86,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         `compliance-expiry sweep every ${Math.round(complianceIntervalMs / 60000)} min, ` +
         `maintenance-due sweep every ${Math.round(maintenanceIntervalMs / 60000)} min, ` +
         `GPS retention purge every ${Math.round(retentionIntervalMs / 60000)} min, ` +
+        `Stripe webhook-ledger retention purge every ${Math.round(retentionIntervalMs / 60000)} min, ` +
+        `native trial-ending reminder every ${Math.round(trialReminderIntervalMs / 60000)} min, ` +
         `utilisation snapshot every ${Math.round(utilisationIntervalMs / 60000)} min, ` +
         `integration sync every ${Math.round(integrationSyncIntervalMs / 60000)} min, ` +
         `integration dead-letter retry every ${Math.round(integrationDeadLetterIntervalMs / 60000)} min (leader-elected).`,
@@ -89,6 +96,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     this.timers.push(this.scheduleTask(COMPLIANCE_SWEEP_TASK, complianceIntervalMs, () => this.runComplianceExpirySweeps()));
     this.timers.push(this.scheduleTask(MAINTENANCE_SWEEP_TASK, maintenanceIntervalMs, () => this.runMaintenanceDueSweeps()));
     this.timers.push(this.scheduleTask(GPS_RETENTION_TASK, retentionIntervalMs, () => this.retention.runGpsRetention()));
+    this.timers.push(this.scheduleTask(STRIPE_EVENT_RETENTION_TASK, retentionIntervalMs, () => this.retention.purgeStripeWebhookEvents()));
+    this.timers.push(this.scheduleTask(TRIAL_REMINDER_TASK, trialReminderIntervalMs, () => this.runTrialEndingReminders()));
     this.timers.push(this.scheduleTask(UTILISATION_SNAPSHOT_TASK, utilisationIntervalMs, () => this.runUtilisationSnapshots()));
     this.timers.push(this.scheduleTask(INTEGRATION_SYNC_TASK, integrationSyncIntervalMs, () => this.runIntegrationScheduledSyncs()));
     this.timers.push(this.scheduleTask(INTEGRATION_DEAD_LETTER_RETRY_TASK, integrationDeadLetterIntervalMs, () => this.runIntegrationDeadLetterRetries()));
@@ -150,6 +159,30 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     this.logger.log(`Digest run complete: ${companyIds.length} companies, ${failures} failures.`);
     return { companies: companyIds.length, failures };
+  }
+
+  /**
+   * Send the native (no-card) free-trial ending reminder to companies whose
+   * trial ends within the reminder window. Same cross-tenant shape as the other
+   * sweeps: enumerate companies via the privileged read-only client, then
+   * re-scope to each tenant through `BillingService.remindTrialEnding`, which is
+   * idempotent (a company already reminded in this trial window is a no-op). One
+   * tenant's failure is logged and skipped so it can't stall the rest.
+   */
+  async runTrialEndingReminders(): Promise<{ companies: number; reminded: number; failures: number }> {
+    const companyIds = await this.systemPrisma.listActiveCompanyIds();
+    let reminded = 0;
+    let failures = 0;
+    for (const companyId of companyIds) {
+      try {
+        if ((await this.billing.remindTrialEnding(companyId)) > 0) reminded += 1;
+      } catch (err) {
+        failures += 1;
+        this.logger.error(`Trial-ending reminder failed for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.logger.log(`Trial-ending reminder run complete: ${companyIds.length} companies, ${reminded} reminded, ${failures} failures.`);
+    return { companies: companyIds.length, reminded, failures };
   }
 
   /**

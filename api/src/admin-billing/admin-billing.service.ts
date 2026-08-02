@@ -33,6 +33,19 @@ export class AdminBillingService {
     private readonly billing: BillingService,
   ) {}
 
+  /**
+   * A deterministic Stripe idempotency key for an admin-initiated financial
+   * write, mirroring the customer-facing `BillingService`'s keys. Keyed on the
+   * acting admin, the action, the target object id, and a coarse per-minute time
+   * bucket — so a double-click / client retry within the same minute reuses the
+   * same Stripe request (one refund, one invoice) instead of issuing a second
+   * real financial event, while a genuinely new action a minute later proceeds.
+   */
+  private idempotencyKey(action: string, targetId: string, adminUserId: string | null | undefined, now: Date = new Date()): string {
+    const minuteBucket = Math.floor(now.getTime() / 60_000);
+    return `admin-billing:${adminUserId ?? 'unknown'}:${action}:${targetId}:${minuteBucket}`;
+  }
+
   private async requireCompany(companyId: string) {
     const company = await this.adminPrisma.company.findUnique({
       where: { id: companyId },
@@ -154,12 +167,15 @@ export class AdminBillingService {
       throw new BadRequestException({ code: 'INVOICE_NOT_PAID', message: 'This invoice has no associated payment to refund.' });
     }
 
-    const refund = await stripe.refunds.create({
-      payment_intent: paymentIntentId,
-      charge: paymentIntentId ? undefined : chargeId,
-      amount: dto.amountCents,
-      reason: dto.reason,
-    });
+    const refund = await stripe.refunds.create(
+      {
+        payment_intent: paymentIntentId,
+        charge: paymentIntentId ? undefined : chargeId,
+        amount: dto.amountCents,
+        reason: dto.reason,
+      },
+      { idempotencyKey: this.idempotencyKey('refund', dto.invoiceId, context.adminUserId) },
+    );
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -181,9 +197,12 @@ export class AdminBillingService {
     const stripeSubscriptionId = this.requireStripeSubscriptionId(company);
     const stripe = this.billing.getStripeClient();
 
-    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, {
-      discounts: [{ coupon: dto.couponId }],
-    });
+    const before = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+    const subscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      { discounts: [{ coupon: dto.couponId }] },
+      { idempotencyKey: this.idempotencyKey('apply_coupon', stripeSubscriptionId, context.adminUserId) },
+    );
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -193,7 +212,8 @@ export class AdminBillingService {
       organisationId: companyId,
       ip: context.ip,
       userAgent: context.userAgent,
-      afterValue: { couponId: dto.couponId },
+      beforeValue: { discounts: before.discounts },
+      afterValue: { couponId: dto.couponId, discounts: subscription.discounts },
     });
 
     return { subscriptionId: subscription.id, discounts: subscription.discounts };
@@ -213,18 +233,27 @@ export class AdminBillingService {
     const stripe = this.billing.getStripeClient();
     const currency = (dto.currency ?? 'aud').toLowerCase();
 
-    await stripe.invoiceItems.create({
-      customer: stripeCustomerId,
-      amount: dto.amountCents,
-      currency,
-      description: dto.description,
-    });
+    await stripe.invoiceItems.create(
+      {
+        customer: stripeCustomerId,
+        amount: dto.amountCents,
+        currency,
+        description: dto.description,
+      },
+      { idempotencyKey: this.idempotencyKey('manual_invoice_item', stripeCustomerId, context.adminUserId) },
+    );
 
-    const draft = await stripe.invoices.create({
-      customer: stripeCustomerId,
-      collection_method: 'send_invoice',
-      days_until_due: 7,
-    });
+    const draft = await stripe.invoices.create(
+      {
+        customer: stripeCustomerId,
+        collection_method: 'send_invoice',
+        days_until_due: 7,
+        // GST/Australian tax invoicing parity with the checkout flow (Phase 8):
+        // an admin-issued invoice must carry GST too when Stripe Tax is enabled.
+        ...(this.billing.isTaxEnabled() ? { automatic_tax: { enabled: true } } : {}),
+      },
+      { idempotencyKey: this.idempotencyKey('manual_invoice', stripeCustomerId, context.adminUserId) },
+    );
     const invoice = await stripe.invoices.finalizeInvoice(draft.id);
 
     await this.audit.record({
@@ -247,11 +276,14 @@ export class AdminBillingService {
     const stripe = this.billing.getStripeClient();
     await this.requireOwnedInvoice(stripe, dto.invoiceId, stripeCustomerId);
 
-    const creditNote = await stripe.creditNotes.create({
-      invoice: dto.invoiceId,
-      amount: dto.amountCents,
-      reason: dto.reason,
-    });
+    const creditNote = await stripe.creditNotes.create(
+      {
+        invoice: dto.invoiceId,
+        amount: dto.amountCents,
+        reason: dto.reason,
+      },
+      { idempotencyKey: this.idempotencyKey('credit_note', dto.invoiceId, context.adminUserId) },
+    );
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -272,9 +304,11 @@ export class AdminBillingService {
     const company = await this.requireCompany(companyId);
     const stripeCustomerId = this.requireStripeCustomerId(company);
     const stripe = this.billing.getStripeClient();
-    await this.requireOwnedInvoice(stripe, dto.invoiceId, stripeCustomerId);
+    const before = await this.requireOwnedInvoice(stripe, dto.invoiceId, stripeCustomerId);
 
-    const invoice = await stripe.invoices.pay(dto.invoiceId);
+    const invoice = await stripe.invoices.pay(dto.invoiceId, undefined, {
+      idempotencyKey: this.idempotencyKey('retry_payment', dto.invoiceId, context.adminUserId),
+    });
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -284,6 +318,7 @@ export class AdminBillingService {
       organisationId: companyId,
       ip: context.ip,
       userAgent: context.userAgent,
+      beforeValue: { status: before.status },
       afterValue: { status: invoice.status },
     });
 
@@ -295,9 +330,11 @@ export class AdminBillingService {
     const stripeSubscriptionId = this.requireStripeSubscriptionId(company);
     const stripe = this.billing.getStripeClient();
 
+    const before = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+    const idempotencyKey = this.idempotencyKey('cancel_subscription', stripeSubscriptionId, context.adminUserId);
     const subscription = dto.atPeriodEnd
-      ? await stripe.subscriptions.update(stripeSubscriptionId, { cancel_at_period_end: true })
-      : await stripe.subscriptions.cancel(stripeSubscriptionId);
+      ? await stripe.subscriptions.update(stripeSubscriptionId, { cancel_at_period_end: true }, { idempotencyKey })
+      : await stripe.subscriptions.cancel(stripeSubscriptionId, undefined, { idempotencyKey });
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -307,6 +344,7 @@ export class AdminBillingService {
       organisationId: companyId,
       ip: context.ip,
       userAgent: context.userAgent,
+      beforeValue: { status: before.status, cancelAtPeriodEnd: before.cancel_at_period_end },
       afterValue: { atPeriodEnd: !!dto.atPeriodEnd, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end },
     });
 
@@ -335,7 +373,11 @@ export class AdminBillingService {
       throw new ConflictException({ code: 'SUBSCRIPTION_NOT_PENDING_CANCELLATION', message: 'This subscription is not scheduled to cancel.' });
     }
 
-    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, { cancel_at_period_end: false });
+    const subscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      { cancel_at_period_end: false },
+      { idempotencyKey: this.idempotencyKey('reinstate_subscription', stripeSubscriptionId, context.adminUserId) },
+    );
 
     await this.audit.record({
       adminUserId: context.adminUserId,
@@ -345,6 +387,7 @@ export class AdminBillingService {
       organisationId: companyId,
       ip: context.ip,
       userAgent: context.userAgent,
+      beforeValue: { status: current.status, cancelAtPeriodEnd: current.cancel_at_period_end },
       afterValue: { status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end },
     });
 
