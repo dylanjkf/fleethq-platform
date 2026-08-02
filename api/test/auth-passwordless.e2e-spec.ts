@@ -201,7 +201,9 @@ describe('Auth/Billing Platform Phase 2 (magic link, social login gating, WebAut
       await http()
         .post('/v1/auth/webauthn/register/verify')
         .set(auth)
-        .send({ challengeToken, response: registrationResponse, deviceLabel: 'Test authenticator' })
+        // Enrolling a passkey requires step-up re-auth (current password or a
+        // live MFA code) — a bare access token is deliberately not enough.
+        .send({ challengeToken, response: registrationResponse, deviceLabel: 'Test authenticator', currentPassword: TEST_PASSWORD })
         .expect(200);
 
       const list = await http().get('/v1/auth/webauthn/credentials').set(auth).expect(200);
@@ -257,7 +259,8 @@ describe('Auth/Billing Platform Phase 2 (magic link, social login gating, WebAut
       await http()
         .post('/v1/auth/webauthn/register/verify')
         .set(auth)
-        .send({ challengeToken: optionsRes.body.challengeToken, response: registrationResponse })
+        // Step-up re-auth proof required to enrol a passkey (see above).
+        .send({ challengeToken: optionsRes.body.challengeToken, response: registrationResponse, currentPassword: TEST_PASSWORD })
         .expect(200);
 
       const loginOptionsRes = await http().post('/v1/auth/webauthn/login/options').expect(200);
