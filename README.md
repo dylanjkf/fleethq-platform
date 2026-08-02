@@ -62,6 +62,15 @@ bootstrapped `AdminUser`: `npm run admin:bootstrap` in `api/` (see
 3. Every deploy runs `prisma migrate deploy` automatically before the server
    starts (`api/docker-entrypoint.sh`) — no separate release step to
    trigger by hand.
+4. **Auto-deploy on merge:** `.github/workflows/deploy-api.yml` deploys the
+   API to Railway whenever `main` changes under `api/` (or via the manual
+   "Run workflow" button), so the running backend can't drift behind the
+   deployed frontend. It needs a `RAILWAY_TOKEN` **secret** (a Railway
+   project/account token) and a `RAILWAY_SERVICE` **variable** (the API
+   service's name) in the repo settings; without both the job stops early
+   with a clear message. This replaces relying on Railway's own GitHub
+   auto-deploy, but the two are compatible — disable one if you enable the
+   other to avoid double deploys.
 
 **Required environment variables** (see `api/.env.example` for the full
 list with rationale):

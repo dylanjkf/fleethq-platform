@@ -1,0 +1,64 @@
+name: deploy-api
+
+# Auto-deploy the API to Railway whenever main advances (i.e. a PR merges) so the
+# running backend never drifts behind the deployed frontend again. A merge that
+# changed nothing under api/ doesn't need a redeploy, hence the path filter; use
+# the manual "Run workflow" button (workflow_dispatch) to force one anyway.
+#
+# Safety: railway.json runs a single replica with healthcheckPath /health/ready,
+# and api/docker-entrypoint.sh applies `prisma migrate deploy` before the app
+# starts. So a deploy is self-contained (pending migrations apply first) and a
+# broken build fails the healthcheck — Railway keeps the previous version live
+# rather than serving the bad one.
+#
+# One-time setup (repo Settings):
+#   - Secret  RAILWAY_TOKEN   — a Railway *project* or *account* token with deploy
+#                               rights (Railway → project → Settings → Tokens).
+#   - Variable RAILWAY_SERVICE — the exact API service name shown in Railway.
+# Without both, the job stops early with a clear message instead of half-deploying.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - '.github/workflows/deploy-api.yml'
+  workflow_dispatch:
+
+# Never let two deploys of the same service overlap; a newer push supersedes an
+# in-flight one rather than racing it.
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — required secret/variable present
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          missing=""
+          [ -n "$RAILWAY_TOKEN" ]   || missing="$missing RAILWAY_TOKEN(secret)"
+          [ -n "$RAILWAY_SERVICE" ] || missing="$missing RAILWAY_SERVICE(variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required config:$missing — set them in repo Settings (see workflow header). Skipping deploy."
+            exit 1
+          fi
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy api/ to Railway
+        working-directory: api
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        # `railway up` uploads this exact checkout and triggers a build+deploy of
+        # the named service; --ci keeps it non-interactive and exits once the
+        # deploy is queued (the build + healthcheck then run on Railway).
+        run: railway up --ci --service "$RAILWAY_SERVICE"
