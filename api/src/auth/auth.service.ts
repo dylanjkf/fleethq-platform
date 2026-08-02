@@ -353,7 +353,9 @@ export class AuthService {
   async verifyMfaChallenge(mfaToken: string, code: string, rememberDevice: boolean, context: AuthContext = {}): Promise<LoginResult> {
     let payload: MfaChallengePayload;
     try {
-      payload = this.jwt.verify<MfaChallengePayload>(mfaToken);
+      // Pin the algorithm on verify (defence in depth — the module signs HS256):
+      // never accept whatever `alg` the token header claims.
+      payload = this.jwt.verify<MfaChallengePayload>(mfaToken, { algorithms: ['HS256'] });
     } catch {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'Invalid or expired token.' });
     }
@@ -364,8 +366,19 @@ export class AuthService {
     if (!user || user.archivedAt || !user.mfaEnabledAt) {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'Invalid or expired token.' });
     }
+
+    // Bound second-factor guessing at the account level. The per-IP throttle
+    // alone can be sidestepped by rotating source IPs while replaying the same
+    // still-valid 5-minute mfaToken, so reuse the same lockout counter the
+    // password step uses: a locked account is refused outright.
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+    }
+
     const result = await this.mfa.verifyChallenge(user, code);
     if (!result.ok) {
+      const locked = await this.recordFailedLogin(user.id, user.failedLoginCount);
+      if (locked) await this.handleAccountLocked(user, context);
       void this.audit.recordSystem({
         action: AUDIT_ACTIONS.MFA_CHALLENGE_FAILED,
         outcome: 'failure',
@@ -375,6 +388,11 @@ export class AuthService {
         requestId: context.requestId,
       });
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+    }
+
+    // A correct second factor clears any accumulated failures / lock.
+    if (user.failedLoginCount > 0 || user.lockedUntil) {
+      await this.systemPrisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
     }
 
     if (rememberDevice && payload.deviceFingerprint) {
@@ -451,7 +469,9 @@ export class AuthService {
   async selectCompany(preAuthToken: string, companyId: string, context: AuthContext = {}): Promise<LoginResult> {
     let payload: PreAuthJwtPayload;
     try {
-      payload = this.jwt.verify<PreAuthJwtPayload>(preAuthToken);
+      // Pin the algorithm on verify (defence in depth — the module signs HS256):
+      // never accept whatever `alg` the token header claims.
+      payload = this.jwt.verify<PreAuthJwtPayload>(preAuthToken, { algorithms: ['HS256'] });
     } catch {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'Invalid or expired token.' });
     }

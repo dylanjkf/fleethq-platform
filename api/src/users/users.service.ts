@@ -363,6 +363,18 @@ export class UsersService {
         include: { user: true, role: true },
       });
 
+      // Revoke the user's live sessions: bump tokenVersion so the JWT strategy
+      // rejects any token minted before this deactivation on its next request
+      // (matching the password-reset flow). Done via systemPrisma because only
+      // the auth role holds UPDATE("token_version") on users. This is a
+      // whole-user revocation — a multi-company user removed from one company is
+      // signed out everywhere and re-picks a company on next login; the auth
+      // role can't scope to a single membership (no company_memberships access).
+      await this.systemPrisma.user.update({
+        where: { id: existing.userId },
+        data: { tokenVersion: { increment: 1 } },
+      });
+
       await this.timeline.record(tx, {
         companyId,
         entityType: TimelineEntityType.USER,
@@ -412,6 +424,14 @@ export class UsersService {
         where: { id: existing.id },
         data: { archivedAt: new Date() },
         include: { user: true, role: true },
+      });
+
+      // Revoke live sessions on decommission (same reasoning as deactivate()):
+      // bump tokenVersion via the auth role so any token issued before this is
+      // rejected on its next request.
+      await this.systemPrisma.user.update({
+        where: { id: existing.userId },
+        data: { tokenVersion: { increment: 1 } },
       });
 
       await this.timeline.record(tx, {

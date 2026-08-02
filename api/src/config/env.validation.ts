@@ -142,6 +142,14 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
       );
     }
 
+    // Same reasoning as the DB passwords: the dev escape hatch that disables the
+    // SSRF private-range guard must never be enabled in production.
+    if (config.INTEGRATION_ALLOW_PRIVATE_EGRESS === 'true') {
+      errors.push(
+        'INTEGRATION_ALLOW_PRIVATE_EGRESS must not be set in production — it disables the SSRF egress guard on integration/webhook/push URLs.',
+      );
+    }
+
     // The dev-only database role passwords must never survive into production.
     for (const key of DB_URL_KEYS) {
       const url = typeof config[key] === 'string' ? (config[key] as string) : '';

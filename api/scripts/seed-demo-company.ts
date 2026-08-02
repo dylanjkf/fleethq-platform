@@ -72,6 +72,12 @@ const FAIL_REASONS = [StopFailureReason.NOBODY_HOME, StopFailureReason.BUSINESS_
 const RECIPIENTS = ['J. Smith', 'Reception', 'M. Lee', 'Front desk', 'A. Brown', 'Warehouse'];
 
 async function main() {
+  // These accounts have a well-known default password baked into this script —
+  // exactly the "default credentials" failure prisma/seed.ts guards against.
+  // Refuse to run against a production database.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to run the demo seed with NODE_ENV=production — it creates default-credential accounts.');
+  }
   const existing = await prisma.company.findFirst({ where: { name: COMPANY_NAME } });
   let companyId: string;
   if (existing) {

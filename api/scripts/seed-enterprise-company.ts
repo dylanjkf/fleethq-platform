@@ -140,6 +140,12 @@ const FORM_TEMPLATES = [
 ];
 
 async function main() {
+  // These accounts have a well-known default password baked into this script —
+  // exactly the "default credentials" failure prisma/seed.ts guards against.
+  // Refuse to run against a production database.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to run the enterprise seed with NODE_ENV=production — it creates default-credential accounts.');
+  }
   const existing = await prisma.company.findFirst({ where: { name: COMPANY_NAME } });
   if (existing) {
     // Already seeded. Live-map positions age out after 12h, so a re-run just
