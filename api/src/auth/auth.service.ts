@@ -1,3 +1,7 @@
+/* eslint-disable max-lines */
+// Pre-existing oversized service (predates this security port). Grandfathered to
+// keep the max-lines rule active for the rest of the repo; a proper split is
+// tracked as separate follow-up work.
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
