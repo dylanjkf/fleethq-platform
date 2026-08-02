@@ -20,6 +20,16 @@ function daysAgo(n: number): Date {
   return new Date(Date.now() - n * 24 * 60 * 60 * 1000);
 }
 
+/** Midnight at the start of the current UTC day — the boundary for the "…today" counters. */
+function startOfUtcToday(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+/** A maintenance job is an "open defect" until it reaches its terminal COMPLETE state. */
+const OPEN_DEFECT_STATUSES = ['OPEN', 'IN_PROGRESS', 'PARTS_PENDING'] as const;
+
 interface DailySignupRow {
   day: Date;
   count: bigint;
@@ -46,17 +56,27 @@ export class AdminAnalyticsService {
 
   async overview() {
     const now = new Date();
+    const today = startOfUtcToday();
 
     const [
       activeOrgs,
       suspendedOrgs,
       archivedOrgs,
       totalOrgs,
+      cancelledOrgs,
+      newOrgsToday,
       activeTrialOrgs,
       totalUsers,
       newUsers30d,
+      newUsersToday,
       totalAssets,
       totalOperators,
+      inspectionsChecklist,
+      inspectionsForm,
+      inspectionsChecklistToday,
+      inspectionsFormToday,
+      openDefects,
+      defectsToday,
       subscriptionCounts,
       canceledRecently,
       revenue,
@@ -65,11 +85,20 @@ export class AdminAnalyticsService {
       this.adminPrisma.company.count({ where: { archivedAt: null, suspendedAt: { not: null } } }),
       this.adminPrisma.company.count({ where: { archivedAt: { not: null } } }),
       this.adminPrisma.company.count(),
+      this.adminPrisma.company.count({ where: { archivedAt: null, subscriptionStatus: 'CANCELED' } }),
+      this.adminPrisma.company.count({ where: { createdAt: { gte: today } } }),
       this.adminPrisma.company.count({ where: { archivedAt: null, trialEndsAt: { gt: now } } }),
       this.adminPrisma.user.count({ where: { archivedAt: null } }),
       this.adminPrisma.user.count({ where: { archivedAt: null, createdAt: { gte: daysAgo(30) } } }),
+      this.adminPrisma.user.count({ where: { archivedAt: null, createdAt: { gte: today } } }),
       this.adminPrisma.asset.count(),
       this.adminPrisma.operator.count(),
+      this.adminPrisma.checklistSubmission.count(),
+      this.adminPrisma.formSubmission.count(),
+      this.adminPrisma.checklistSubmission.count({ where: { submittedAt: { gte: today } } }),
+      this.adminPrisma.formSubmission.count({ where: { submittedAt: { gte: today } } }),
+      this.adminPrisma.maintenanceJob.count({ where: { status: { in: [...OPEN_DEFECT_STATUSES] } } }),
+      this.adminPrisma.maintenanceJob.count({ where: { createdAt: { gte: today } } }),
       this.adminPrisma.company.groupBy({ by: ['subscriptionStatus'], where: { archivedAt: null }, _count: true }),
       this.adminPrisma.company.count({
         where: { archivedAt: null, subscriptionStatus: 'CANCELED', updatedAt: { gte: daysAgo(CHURN_WINDOW_DAYS) } },
@@ -78,10 +107,18 @@ export class AdminAnalyticsService {
     ]);
 
     return {
-      organisations: { active: activeOrgs, suspended: suspendedOrgs, archived: archivedOrgs, total: totalOrgs },
+      organisations: { active: activeOrgs, suspended: suspendedOrgs, archived: archivedOrgs, cancelled: cancelledOrgs, total: totalOrgs, newToday: newOrgsToday },
       trials: { active: activeTrialOrgs },
-      users: { total: totalUsers, newLast30Days: newUsers30d },
+      users: { total: totalUsers, newLast30Days: newUsers30d, newToday: newUsersToday },
       fleet: { assets: totalAssets, operators: totalOperators },
+      // Inspections = checklist + form submissions across every tenant; defects = maintenance jobs
+      // not yet COMPLETE. "…today" is measured from midnight UTC (see startOfUtcToday).
+      operations: {
+        inspections: inspectionsChecklist + inspectionsForm,
+        inspectionsToday: inspectionsChecklistToday + inspectionsFormToday,
+        openDefects,
+        defectsReportedToday: defectsToday,
+      },
       subscriptions: Object.fromEntries(subscriptionCounts.map((c) => [c.subscriptionStatus, c._count])),
       churn: { canceledLast30Days: canceledRecently, windowDays: CHURN_WINDOW_DAYS },
       revenue,

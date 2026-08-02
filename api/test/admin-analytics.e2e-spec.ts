@@ -51,6 +51,14 @@ describe('Admin Analytics', () => {
     expect(typeof res.body.fleet.operators).toBe('number');
     expect(res.body.subscriptions).toBeDefined();
     expect(res.body.churn.windowDays).toBe(30);
+    // Dashboard operations KPIs (inspections + defects) and the "today"/cancelled counters.
+    expect(typeof res.body.organisations.cancelled).toBe('number');
+    expect(typeof res.body.organisations.newToday).toBe('number');
+    expect(typeof res.body.users.newToday).toBe('number');
+    expect(typeof res.body.operations.inspections).toBe('number');
+    expect(typeof res.body.operations.inspectionsToday).toBe('number');
+    expect(typeof res.body.operations.openDefects).toBe('number');
+    expect(typeof res.body.operations.defectsReportedToday).toBe('number');
     // No STRIPE_SECRET_KEY in this test environment — must honestly report
     // that, not fabricate a revenue number.
     expect(res.body.revenue.billingConfigured).toBe(false);
