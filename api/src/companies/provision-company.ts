@@ -46,6 +46,14 @@ export interface ProvisionCompanyInput {
   /** Optional contact email for the first admin — the target for a verification link. */
   adminEmail?: string;
   /**
+   * Force the first admin to change their password at next login (before the
+   * account is usable). Set by the FleetHQ admin "issue a customer login" flow,
+   * which creates the account with a temporary password it shows once and never
+   * stores. Defaults to false for self-serve signup / seed, where the admin
+   * chose their own password.
+   */
+  adminMustChangePassword?: boolean;
+  /**
    * Length of the native free trial to grant (days). Self-serve signup passes
    * this so a new company starts on the Trial tier; the seed/dev bootstrap
    * omits it (no trial — dev runs unlimited via BILLING_ENFORCED=false anyway).
@@ -141,6 +149,7 @@ export async function provisionCompany(
         passwordHash: await bcrypt.hash(input.adminPassword, 10),
         fullName: input.adminFullName,
         email: input.adminEmail ?? null,
+        mustChangePassword: input.adminMustChangePassword ?? false,
       },
     ],
   });

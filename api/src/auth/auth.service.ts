@@ -58,6 +58,7 @@ interface LoginUser {
   fullName: string;
   mfaEnabledAt: Date | null;
   passwordChangedAt: Date;
+  mustChangePassword: boolean;
 }
 
 interface LoginExtra {
@@ -698,7 +699,9 @@ export class AuthService {
     await this.passwordPolicy.recordPreviousHash(user.id, user.passwordHash);
     await this.systemPrisma.user.update({
       where: { id: user.id },
-      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date(), tokenVersion: { increment: 1 } },
+      // Clear the admin-issued "must change" flag: the temporary credential has
+      // now been rotated, so the account is usable and can't be forced again.
+      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date(), tokenVersion: { increment: 1 }, mustChangePassword: false },
     });
     await this.sessions.revokeAllSessions(user.id);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: user.id, actorLabel: user.username, ip: context.ip, requestId: context.requestId });

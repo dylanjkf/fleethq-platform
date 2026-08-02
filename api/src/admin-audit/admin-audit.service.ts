@@ -16,6 +16,7 @@ export const ADMIN_AUDIT_ACTIONS = {
   LOGOUT: 'admin_auth.logout',
   DEVICE_TRUSTED: 'admin_auth.device_trusted',
   PERMISSION_DENIED: 'admin_access.permission_denied',
+  ORGANISATION_CREATED: 'organisations.created',
   ORGANISATION_SUSPENDED: 'organisations.suspended',
   ORGANISATION_RESTORED: 'organisations.restored',
   ORGANISATION_ARCHIVED: 'organisations.archived',
