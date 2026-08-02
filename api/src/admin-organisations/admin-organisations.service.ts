@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from 'crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
@@ -6,10 +7,22 @@ import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
+import { provisionCompany } from '../companies/provision-company';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
+import { CreateOrganisationDto } from './dto/create-organisation.dto';
 
 /** Impersonation sessions are deliberately short — a support action, not a normal login. */
 const IMPERSONATION_TOKEN_EXPIRES_IN = '30m';
+
+/**
+ * A strong one-time temporary password: 30 base64url chars of CSPRNG entropy
+ * (~180 bits). base64url always mixes upper/lower/digits, so it clears the
+ * password-strength policy on its own; it's only ever held in memory for this
+ * one request, hashed by provisionCompany, and shown once to the issuing admin.
+ */
+function generateTemporaryPassword(): string {
+  return randomBytes(24).toString('base64url').slice(0, 30);
+}
 
 @Injectable()
 export class AdminOrganisationsService {
@@ -20,6 +33,65 @@ export class AdminOrganisationsService {
     private readonly mail: AuthMailService,
     private readonly timeline: TimelineService,
   ) {}
+
+  /**
+   * Issue a brand-new customer organisation + its first Administrator login.
+   * Generates a strong temporary password server-side, provisions the company
+   * via the same `provisionCompany` path self-serve signup uses (so there's no
+   * second, parallel account-creation mechanism), flags the account
+   * `mustChangePassword` so the temporary credential can't outlive first login,
+   * and returns the credentials ONCE. The plaintext password is never stored or
+   * logged — only its bcrypt hash (written inside provisionCompany) persists.
+   */
+  async createOrganisation(dto: CreateOrganisationDto, context: AdminActionContext) {
+    const companyName = dto.companyName.trim();
+    const username = dto.adminEmail.trim().toLowerCase();
+
+    // Fail early on a friendly message rather than a raw unique-constraint error.
+    const existing = await this.adminPrisma.user.findUnique({ where: { username } });
+    if (existing) {
+      throw new ConflictException({ code: 'EMAIL_IN_USE', message: 'A login with that email already exists.' });
+    }
+
+    const temporaryPassword = generateTemporaryPassword();
+    const companyId = randomUUID();
+
+    try {
+      await this.adminPrisma.$transaction((tx) =>
+        provisionCompany(tx, {
+          companyId,
+          companyName,
+          adminUsername: username,
+          adminPassword: temporaryPassword,
+          adminFullName: dto.adminFullName?.trim() || `${companyName} Administrator`,
+          adminEmail: username,
+          adminMustChangePassword: true,
+        }),
+      );
+    } catch (err) {
+      // Lost a race on the globally-unique username, or the email collides with
+      // an account in another org — same generic conflict either way.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException({ code: 'EMAIL_IN_USE', message: 'A login with that email already exists.' });
+      }
+      throw err;
+    }
+
+    await this.audit.record({
+      adminUserId: context.adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.ORGANISATION_CREATED,
+      entityType: 'company',
+      entityId: companyId,
+      organisationId: companyId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+      // Never the password — only who/what was created.
+      afterValue: { companyName, adminUsername: username, mustChangePassword: true },
+    });
+
+    // Return the credentials exactly once; the caller shows them and discards them.
+    return { companyId, companyName, username, temporaryPassword };
+  }
 
   private statusWhere(status: AdminOrganisationsQueryDto['status']): Prisma.CompanyWhereInput {
     switch (status) {

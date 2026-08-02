@@ -395,6 +395,12 @@ model User {
   /// at login (Auth/Billing Platform Phase 3) to decide whether a rotation is
   /// due — see AuthService's `finishLoginForMembership`.
   passwordChangedAt       DateTime  @default(now()) @map("password_changed_at")
+  /// Forces a password change at next login before the account can be used —
+  /// set when FleetHQ staff issue an account with a temporary password (admin
+  /// "issue customer login"). The login policy gate turns this into the same
+  /// `password_expired` block the expiry policy uses, and `changeExpiredPassword`
+  /// clears it, so a handed-over temporary credential can't be reused long-term.
+  mustChangePassword      Boolean   @default(false) @map("must_change_password")
   /// Multi-factor auth (TOTP). `mfaSecret` is the base32 shared secret;
   /// `mfaEnabledAt` is set only once a code is confirmed, and MFA is enforced at
   /// login iff it is non-null (a secret without it is a pending enrolment).

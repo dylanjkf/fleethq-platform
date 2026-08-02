@@ -10,6 +10,7 @@ import { AuthenticatedAdminRequestUser } from '../admin-auth/admin-jwt-payload.i
 import { ADMIN_PERMISSIONS } from '../common/permissions/admin-permission-catalog';
 import { AdminOrganisationsService } from './admin-organisations.service';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
+import { CreateOrganisationDto } from './dto/create-organisation.dto';
 import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
 import { UpdateTrialDto } from './dto/update-trial.dto';
 import { ImpersonateUserDto } from './dto/impersonate-user.dto';
@@ -30,6 +31,27 @@ export class AdminOrganisationsController {
   @Get()
   list(@Query() query: AdminOrganisationsQueryDto) {
     return this.organisations.list(query);
+  }
+
+  /**
+   * Issue a brand-new customer organisation + its first Administrator login.
+   * Admin-only (AdminGuarded + ORGANISATIONS_CREATE) and throttled as a
+   * sensitive action so it can't be hit anonymously or hammered in a loop.
+   * Returns the generated temporary credentials once — the SPA shows them in a
+   * copy-once box; they are never persisted in plaintext.
+   */
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_CREATE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  createOrganisation(
+    @Body() dto: CreateOrganisationDto,
+    @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
+    @Ip() ip: string,
+    @Req() req: Request,
+  ) {
+    return this.organisations.createOrganisation(dto, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
   }
 
   @AdminGuarded()

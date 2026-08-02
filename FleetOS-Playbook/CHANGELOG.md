@@ -2,6 +2,14 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-02 — Admin "issue a new customer login"
+
+New FleetHQ staff-admin capability: provision a brand-new customer organisation and its first Administrator login from the admin console.
+
+- **Backend (`fleethq-platform`).** `POST /v1/admin/organisations` (`AdminGuarded` + `ORGANISATIONS_CREATE` permission + sensitive-action throttle) validates the email (format + not already in use), generates a strong one-time temporary password server-side (~180 bits CSPRNG, never taken from the client), and creates the account through the **existing** `provisionCompany` path — the same code self-serve signup and the seed use — so there is no second parallel account-creation mechanism. The new `User.mustChangePassword` flag is set on the issued account; the login policy gate (`AuthPolicyGateService`) turns it into the same `password_expired` block the expiry policy already uses, and `AuthService.changeExpiredPassword` clears it, so a handed-over temporary credential can't be reused past first sign-in. The generated credentials are returned exactly once and never persisted in plaintext (only the bcrypt hash written by `provisionCompany`); the admin audit log records who/what was created but never the password. Migration `20260802020000_admin_issue_customer_login` adds the column plus the column-level `UPDATE` grant `fleetos_auth` needs to clear the flag and the `INSERT` grants `fleetos_admin` needs to run `provisionCompany`.
+- **Frontend (`fleethq-frontend`, admin SPA).** New "New customer login" page + route, gated on the `organisations:create` permission, with a form (company name, admin email, optional admin display name) and a copy-once credentials box ("copy this now — it won't be shown again"). No email is sent automatically; the admin hands the credentials over. Clear inline errors for in-use email, validation, forbidden, and rate-limit responses.
+- **Tests.** An e2e spec confirms the endpoint is unreachable without an admin token (401) and without the permission (403), that an issued login forces a password change on first sign-in and then authenticates, that a duplicate email is rejected (409), and that a malformed email is rejected (400); plus policy-gate unit tests for the must-change → `password_expired` behaviour and its ordering behind MFA setup.
+
 ## 2026-08-02 — Enterprise Production Readiness Audit **Round 2** remediation
 
 Second independent audit (Round 2) treated as source of truth. Work sequenced Critical → High → Medium → Low across `fleethq-platform`, `fleethq-frontend`, `fleethq-driveros`.

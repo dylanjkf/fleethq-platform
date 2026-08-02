@@ -9,6 +9,8 @@ export interface PolicyCheckUser {
   id: string;
   mfaEnabledAt: Date | null;
   passwordChangedAt: Date;
+  /** Admin-issued temporary credential: force a change before the account is usable. */
+  mustChangePassword: boolean;
 }
 
 export interface PolicyCheckMembership {
@@ -64,6 +66,14 @@ export class AuthPolicyGateService {
     const mfaSatisfied = !mfaRequired || !!user.mfaEnabledAt || extra.loginMethod === 'webauthn';
     if (!mfaSatisfied) {
       return { status: 'mfa_setup_required', setupToken: this.signPolicyToken(user.id, membership, 'mfa_setup', extra) };
+    }
+
+    // A temporary credential issued by FleetHQ staff (admin "issue customer
+    // login") must be rotated before the account can be used — surfaced as the
+    // same `password_expired` block the expiry policy uses, so the frontend's
+    // existing forced-change flow handles it with no new client state.
+    if (user.mustChangePassword) {
+      return { status: 'password_expired', changeToken: this.signPolicyToken(user.id, membership, 'password_expired', extra) };
     }
 
     if (policy?.passwordExpiryDays) {
