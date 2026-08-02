@@ -21,4 +21,14 @@ else
   echo "RUN_MIGRATIONS_ON_BOOT=false — skipping boot migration (run migrations as a dedicated pre-deploy step)."
 fi
 
+# Seed the permission catalog + built-in reference data (idempotent), and — when
+# BOOTSTRAP_COMPANY_ADMIN=true — create the first company + admin login from env.
+# The ts-node seed/bootstrap scripts don't ship in the runtime image, so this
+# compiled entry point is the only in-container path to seed a fresh production
+# database. It never throws, but guard the call too so a bootstrap hiccup can
+# never stop the app from starting. Set BOOTSTRAP_ON_BOOT=false to skip entirely.
+if [ "${BOOTSTRAP_ON_BOOT:-true}" = "true" ]; then
+  node dist/bootstrap/prod-bootstrap.js || echo "[bootstrap] failed (non-fatal) — starting the app anyway."
+fi
+
 exec "$@"
