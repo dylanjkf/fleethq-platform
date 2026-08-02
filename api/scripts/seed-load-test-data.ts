@@ -10,6 +10,9 @@
 import './load-env';
 import { PrismaClient, AssetClassKey, JobStatus, MaintenanceSeverity, MaintenanceJobStatus } from '@prisma/client';
 import { provisionCompany } from '../src/companies/provision-company';
+import { assertSafeToSeed } from './seed-guard';
+
+assertSafeToSeed('seed-load-test-data');
 
 const prisma = new PrismaClient();
 
@@ -22,6 +25,10 @@ const JOB_COUNT = 1000;
 const MAINTENANCE_JOB_COUNT = 400;
 
 async function main() {
+  // Bulk load-test fixtures with default credentials — never against production.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Refusing to run the load-test seed with NODE_ENV=production.');
+  }
   const existing = await prisma.company.findFirst({ where: { name: COMPANY_NAME } });
   let companyId: string;
   if (existing) {

@@ -18,6 +18,12 @@ export const AUDIT_ACTIONS = {
   MFA_DISABLED: 'auth.mfa_disabled',
   MFA_CHALLENGE_FAILED: 'auth.mfa_challenge_failed',
   MFA_BACKUP_CODE_USED: 'auth.mfa_backup_code_used',
+  /** A passkey/WebAuthn credential was enrolled on the account (as sensitive as MFA_ENABLED). */
+  WEBAUTHN_CREDENTIAL_ADDED: 'auth.webauthn_credential_added',
+  /** A passkey/WebAuthn credential was removed from the account. */
+  WEBAUTHN_CREDENTIAL_REMOVED: 'auth.webauthn_credential_removed',
+  /** A verified external sign-in identity (Google/Microsoft) was auto-linked to an existing account for the first time. */
+  OAUTH_IDENTITY_LINKED: 'auth.oauth_identity_linked',
   SESSION_REVOKED: 'auth.session_revoked',
   LOGOUT: 'auth.logout',
   DEVICE_TRUSTED: 'auth.device_trusted',
@@ -238,8 +244,22 @@ export class AuditService {
     };
   }
 
-  /** RFC 4180 escaping: quote a field that contains a comma, quote or newline, doubling any inner quote. */
+  /**
+   * Serialise one CSV field safely.
+   *
+   * Two independent concerns:
+   *  1. Formula/CSV injection (OWASP): a cell starting with =, +, -, @ (or a
+   *     leading tab/CR that spreadsheets strip before evaluating the trigger)
+   *     is executed as a formula when opened in Excel/Sheets. We neutralise it
+   *     by prefixing a single quote, which the spreadsheet renders as a literal
+   *     text cell while preserving the original value verbatim.
+   *  2. RFC 4180 escaping: a field containing a comma, quote or newline is
+   *     wrapped in double quotes with inner quotes doubled.
+   *
+   * The neutraliser is applied first so the guard survives the RFC quoting.
+   */
   private csvCell(value: string): string {
-    return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+    const neutralised = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+    return /[",\r\n]/.test(neutralised) ? `"${neutralised.replace(/"/g, '""')}"` : neutralised;
   }
 }

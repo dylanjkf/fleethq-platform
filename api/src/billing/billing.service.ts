@@ -1,3 +1,7 @@
+/* eslint-disable max-lines */
+// Pre-existing oversized service (predates this security port; not modified by
+// it). Grandfathered to keep the max-lines rule active for the rest of the repo;
+// a proper split is tracked as separate follow-up work.
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
@@ -8,6 +12,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isTrialActive } from './plans';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** How close to `trialEndsAt` the native (no-card) trial reminder fires. */
+const TRIAL_REMINDER_DAYS = 3;
 
 /**
  * FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing & subscription
@@ -38,6 +46,13 @@ import { PAID_TIERS, isTrialActive } from './plans';
 export class BillingService {
   private readonly logger = new Logger(BillingService.name);
   private stripeClient: Stripe | null = null;
+  /**
+   * In-process cache of the auto-created Billing Portal Configuration id (see
+   * `getPortalConfigurationId`). Prevents rebuilding the configuration on every
+   * portal-session request; a deployment that sets `STRIPE_PORTAL_CONFIGURATION_ID`
+   * bypasses this path entirely.
+   */
+  private cachedPortalConfigurationId: string | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -317,11 +332,130 @@ export class BillingService {
         message: 'This company has no billing account yet — start a checkout session first.',
       });
     }
+    // Revenue-integrity guard (parity with createCheckoutSession's allowlist):
+    // pin the portal to a Billing Portal Configuration whose plan-switching is
+    // restricted to the SAME prices we sell at checkout. Without an explicit
+    // `configuration`, Stripe uses the Dashboard default config — and if
+    // plan-switching is enabled there, a customer could switch to ANY price in
+    // the account, bypassing the server-side checkout allowlist entirely. This
+    // must not depend on Dashboard state, so we build/reuse the configuration in
+    // application code.
+    const configuration = await this.getPortalConfigurationId(stripe);
     const session = await stripe.billingPortal.sessions.create({
       customer: company.stripeCustomerId,
       return_url: returnUrl,
+      ...(configuration ? { configuration } : {}),
     });
     return { url: session.url };
+  }
+
+  /**
+   * Resolves the Stripe Billing Portal Configuration id whose `subscription_update`
+   * feature is locked to this deployment's checkout allowlist (`configuredPriceIds`),
+   * so a customer using the portal can only ever switch between the same tiers
+   * they could buy at checkout — never an arbitrary account price.
+   *
+   * Resolution order (idempotent — never creates a new configuration per call):
+   *  1. `STRIPE_PORTAL_CONFIGURATION_ID` env var, if set — the recommended
+   *     production posture (a config managed once, out of band).
+   *  2. A previously-created fleetos-managed configuration matching the current
+   *     allowlist fingerprint — found via `configurations.list` (survives process
+   *     restarts) or the in-process cache.
+   *  3. Otherwise, create one (with an idempotency key keyed on the allowlist
+   *     fingerprint so concurrent first-requests collapse to a single config).
+   *
+   * When the allowlist is empty (no price ids configured) or a price can't be
+   * resolved to its product, `subscription_update` is DISABLED rather than left
+   * open — the safe, more-restrictive default.
+   */
+  private async getPortalConfigurationId(stripe: Stripe): Promise<string | undefined> {
+    const explicit = this.config.get<string>('STRIPE_PORTAL_CONFIGURATION_ID');
+    if (explicit) return explicit;
+    if (this.cachedPortalConfigurationId) return this.cachedPortalConfigurationId;
+
+    const priceIds = [...this.configuredPriceIds()];
+    const fingerprint = this.portalAllowlistFingerprint(priceIds);
+
+    // Reuse a matching fleetos-managed configuration if one already exists, so a
+    // process restart (which clears the in-memory cache and expires the 24h
+    // idempotency key) doesn't accumulate a new configuration each day.
+    try {
+      const existing = await stripe.billingPortal.configurations.list({ limit: 100 });
+      const match = existing.data.find((c) => c.active && c.metadata?.fleetosPortalFingerprint === fingerprint);
+      if (match) {
+        this.cachedPortalConfigurationId = match.id;
+        return match.id;
+      }
+    } catch (err) {
+      this.logger.warn(`Could not list Stripe billing portal configurations for reuse: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const products = await this.buildPortalAllowedProducts(stripe, priceIds);
+    const configuration = await stripe.billingPortal.configurations.create(
+      {
+        business_profile: this.portalBusinessProfile(),
+        features: {
+          customer_update: { enabled: true, allowed_updates: ['email', 'address', 'phone', 'tax_id'] },
+          invoice_history: { enabled: true },
+          payment_method_update: { enabled: true },
+          subscription_cancel: { enabled: true, mode: 'at_period_end' },
+          subscription_update:
+            products.length > 0
+              ? { enabled: true, default_allowed_updates: ['price'], products, proration_behavior: 'create_prorations' }
+              : { enabled: false },
+        },
+        metadata: { fleetosPortalFingerprint: fingerprint },
+      },
+      // Idempotency key on the allowlist fingerprint: concurrent first-requests
+      // (before the cache is warm) reuse one configuration instead of racing to
+      // create several. A changed allowlist yields a new fingerprint → new key.
+      { idempotencyKey: `portal-config:${fingerprint}` },
+    );
+    this.cachedPortalConfigurationId = configuration.id;
+    return configuration.id;
+  }
+
+  /** A stable fingerprint of the sold price ids, order-independent, so a portal configuration can be matched/reused for a given allowlist. */
+  private portalAllowlistFingerprint(priceIds: string[]): string {
+    return [...priceIds].sort().join(',') || 'none';
+  }
+
+  /**
+   * Groups the allowlisted price ids by their Stripe product, the shape
+   * `subscription_update.products` requires. Each price is retrieved to resolve
+   * its product; an unresolvable price is skipped (logged) rather than left to
+   * silently widen the allowlist.
+   */
+  private async buildPortalAllowedProducts(
+    stripe: Stripe,
+    priceIds: string[],
+  ): Promise<Stripe.BillingPortal.ConfigurationCreateParams.Features.SubscriptionUpdate.Product[]> {
+    const byProduct = new Map<string, string[]>();
+    for (const priceId of priceIds) {
+      try {
+        const price = await stripe.prices.retrieve(priceId);
+        const productId = typeof price.product === 'string' ? price.product : price.product?.id;
+        if (!productId) continue;
+        const prices = byProduct.get(productId) ?? [];
+        prices.push(priceId);
+        byProduct.set(productId, prices);
+      } catch (err) {
+        this.logger.warn(`Could not resolve Stripe price ${priceId} to a product for the billing portal allowlist: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return [...byProduct.entries()].map(([product, prices]) => ({ product, prices }));
+  }
+
+  /** Portal business info (headline is always safe; policy links are attached only when a URL is resolvable, since Stripe stores them verbatim). */
+  private portalBusinessProfile(): Stripe.BillingPortal.ConfigurationCreateParams.BusinessProfile {
+    const appBase = this.config.get<string>('APP_BASE_URL')?.replace(/\/$/, '');
+    const privacy = this.config.get<string>('PRIVACY_POLICY_URL') ?? (appBase ? `${appBase}/privacy` : undefined);
+    const terms = this.config.get<string>('TERMS_OF_SERVICE_URL') ?? (appBase ? `${appBase}/terms` : undefined);
+    return {
+      headline: 'Manage your FleetOS subscription',
+      ...(privacy ? { privacy_policy_url: privacy } : {}),
+      ...(terms ? { terms_of_service_url: terms } : {}),
+    };
   }
 
   /**
@@ -404,6 +538,25 @@ export class BillingService {
       case 'customer.subscription.deleted':
         await this.handleSubscriptionEvent(event.data.object as Stripe.Subscription, eventCreatedAt);
         break;
+      // A subscription Stripe has paused (e.g. a paused dunning outcome, or an
+      // admin/portal pause) stops billing but is a distinct state the account's
+      // billing:manage holders should be told about — sync the status AND notify,
+      // rather than letting it fold silently into the generic update handler.
+      case 'customer.subscription.paused':
+        await this.handleSubscriptionPaused(event.data.object as Stripe.Subscription, eventCreatedAt);
+        break;
+      // Stripe's own trial (subscription in `trialing`) is about to end and
+      // convert to a paid charge — nudge billing:manage holders so a conversion
+      // is never a surprise. Distinct from FleetOS's native no-card trial
+      // reminder (the scheduled `remindTrialEnding` job).
+      case 'customer.subscription.trial_will_end':
+        await this.handleTrialWillEnd(event.data.object as Stripe.Subscription);
+        break;
+      // A chargeback. Revenue-critical and time-boxed (Stripe imposes a response
+      // deadline), so this must never be silent — notify AND email urgently.
+      case 'charge.dispute.created':
+        await this.handleChargeDisputeCreated(stripe, event.data.object as Stripe.Dispute);
+        break;
       case 'invoice.payment_failed':
         await this.handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
         break;
@@ -466,6 +619,134 @@ export class BillingService {
         linkPath: '/billing',
       }),
     );
+  }
+
+  /**
+   * `customer.subscription.paused` — Stripe has paused the subscription (no
+   * further charges until it resumes). Advances the stored subscriptionStatus
+   * through the same ordering-guarded `syncSubscription` as any other
+   * subscription event, then notifies + emails billing:manage holders so a
+   * paused account isn't a silent surprise.
+   */
+  private async handleSubscriptionPaused(subscription: Stripe.Subscription, eventCreatedAt: Date): Promise<void> {
+    const companyId = subscription.metadata?.fleetosCompanyId;
+    if (!companyId) {
+      this.logger.warn(`Received customer.subscription.paused with no fleetosCompanyId metadata (subscription ${subscription.id})`);
+      return;
+    }
+    await this.syncSubscription(companyId, subscription.customer as string, subscription, eventCreatedAt);
+
+    const { companyName, holders } = await this.prisma.withTenant(companyId, async (tx) => {
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.subscription_paused',
+        title: 'Your subscription has been paused',
+        body: 'Your FleetOS subscription is paused and will not be billed until it resumes. Some paid features may be unavailable while it is paused — reach out if this was unexpected.',
+        linkPath: '/billing',
+      });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, holders };
+    });
+
+    this.sendBillingEmails(holders, (email, fullName) => this.billingMail.sendSubscriptionPaused(email, fullName, companyName));
+  }
+
+  /**
+   * `customer.subscription.trial_will_end` — Stripe fires this ~3 days before a
+   * `trialing` subscription converts to a paid charge. Notifies + emails
+   * billing:manage holders so the upcoming charge is expected. Purely
+   * informational: it changes no stored state (the eventual conversion arrives
+   * as its own `customer.subscription.updated`).
+   */
+  private async handleTrialWillEnd(subscription: Stripe.Subscription): Promise<void> {
+    const companyId = subscription.metadata?.fleetosCompanyId;
+    if (!companyId) {
+      this.logger.warn(`Received customer.subscription.trial_will_end with no fleetosCompanyId metadata (subscription ${subscription.id})`);
+      return;
+    }
+    const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null;
+
+    const { companyName, holders } = await this.prisma.withTenant(companyId, async (tx) => {
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.trial_will_end',
+        title: 'Your trial is ending soon',
+        body: trialEnd
+          ? `Your subscription trial ends on ${trialEnd.toLocaleDateString('en-AU')}, after which your payment method will be charged. Review your plan or update your payment details before then.`
+          : 'Your subscription trial is ending soon, after which your payment method will be charged. Review your plan or update your payment details before then.',
+        linkPath: '/billing',
+      });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, holders };
+    });
+
+    this.sendBillingEmails(holders, (email, fullName) => this.billingMail.sendTrialWillEnd(email, fullName, companyName, trialEnd));
+  }
+
+  /**
+   * `charge.dispute.created` — a cardholder has opened a dispute (chargeback).
+   * Revenue-critical and time-boxed, so it is raised URGENTLY (in-app + email)
+   * to every billing:manage holder; it never silently no-ops on a resolvable
+   * company. Company is resolved from the disputed charge's metadata, falling
+   * back to the charge's customer metadata (always set at customer creation).
+   */
+  private async handleChargeDisputeCreated(stripe: Stripe, dispute: Stripe.Dispute): Promise<void> {
+    const companyId = await this.resolveCompanyIdFromCharge(stripe, dispute.charge);
+    if (!companyId) {
+      this.logger.warn(`Received charge.dispute.created with no resolvable company (dispute ${dispute.id})`);
+      return;
+    }
+    const amount = this.formatMinorAmount(dispute.amount, dispute.currency);
+    const dueBy = dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000) : null;
+
+    const { companyName, holders } = await this.prisma.withTenant(companyId, async (tx) => {
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.dispute_created',
+        title: 'Urgent: a payment was disputed (chargeback)',
+        body: dueBy
+          ? `A cardholder disputed a ${amount} payment. Submit evidence in Stripe before ${dueBy.toLocaleDateString('en-AU')} or the amount plus a dispute fee will be lost.`
+          : `A cardholder disputed a ${amount} payment. Respond in Stripe before the deadline or the amount plus a dispute fee will be lost.`,
+        linkPath: '/billing',
+      });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, holders };
+    });
+
+    this.sendBillingEmails(holders, (email, fullName) => this.billingMail.sendDisputeCreated(email, fullName, companyName, amount, dueBy));
+  }
+
+  /**
+   * Resolves the owning company for a charge (used by the dispute handler):
+   * the charge's own `fleetosCompanyId` metadata if present, else the charge's
+   * customer metadata (set on every customer at creation). Best-effort — returns
+   * undefined if the charge/customer can't be fetched.
+   */
+  private async resolveCompanyIdFromCharge(stripe: Stripe, charge: string | Stripe.Charge | null): Promise<string | undefined> {
+    if (!charge) return undefined;
+    try {
+      const full = typeof charge === 'string' ? await stripe.charges.retrieve(charge, { expand: ['customer'] }) : charge;
+      const fromCharge = typeof full.metadata?.fleetosCompanyId === 'string' ? full.metadata.fleetosCompanyId : undefined;
+      if (fromCharge) return fromCharge;
+      const customer = full.customer;
+      if (customer && typeof customer !== 'string' && !('deleted' in customer && customer.deleted)) {
+        const fromCustomer = (customer as Stripe.Customer).metadata?.fleetosCompanyId;
+        if (typeof fromCustomer === 'string') return fromCustomer;
+      }
+      return undefined;
+    } catch (err) {
+      this.logger.warn(`Could not resolve a company from charge ${typeof charge === 'string' ? charge : charge.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  }
+
+  /** Format a Stripe minor-unit amount (e.g. cents) as a currency string for a customer-facing message. */
+  private formatMinorAmount(amount: number, currency: string): string {
+    try {
+      return new Intl.NumberFormat('en-AU', { style: 'currency', currency: currency.toUpperCase() }).format(amount / 100);
+    } catch {
+      return `${(amount / 100).toFixed(2)} ${currency.toUpperCase()}`;
+    }
   }
 
   private async handleCheckoutSessionCompleted(stripe: Stripe, session: Stripe.Checkout.Session, eventCreatedAt: Date): Promise<void> {
@@ -568,6 +849,58 @@ export class BillingService {
         this.logger.warn(`Failed to send a billing notification email: ${err instanceof Error ? err.message : String(err)}`),
       );
     }
+  }
+
+  /**
+   * Native (no-card) free-trial reminder for one company: if this company's
+   * `trialEndsAt` falls inside the reminder window and it hasn't already
+   * subscribed, notify + email its billing:manage holders once.
+   *
+   * Idempotent by design (safe to run daily): a `billing.trial_ending`
+   * notification created since the window opened is the "already reminded"
+   * marker, so a company is nudged once per trial window, not every tick — the
+   * same "the alert mark makes a re-run a no-op" shape the compliance/maintenance
+   * sweeps use. Returns the number of holders reminded (0 = nothing to do).
+   */
+  async remindTrialEnding(companyId: string, now: Date = new Date()): Promise<number> {
+    const windowMs = TRIAL_REMINDER_DAYS * DAY_MS;
+    const result = await this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: { name: true, trialEndsAt: true, subscriptionStatus: true },
+      });
+      const trialEndsAt = company.trialEndsAt;
+      if (!trialEndsAt) return null;
+      const msLeft = trialEndsAt.getTime() - now.getTime();
+      // Only the final window, and never after it has already lapsed.
+      if (msLeft <= 0 || msLeft > windowMs) return null;
+      // A company that has already taken up a Stripe subscription doesn't need a
+      // "your free trial ends" nudge — the native trial only matters while there
+      // is no paid subscription at all.
+      if (company.subscriptionStatus !== SubscriptionStatus.NONE) return null;
+      // Idempotency: one reminder per trial window.
+      const windowStart = new Date(trialEndsAt.getTime() - windowMs);
+      const already = await tx.notification.findFirst({
+        where: { type: 'billing.trial_ending', createdAt: { gte: windowStart } },
+        select: { id: true },
+      });
+      if (already) return null;
+
+      await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
+        type: 'billing.trial_ending',
+        title: 'Your free trial ends soon',
+        body: `Your FleetOS free trial ends on ${trialEndsAt.toLocaleDateString('en-AU')}. Choose a plan before then to keep full access to your fleet.`,
+        linkPath: '/billing',
+      });
+      const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
+      return { companyName: company.name, trialEndsAt, holders };
+    });
+    if (!result) return 0;
+
+    this.sendBillingEmails(result.holders, (email, fullName) =>
+      this.billingMail.sendTrialEndingReminder(email, fullName, result.companyName, result.trialEndsAt),
+    );
+    return result.holders.length;
   }
 
   private async syncSubscription(

@@ -64,6 +64,7 @@ import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
 import { AdminFeatureFlagsModule } from './admin-feature-flags/admin-feature-flags.module';
 import { AdminSystemModule } from './admin-system/admin-system.module';
 import { AdminFleetModule } from './admin-fleet/admin-fleet.module';
+import { AdminUsersModule } from './admin-users/admin-users.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
@@ -199,6 +200,7 @@ import { validateEnv } from './config/env.validation';
     AdminFeatureFlagsModule,
     AdminSystemModule,
     AdminFleetModule,
+    AdminUsersModule,
   ],
   providers: [
     // Order matters: throttle first (cheapest check, rejects abuse before

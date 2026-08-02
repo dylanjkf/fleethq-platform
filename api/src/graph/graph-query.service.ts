@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 
 export interface RelationshipItem {
   id: string;
@@ -124,6 +125,10 @@ export class GraphQueryService {
     topAssets: { assetId: string; assetName: string; connections: number }[];
   }> {
     return this.prisma.withTenant(companyId, async (tx) => {
+      // Rolled up in JS (byType / topAssets / linked-entity sets below), so
+      // bound the read: MAX_AGGREGATION_ROWS is far above any real fleet's
+      // relationship count, but a hard ceiling so a pathological graph can't
+      // turn this dashboard widget into an unbounded scan.
       const rows = await tx.graphRelationship.findMany({
         where: { companyId },
         select: {
@@ -134,6 +139,7 @@ export class GraphQueryService {
           targetType: true,
           targetId: true,
         },
+        take: MAX_AGGREGATION_ROWS,
       });
 
       const byType = new Map<string, { current: number; total: number }>();

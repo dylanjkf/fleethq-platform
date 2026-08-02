@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { ListQueryDto } from '../common/dto/list-query.dto';
+import { assertOwnership } from '../common/ownership';
 import { CreateAttachedUnitDto } from './dto/create-attached-unit.dto';
 import { UpdateAttachedUnitDto } from './dto/update-attached-unit.dto';
 
@@ -241,10 +242,11 @@ export class AttachedUnitsService {
   async hitch(companyId: string, actorUserId: string, id: string, assetId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
       const attachedUnit = await this.requireAttachedUnit(tx, companyId, id);
-      const asset = await tx.asset.findUnique({ where: { id: assetId } });
-      if (!asset || asset.companyId !== companyId || asset.archivedAt) {
-        throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
-      }
+      const asset = await assertOwnership(tx.asset, assetId, companyId, {
+        code: 'ASSET_NOT_FOUND',
+        message: 'Asset not found.',
+        allowArchived: false,
+      });
 
       await tx.graphRelationship.updateMany({
         where: {
@@ -315,14 +317,11 @@ export class AttachedUnitsService {
     });
   }
 
-  async requireAttachedUnit(tx: Prisma.TransactionClient, companyId: string, id: string) {
-    const attachedUnit = await tx.attachedUnit.findUnique({ where: { id } });
-    if (!attachedUnit || attachedUnit.companyId !== companyId) {
-      throw new NotFoundException({
-        code: 'ATTACHED_UNIT_NOT_FOUND',
-        message: 'Attached unit not found.',
-      });
-    }
-    return attachedUnit;
+  requireAttachedUnit(tx: Prisma.TransactionClient, companyId: string, id: string) {
+    return assertOwnership(tx.attachedUnit, id, companyId, {
+      code: 'ATTACHED_UNIT_NOT_FOUND',
+      message: 'Attached unit not found.',
+      allowArchived: true,
+    });
   }
 }

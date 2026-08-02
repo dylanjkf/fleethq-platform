@@ -602,6 +602,28 @@ model WebauthnCredential {
   @@map("user_webauthn_credentials")
 }
 
+/// A WebAuthn challenge that has been redeemed. Challenges themselves are
+/// stateless, short-lived signed JWTs (WebauthnService) — the JWT's ~2-minute
+/// expiry bounds how long one is valid, but on its own does nothing to stop a
+/// captured, still-unexpired challenge from being *replayed* a second time
+/// inside that window. This table is the single-use marker that closes that
+/// gap: the random challenge nonce's SHA-256 hash is inserted under a unique
+/// constraint the first time it's redeemed, so any second redemption of the
+/// same challenge collides and is rejected. Only the hash is stored (mirroring
+/// AuthToken). No RLS / no tenant scope — like `auth_tokens`/`users`, it's
+/// touched only by the pre-tenant `fleetos_auth` role. `expiresAt` mirrors the
+/// JWT's own expiry so a sweep can prune rows the token can no longer present.
+model WebauthnChallengeConsumption {
+  id            String   @id @default(uuid()) @db.Uuid
+  challengeHash String   @unique @map("challenge_hash")
+  purpose       String
+  expiresAt     DateTime @map("expires_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("webauthn_challenge_consumptions")
+}
+
 /// One browser/device's Web Push registration (04-DriverOS/DriverOS_Overview.md
 /// + FOUNDER_NOTES.md's notifications gap). Tied to the User identity, not a
 /// Company, the same way the identity itself isn't — a login registers once
@@ -1893,7 +1915,12 @@ model ComplianceDocument {
   // violate it and surface an opaque constraint error. RESTRICT instead gives
   // a clean "still referenced" failure, matching the pattern used elsewhere.
   asset          Asset?      @relation(fields: [assetId], references: [id], onDelete: Restrict)
-  operator       Operator?   @relation(fields: [operatorId], references: [id])
+  // RESTRICT (not SET NULL): the same CHECK constraint that guards asset_id
+  // requires exactly one of asset/operator to be set, so nulling operator_id on
+  // an operator delete would violate it and surface an opaque constraint error.
+  // RESTRICT gives a clean "still referenced" failure instead — the symmetric
+  // twin of the asset_id rule above.
+  operator       Operator?   @relation(fields: [operatorId], references: [id], onDelete: Restrict)
   fileAttachment Attachment? @relation("ComplianceDocumentFile", fields: [fileAttachmentId], references: [id])
 
   @@index([companyId])
@@ -2893,5 +2920,11 @@ model FeatureFlagOverride {
   flag FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
 
   @@unique([flagId, companyId])
+  // The `flag`-first composite unique above does not serve the actual read
+  // pattern, which is companyId-first — the RLS tenant filter plus every
+  // "which overrides does this company have" lookup start from company_id, and
+  // a leading-column-mismatched index can't be used, forcing a sequential scan.
+  // A dedicated company_id index serves those reads.
+  @@index([companyId])
   @@map("feature_flag_overrides")
 }

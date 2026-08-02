@@ -50,27 +50,47 @@ promptly when a credential is suspected compromised.
   regardless of whether the account exists. `apps/api/src/auth/auth.controller.ts`.
 - **Passwords never logged.** `nestjs-pino` redacts the `authorization` header
   and no serializer logs request bodies, so credentials do not reach the logs.
+- **Multi-factor authentication (TOTP + WebAuthn/passkeys).** MFA is implemented,
+  not planned: time-based one-time passwords (RFC 6238) with single-use recovery
+  codes, plus WebAuthn/passkey registration and assertion. Enrolment, verification,
+  and the login step-up are enforced server-side — a session is not issued until the
+  MFA challenge is satisfied. `apps/api/src/auth/mfa/`, `apps/api/src/auth/webauthn/`.
+- **Admin-tier MFA enforcement, on by default.** Any membership holding an
+  admin-tier permission is forced through the MFA gate before a session is issued,
+  independent of whether the company has opted into org-wide MFA. Companies can
+  additionally set a per-organisation *mandatory MFA* policy.
+  `apps/api/src/auth/auth-policy-gate.service.ts`,
+  `apps/api/src/security-settings/`.
+- **Authenticated self-service password change.** A logged-in user can rotate their
+  own password by re-proving the current one; the change bumps `tokenVersion`
+  (revoking other live sessions) and sends a security notification.
+  `apps/api/src/auth/auth.service.ts` (`changePassword`).
 
 ## Gaps & residual risk
 
 | Gap | Severity | Plan |
 |-----|----------|------|
-| **No multi-factor authentication anywhere.** Authentication is single-factor password + lockout only; there is no TOTP/WebAuthn/passkey and no MFA columns in the schema. This is the single biggest authentication gap and blocks Cyber Essentials (which requires MFA on cloud admin accounts). | high | Add TOTP (RFC 6238) with enrolment enforcement for privileged roles and recovery codes; add `mfa_secret`/`mfa_enabled` to the User model and a verify step in the login flow. |
-| No authenticated self-service password change. A logged-in user cannot rotate their own password — only the email-token reset flow exists. | medium | Add a `change-password` endpoint requiring the current password, reusing the strength validator and bumping `tokenVersion`. |
+| No refresh-token rotation or reuse detection. Access is a single bearer JWT with server-side `tokenVersion` revocation but no rotating refresh token, so a stolen token is valid for its full lifetime until a `tokenVersion` bump. | medium | Add a rotating refresh-token scheme with reuse detection; keep `tokenVersion` as the immediate global-revocation lever. |
+| No step-up re-authentication for a small set of the most sensitive self-service actions beyond those already covered (password change, MFA enable/disable, and — after this remediation — passkey registration and first-time OAuth link all re-prove a credential). | low | Extend the same re-auth pattern to any future high-value self-service mutation. |
+| No enterprise SSO / SAML / OIDC-federation or SCIM provisioning. Social login (Google/Microsoft) exists for consumer sign-in but is not enterprise SSO. | low | Deferred — out of scope for the current courier-vertical buyer; revisit with the first SSO-requiring customer. |
 | Password-reset issuance is IP-throttled but not per-account. `forgotPassword` issues a new token per request without invalidating prior ones. | low | Invalidate outstanding reset tokens for the account on each new issue, and add a per-account issuance cooldown. |
 | bcrypt work factor is hardcoded to `10` and duplicated across ~4 call sites. | low | Centralise the cost as a single constant and raise toward 12 as hardware allows; re-hash on next successful login. |
 
 ## Standards mapping
 
 **Cyber Essentials:** *User access control* (authentication). Strong on password
-quality, storage, and brute-force resistance; **not met** on MFA, which the
-scheme requires for administrative access to cloud services.
+quality, storage, and brute-force resistance; **MFA is met** — TOTP and
+WebAuthn/passkeys are implemented, with admin-tier enforcement on by default,
+satisfying the scheme's requirement for a second factor on administrative access
+to cloud services.
 
 **ISO/IEC 27001:2022 Annex A:** A.5.17 (authentication information) — hashing,
 strength policy, and no-plaintext storage are in place; A.8.5 (secure
-authentication) — partially met, with MFA and step-up authentication the notable
-absences.
+authentication) — met on the multi-factor and step-up dimensions (TOTP/WebAuthn,
+login step-up, admin-tier enforcement). The remaining residual is refresh-token
+rotation, tracked as a gap above.
 
 **SOC 2 (2017 TSC):** CC6.1 (logical access — identification & authentication).
-Credential handling and session revocation are well-implemented; the lack of MFA
-is the principal control weakness a service auditor would flag.
+Credential handling, MFA (TOTP + WebAuthn), and session revocation are all
+implemented; the principal remaining hardening item a service auditor would note
+is refresh-token rotation/reuse detection rather than a missing second factor.

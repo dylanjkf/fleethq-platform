@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
@@ -18,7 +18,7 @@ export class AdminOrganisationNotesController {
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.SUPPORT_VIEW)
   @Get()
-  list(@Param('companyId') companyId: string) {
+  list(@Param('companyId', ParseUUIDPipe) companyId: string) {
     return this.support.listNotes(companyId);
   }
 
@@ -26,7 +26,7 @@ export class AdminOrganisationNotesController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.SUPPORT_MANAGE)
   @Post()
   add(
-    @Param('companyId') companyId: string,
+    @Param('companyId', ParseUUIDPipe) companyId: string,
     @Body() dto: CreateNoteDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
@@ -40,8 +40,8 @@ export class AdminOrganisationNotesController {
   @Delete(':noteId')
   @HttpCode(HttpStatus.OK)
   async remove(
-    @Param('companyId') companyId: string,
-    @Param('noteId') noteId: string,
+    @Param('companyId', ParseUUIDPipe) companyId: string,
+    @Param('noteId', ParseUUIDPipe) noteId: string,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
     @Req() req: Request,

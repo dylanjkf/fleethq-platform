@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
@@ -35,14 +35,14 @@ export class AdminOrganisationsController {
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
   @Get(':id')
-  getById(@Param('id') id: string) {
+  getById(@Param('id', ParseUUIDPipe) id: string) {
     return this.organisations.getById(id);
   }
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
   @Get(':id/roles')
-  listRoles(@Param('id') id: string) {
+  listRoles(@Param('id', ParseUUIDPipe) id: string) {
     return this.organisations.listRoles(id);
   }
 
@@ -51,7 +51,7 @@ export class AdminOrganisationsController {
   @Post(':id/suspend')
   @HttpCode(HttpStatus.OK)
   async suspend(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SuspendOrganisationDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
@@ -66,7 +66,7 @@ export class AdminOrganisationsController {
   @Post(':id/restore')
   @HttpCode(HttpStatus.OK)
   async restore(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
     @Req() req: Request,
@@ -80,7 +80,7 @@ export class AdminOrganisationsController {
   @Post(':id/archive')
   @HttpCode(HttpStatus.OK)
   async archive(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
     @Req() req: Request,
@@ -94,7 +94,7 @@ export class AdminOrganisationsController {
   @Post(':id/unarchive')
   @HttpCode(HttpStatus.OK)
   async unarchive(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
     @Req() req: Request,
@@ -107,7 +107,7 @@ export class AdminOrganisationsController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_EDIT)
   @Patch(':id/trial')
   updateTrial(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateTrialDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
@@ -122,7 +122,7 @@ export class AdminOrganisationsController {
   @Post(':id/impersonate')
   @HttpCode(HttpStatus.OK)
   impersonate(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ImpersonateUserDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
@@ -142,7 +142,7 @@ export class AdminOrganisationsController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
   @Post(':id/users')
   createUser(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateCustomerUserDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,

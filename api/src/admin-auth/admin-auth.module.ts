@@ -24,7 +24,13 @@ import { AdminAuditModule } from '../admin-audit/admin-audit.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('ADMIN_JWT_SECRET'),
-        signOptions: { expiresIn: config.get<string>('ADMIN_JWT_EXPIRES_IN', '12h') },
+        // Pin the algorithm on both sides, matching the customer AuthModule.
+        // Every admin token verified through this JwtService — the session
+        // token and the MFA-challenge token (admin-auth.service.ts calls
+        // `jwt.verify` with no per-call options) — is now checked against a
+        // fixed `HS256` set, closing an algorithm-confusion / `alg:none` gap.
+        signOptions: { expiresIn: config.get<string>('ADMIN_JWT_EXPIRES_IN', '12h'), algorithm: 'HS256' },
+        verifyOptions: { algorithms: ['HS256'] },
       }),
     }),
   ],

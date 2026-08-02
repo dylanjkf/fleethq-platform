@@ -1,13 +1,15 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
 import { AuthRecoveryService } from '../auth/auth-recovery.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
+import { TimelineService } from '../timeline/timeline.service';
 import { CreateCustomerUserDto } from './dto/create-customer-user.dto';
+import { SearchCustomerUsersDto } from './dto/search-customer-users.dto';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 
 @Injectable()
@@ -18,12 +20,70 @@ export class AdminCustomerUsersService {
     private readonly authRecovery: AuthRecoveryService,
     private readonly authTokens: AuthTokensService,
     private readonly authMail: AuthMailService,
+    private readonly timeline: TimelineService,
   ) {}
 
   private async requireUser(userId: string) {
     const user = await this.adminPrisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException({ code: 'USER_NOT_FOUND', message: 'Customer user not found.' });
     return user;
+  }
+
+  /**
+   * Cross-tenant support lookup: "who owns this email address?" — the entry
+   * point for most support tickets, which the organisation list (company name
+   * / known user id only) can't answer. Runs via `fleetos_admin` (BYPASSRLS)
+   * so it spans every tenant, case-insensitive, and paginated like every other
+   * admin list endpoint. Returns each matching account with the organisations
+   * it belongs to, so support can jump straight to the right org.
+   */
+  async search(query: SearchCustomerUsersDto) {
+    const emailTerm = query.emailTerm;
+    const where: Prisma.UserWhereInput = {
+      ...(emailTerm ? { email: { contains: emailTerm, mode: 'insensitive' } } : {}),
+    };
+
+    const [total, users] = await Promise.all([
+      this.adminPrisma.user.count({ where }),
+      this.adminPrisma.user.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+        select: {
+          id: true,
+          username: true,
+          fullName: true,
+          email: true,
+          emailVerifiedAt: true,
+          archivedAt: true,
+          lockedUntil: true,
+          createdAt: true,
+          memberships: {
+            where: { archivedAt: null },
+            select: { companyId: true, company: { select: { name: true } }, role: { select: { id: true, name: true } } },
+          },
+        },
+      }),
+    ]);
+
+    const now = new Date();
+    return {
+      total,
+      page: query.page,
+      pageSize: query.take,
+      items: users.map((u) => ({
+        id: u.id,
+        username: u.username,
+        fullName: u.fullName,
+        email: u.email,
+        emailVerified: !!u.emailVerifiedAt,
+        accountDisabled: !!u.archivedAt,
+        locked: !!(u.lockedUntil && u.lockedUntil > now),
+        createdAt: u.createdAt,
+        organisations: u.memberships.map((m) => ({ companyId: m.companyId, companyName: m.company.name, role: m.role })),
+      })),
+    };
   }
 
   /** Cross-tenant identity view — every active membership this account holds, across every organisation. */
@@ -107,9 +167,16 @@ export class AdminCustomerUsersService {
   /**
    * Support scenario: add a user on a customer's behalf (e.g. their only
    * admin left). Writes directly via `fleetos_admin` (BYPASSRLS) rather than
-   * the customer `UsersService`, so this action lands in the admin platform's
-   * own audit log, not the tenant's — a synthetic "actor" in the tenant's own
-   * audit/timeline would misattribute who actually did this.
+   * the customer `UsersService`, so the "who did this" record of record lives
+   * in the admin platform's own audit log (a tenant `actorUserId` would
+   * misattribute it to a customer user that doesn't exist).
+   *
+   * The org's own history must not be blind to accounts appearing out of
+   * nowhere, though, so we also write the same `USER created` TimelineEvent
+   * the self-service path writes — but as a SYSTEM actor (no `actorUserId`)
+   * with a summary/payload that names FleetHQ support as the origin. That
+   * gives the tenant a visible, correctly-attributed marker without pretending
+   * a customer user performed the action.
    */
   async createUser(companyId: string, dto: CreateCustomerUserDto, context: AdminActionContext) {
     const company = await this.adminPrisma.company.findUnique({ where: { id: companyId } });
@@ -157,6 +224,20 @@ export class AdminCustomerUsersService {
       ip: context.ip,
       userAgent: context.userAgent,
       afterValue: { username: dto.username, roleId: dto.roleId, invited: isInvite },
+    });
+
+    // Tenant-visible marker: same `USER created` event the self-service path
+    // writes, but SYSTEM-actored and flagged as originating from FleetHQ
+    // support so the org's history shows the account and where it came from.
+    // fleetos_admin (BYPASSRLS) can INSERT this row; TimelineService only ever
+    // inserts, matching the append-only grant on timeline_events.
+    await this.timeline.record(this.adminPrisma, {
+      companyId,
+      entityType: TimelineEntityType.USER,
+      entityId: userId,
+      eventType: 'created',
+      summary: `User "${dto.username}"${isInvite ? ' invited' : ' added'} with role "${role.name}" by FleetHQ support.`,
+      payload: { via: 'fleethq_admin', adminUserId: context.adminUserId, roleId: dto.roleId, invited: isInvite },
     });
 
     return { userId, username: dto.username, invited: isInvite };

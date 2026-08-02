@@ -115,3 +115,183 @@ describe('BillingService — checkout integrity (audit remediation)', () => {
     );
   });
 });
+
+describe('BillingService — billing portal allowlist (audit remediation)', () => {
+  function build(configOverrides: Record<string, string | undefined> = {}) {
+    const company = { stripeCustomerId: 'cus_1' };
+    const tx = { company: { findUniqueOrThrow: jest.fn().mockResolvedValue(company) } };
+    const prisma = { withTenant: jest.fn((_c: string, fn: (tx: unknown) => unknown) => fn(tx)) };
+    const config = {
+      get: (key: string): string | undefined => {
+        const base: Record<string, string | undefined> = {
+          STRIPE_SECRET_KEY: 'sk_test_fake',
+          STRIPE_PRICE_STARTER: 'price_1',
+          APP_BASE_URL: 'https://app.example',
+          ...configOverrides,
+        };
+        return base[key];
+      },
+    };
+    const service = new BillingService(prisma as never, {} as never, config as never, {} as never, {} as never);
+    const stripe = {
+      prices: { retrieve: jest.fn().mockResolvedValue({ id: 'price_1', product: 'prod_1' }) },
+      billingPortal: {
+        configurations: {
+          list: jest.fn().mockResolvedValue({ data: [] }),
+          create: jest.fn().mockResolvedValue({ id: 'bpc_new' }),
+        },
+        sessions: { create: jest.fn().mockResolvedValue({ url: 'https://portal.stripe.example/ps_1' }) },
+      },
+    };
+    (service as unknown as { stripeClient: unknown }).stripeClient = stripe;
+    return { service, stripe };
+  }
+
+  it('pins the portal session to a configuration whose plan-switching is restricted to the checkout allowlist', async () => {
+    const { service, stripe } = build();
+    await service.createPortalSession('company-1', 'https://app.example/return');
+
+    // A configuration is built, restricting subscription_update to the exact sold prices grouped by product.
+    expect(stripe.billingPortal.configurations.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        features: expect.objectContaining({
+          subscription_update: expect.objectContaining({
+            enabled: true,
+            products: [{ product: 'prod_1', prices: ['price_1'] }],
+          }),
+        }),
+      }),
+      expect.objectContaining({ idempotencyKey: expect.stringContaining('portal-config:') }),
+    );
+    // And the session is created WITH that configuration id (never the Dashboard default).
+    expect(stripe.billingPortal.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ customer: 'cus_1', configuration: 'bpc_new' }),
+    );
+  });
+
+  it('reuses an explicit STRIPE_PORTAL_CONFIGURATION_ID without building a new configuration', async () => {
+    const { service, stripe } = build({ STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_explicit' });
+    await service.createPortalSession('company-1', 'https://app.example/return');
+
+    expect(stripe.billingPortal.configurations.create).not.toHaveBeenCalled();
+    expect(stripe.billingPortal.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ configuration: 'bpc_explicit' }),
+    );
+  });
+
+  it('disables plan-switching entirely when there is no configured price allowlist', async () => {
+    const { service, stripe } = build({ STRIPE_PRICE_STARTER: undefined });
+    await service.createPortalSession('company-1', 'https://app.example/return');
+
+    expect(stripe.billingPortal.configurations.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        features: expect.objectContaining({ subscription_update: { enabled: false } }),
+      }),
+      expect.anything(),
+    );
+  });
+});
+
+describe('BillingService — native trial-ending reminder (audit remediation)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const NOW = new Date('2026-08-02T00:00:00.000Z');
+
+  function build(company: { name: string; trialEndsAt: Date | null; subscriptionStatus: string }, existingReminder = false) {
+    const tx = {
+      company: { findUniqueOrThrow: jest.fn().mockResolvedValue(company) },
+      notification: { findFirst: jest.fn().mockResolvedValue(existingReminder ? { id: 'n1' } : null) },
+    };
+    const prisma = { withTenant: jest.fn((_c: string, fn: (tx: unknown) => unknown) => fn(tx)) };
+    const notifications = {
+      notifyPermissionInTx: jest.fn().mockResolvedValue(undefined),
+      getPermissionHolders: jest.fn().mockResolvedValue([{ id: 'u1', fullName: 'Ada', email: 'ada@example.com' }]),
+    };
+    const billingMail = { sendTrialEndingReminder: jest.fn().mockResolvedValue(undefined) };
+    const service = new BillingService(prisma as never, {} as never, {} as never, notifications as never, billingMail as never);
+    return { service, tx, notifications, billingMail };
+  }
+
+  it('reminds billing:manage holders once when the trial ends within the window and no plan is taken up', async () => {
+    const { service, notifications, billingMail } = build({ name: 'Acme', trialEndsAt: new Date(NOW.getTime() + 2 * DAY_MS), subscriptionStatus: 'NONE' });
+    const reminded = await service.remindTrialEnding('company-1', NOW);
+    expect(reminded).toBe(1);
+    expect(notifications.notifyPermissionInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      'company-1',
+      expect.anything(),
+      expect.objectContaining({ type: 'billing.trial_ending' }),
+    );
+    expect(billingMail.sendTrialEndingReminder).toHaveBeenCalled();
+  });
+
+  it('is idempotent — a company already reminded in this window is a no-op', async () => {
+    const { service, notifications } = build({ name: 'Acme', trialEndsAt: new Date(NOW.getTime() + 2 * DAY_MS), subscriptionStatus: 'NONE' }, true);
+    expect(await service.remindTrialEnding('company-1', NOW)).toBe(0);
+    expect(notifications.notifyPermissionInTx).not.toHaveBeenCalled();
+  });
+
+  it('does not remind a company that has already taken up a subscription', async () => {
+    const { service, notifications } = build({ name: 'Acme', trialEndsAt: new Date(NOW.getTime() + 2 * DAY_MS), subscriptionStatus: 'ACTIVE' });
+    expect(await service.remindTrialEnding('company-1', NOW)).toBe(0);
+    expect(notifications.notifyPermissionInTx).not.toHaveBeenCalled();
+  });
+
+  it('does not remind outside the window (trial ends far in the future)', async () => {
+    const { service, notifications } = build({ name: 'Acme', trialEndsAt: new Date(NOW.getTime() + 10 * DAY_MS), subscriptionStatus: 'NONE' });
+    expect(await service.remindTrialEnding('company-1', NOW)).toBe(0);
+    expect(notifications.notifyPermissionInTx).not.toHaveBeenCalled();
+  });
+
+  it('does not remind after the trial has already ended', async () => {
+    const { service, notifications } = build({ name: 'Acme', trialEndsAt: new Date(NOW.getTime() - DAY_MS), subscriptionStatus: 'NONE' });
+    expect(await service.remindTrialEnding('company-1', NOW)).toBe(0);
+    expect(notifications.notifyPermissionInTx).not.toHaveBeenCalled();
+  });
+
+  it('does not remind a company with no native trial set', async () => {
+    const { service, notifications } = build({ name: 'Acme', trialEndsAt: null, subscriptionStatus: 'NONE' });
+    expect(await service.remindTrialEnding('company-1', NOW)).toBe(0);
+    expect(notifications.notifyPermissionInTx).not.toHaveBeenCalled();
+  });
+});
+
+describe('BillingService — chargeback webhook (audit remediation)', () => {
+  function build() {
+    const tx = { company: { findUniqueOrThrow: jest.fn().mockResolvedValue({ name: 'Acme Couriers' }) } };
+    const prisma = { withTenant: jest.fn((_c: string, fn: (tx: unknown) => unknown) => fn(tx)) };
+    const systemPrisma = { stripeWebhookEvent: { create: jest.fn().mockResolvedValue({}) } };
+    const config = { get: (key: string) => (key === 'STRIPE_SECRET_KEY' ? 'sk_test_fake' : key === 'STRIPE_WEBHOOK_SECRET' ? 'whsec_fake' : undefined) };
+    const notifications = {
+      notifyPermissionInTx: jest.fn().mockResolvedValue(undefined),
+      getPermissionHolders: jest.fn().mockResolvedValue([{ id: 'u1', fullName: 'Ada', email: 'ada@example.com' }]),
+    };
+    const billingMail = { sendDisputeCreated: jest.fn().mockResolvedValue(undefined) };
+    const service = new BillingService(prisma as never, systemPrisma as never, config as never, notifications as never, billingMail as never);
+    const stripe = {
+      webhooks: { constructEvent: jest.fn() },
+      charges: { retrieve: jest.fn().mockResolvedValue({ id: 'ch_1', metadata: { fleetosCompanyId: 'company-1' } }) },
+    };
+    (service as unknown as { stripeClient: unknown }).stripeClient = stripe;
+    return { service, stripe, notifications, billingMail };
+  }
+
+  it('notifies AND emails billing:manage holders on charge.dispute.created (never silent)', async () => {
+    const { service, stripe, notifications, billingMail } = build();
+    stripe.webhooks.constructEvent.mockReturnValue({
+      id: 'evt_1',
+      type: 'charge.dispute.created',
+      created: Math.floor(Date.now() / 1000),
+      data: { object: { id: 'dp_1', charge: 'ch_1', amount: 4200, currency: 'aud', evidence_details: { due_by: null } } },
+    });
+
+    await service.handleWebhookEvent(Buffer.from('{}'), 'sig');
+
+    expect(notifications.notifyPermissionInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      'company-1',
+      expect.anything(),
+      expect.objectContaining({ type: 'billing.dispute_created' }),
+    );
+    expect(billingMail.sendDisputeCreated).toHaveBeenCalledWith('ada@example.com', 'Ada', 'Acme Couriers', expect.any(String), null);
+  });
+});

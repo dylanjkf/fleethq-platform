@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
+import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { CreateAnnouncementDto } from './dto/create-announcement.dto';
@@ -24,7 +25,12 @@ export class AdminSupportService {
   // --- Announcements ---------------------------------------------------
 
   async listAnnouncements() {
-    return this.adminPrisma.announcement.findMany({ orderBy: { createdAt: 'desc' } });
+    // Bounded read: announcements are a small, low-traffic set, but the cap is a
+    // hard ceiling so the list can never turn into an unbounded scan.
+    return this.adminPrisma.announcement.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: MAX_AGGREGATION_ROWS,
+    });
   }
 
   private async requireAnnouncement(id: string) {
@@ -104,10 +110,13 @@ export class AdminSupportService {
 
   async listNotes(companyId: string) {
     await this.requireCompany(companyId);
+    // Bounded read: notes on one organisation are a small set, but the cap is a
+    // hard ceiling so a pathological history can't turn this into an unbounded scan.
     return this.adminPrisma.adminOrganisationNote.findMany({
       where: { companyId },
       orderBy: { createdAt: 'desc' },
       include: { adminUser: { select: { id: true, fullName: true, username: true } } },
+      take: MAX_AGGREGATION_ROWS,
     });
   }
 

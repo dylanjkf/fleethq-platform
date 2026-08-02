@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { AttachmentStorage } from '../attachments/attachment-storage';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
+import { assertOwnership } from '../common/ownership';
 
 /** 14-Security/Privacy_Data_Protection.md's tombstone value for an erased Operator's name. */
 const ERASED_NAME = 'Erased operator';
@@ -27,10 +28,11 @@ export class PrivacyService {
 
   async exportOperatorData(companyId: string, actorUserId: string, operatorId: string) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      const operator = await tx.operator.findUnique({ where: { id: operatorId } });
-      if (!operator || operator.companyId !== companyId) {
-        throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-      }
+      const operator = await assertOwnership(tx.operator, operatorId, companyId, {
+        code: 'OPERATOR_NOT_FOUND',
+        message: 'Operator not found.',
+        allowArchived: true,
+      });
 
       // An access request is itself a privacy-relevant event — record who
       // exported whose data, atomically with the read.
@@ -105,10 +107,11 @@ export class PrivacyService {
     let storageKeysToPurge: string[] = [];
 
     const result = await this.prisma.withTenant(companyId, async (tx) => {
-      const operator = await tx.operator.findUnique({ where: { id: operatorId } });
-      if (!operator || operator.companyId !== companyId) {
-        throw new NotFoundException({ code: 'OPERATOR_NOT_FOUND', message: 'Operator not found.' });
-      }
+      const operator = await assertOwnership(tx.operator, operatorId, companyId, {
+        code: 'OPERATOR_NOT_FOUND',
+        message: 'Operator not found.',
+        allowArchived: true,
+      });
       if (!operator.archivedAt) {
         throw new BadRequestException({
           code: 'OPERATOR_NOT_ARCHIVED',

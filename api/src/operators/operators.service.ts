@@ -25,7 +25,13 @@ export class OperatorsService {
   // a SCHEDULED/webhook-triggered sync (no human in the loop) via this exact
   // path — TimelineService already attributes an absent actor to SYSTEM.
   async create(companyId: string, actorUserId: string | undefined, dto: CreateOperatorDto) {
-    return this.prisma.withTenant(companyId, async (tx) => {
+    // SERIALIZABLE + bounded retry so the plan seat-cap check-then-insert cannot
+    // race: two concurrent creates at the limit would both read the same count
+    // and both commit under the default READ COMMITTED, overshooting the cap.
+    // Under SERIALIZABLE one of the pair aborts (40001) and the retry re-reads
+    // the now-updated count, enforcing the limit correctly. See
+    // PrismaService.withTenantSerializable.
+    return this.prisma.withTenantSerializable(companyId, async (tx) => {
       await this.entitlements.assertWithinLimit(tx, companyId, 'operators');
       const operator = await tx.operator.create({
         data: {

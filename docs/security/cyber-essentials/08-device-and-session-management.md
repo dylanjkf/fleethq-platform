@@ -34,26 +34,40 @@ controls (SSO, MDM) that enterprise customers require.
 
 ## Gaps & residual risk
 
+- **Multi-factor authentication is implemented** (TOTP + WebAuthn/passkeys, with
+  admin-tier enforcement on by default and a per-organisation mandatory-MFA policy).
+  Full detail in [07](./07-authentication-and-password-security.md);
+  `apps/api/src/auth/mfa/`, `apps/api/src/auth/webauthn/`,
+  `apps/api/src/security-settings/`.
+- **Per-session listing and selective revocation.** Sessions are tracked
+  server-side so a user can list their active sessions and revoke a single one
+  ("sign out this device") independently of the global `tokenVersion` lever, and a
+  concurrent-session cap is enforced. `apps/api/src/auth/auth-sessions.service.ts`.
+- **New-device login notification.** A sign-in from an unrecognised device
+  triggers a security notification email to the account owner.
+
+## Gaps & residual risk
+
 | Gap | Severity | Plan |
 |-----|----------|------|
-| **No multi-factor authentication.** Single-factor bearer sessions with no second factor at login or step-up for sensitive actions. | high | TOTP/WebAuthn (tracked as the priority item in [07](./07-authentication-and-password-security.md)); step-up re-auth for privilege changes and data export. |
-| No per-session logout or session listing. Revocation is coarse — `tokenVersion` is a single per-user counter, so "sign out this one device" or "show my active sessions" is not possible; a bump signs out everywhere. | medium | Introduce a per-session identifier (jti) with a server-side session/revocation table, enabling selective logout and a session list. |
-| Long-lived (12h) access token with no refresh-token rotation. A stolen token is valid for up to 12h with no sliding re-validation. | medium | Add short-lived access tokens + rotating refresh tokens with reuse detection. |
-| No suspicious-login detection. IP is captured but never evaluated (new-device / new-geo / impossible-travel). | medium | Evaluate the captured login context against recent history and alert / step-up on anomalies. |
-| No SSO / OIDC / SCIM readiness and no device-posture / MDM integration. Auth is hardwired to the local password store; the session is an unbound bearer JWT in browser storage. | medium | Add an OIDC strategy + SCIM user provisioning for enterprise identity; device binding is a later, higher-effort item. |
+| Long-lived access token with no refresh-token rotation. A stolen token is valid for its lifetime (up to 12h, or up to 30 days with "remember me") with no sliding re-validation, until a `tokenVersion` bump or explicit session revocation. | medium | Add short-lived access tokens + rotating refresh tokens with reuse detection; retain per-session and `tokenVersion` revocation as the immediate levers. |
+| No automated suspicious-login scoring. New-device sign-ins are notified, but the captured login context is not evaluated for new-geo / impossible-travel anomalies. | low | Score the captured login context against recent history and step-up / alert on anomalies. |
+| No enterprise SSO / OIDC-federation / SCIM readiness and no device-posture / MDM integration. Social login (Google/Microsoft) exists for consumer sign-in but is not enterprise SSO; the session is a bearer JWT in browser storage. | low | Deferred — add an enterprise OIDC/SAML strategy + SCIM provisioning with the first SSO-requiring customer; device binding is a later, higher-effort item. |
 | No idle/absolute session timeout beyond the fixed JWT expiry. | low | Add an idle-timeout on the client and an absolute cap independent of token TTL. |
 
 ## Standards mapping
 
 **Cyber Essentials:** *Secure configuration* + *User access control*. Session
-bounding and revocation are present; MFA and enterprise identity integration are
-the gaps.
+bounding, per-session revocation, and MFA are present; enterprise identity
+federation (SSO/SCIM) is the remaining, deliberately-deferred gap.
 
-**ISO/IEC 27001:2022 Annex A:** A.8.5 (secure authentication) — partial; A.8.1
-(user endpoint devices) and A.6.7 (remote working) — largely unaddressed at the
-platform level (no device posture / MDM readiness), which is acceptable for a
-browser-delivered SaaS but limits enterprise assurance.
+**ISO/IEC 27001:2022 Annex A:** A.8.5 (secure authentication) — met on the MFA and
+session-management dimensions; A.8.1 (user endpoint devices) and A.6.7 (remote
+working) — largely unaddressed at the platform level (no device posture / MDM
+readiness), which is acceptable for a browser-delivered SaaS but limits enterprise
+assurance.
 
 **SOC 2 (2017 TSC):** CC6.1, CC6.6 (restricting logical access, incl. from
-outside the system boundary). Time-bounded, revocable sessions support these; the
-absence of MFA and selective session control are the residual weaknesses.
+outside the system boundary). Time-bounded, revocable (globally and per-session)
+sessions plus MFA support these; the principal residual is refresh-token rotation
+rather than a missing second factor or an inability to selectively revoke.

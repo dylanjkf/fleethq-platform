@@ -94,14 +94,26 @@ export class EntitlementsService {
   /**
    * Blocks creating another operator/asset past the plan limit (402). No-op
    * when enforcement is off or the plan's limit is unlimited, so it's safe to
-   * call unconditionally from the create paths. Reuses `resolve()`'s own live
-   * usage count rather than querying twice.
+   * call unconditionally from the create paths.
    */
   async assertWithinLimit(tx: Prisma.TransactionClient, companyId: string, resource: 'operators' | 'assets'): Promise<void> {
     const entitlements = await this.resolve(tx, companyId);
     const limit = resource === 'operators' ? entitlements.limits.maxOperators : entitlements.limits.maxAssets;
     if (limit == null) return;
-    const current = entitlements.usage[resource];
+
+    // Close the check-then-insert race: without a lock, N concurrent creates can
+    // each read `current < limit` before any commits and all insert, overshooting
+    // a paid seat/asset cap. A transaction-scoped advisory lock keyed on
+    // (company, resource) serialises concurrent limit checks for the same tenant;
+    // it's held until this tx (which also performs the insert) commits, so the
+    // count and the insert are effectively atomic. Cross-tenant creates never
+    // contend (distinct keys); the lock is independent of RLS. The count is
+    // re-read under the lock — `entitlements.usage` was sampled before it was held.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${companyId}), hashtext(${resource}))`;
+
+    const current = resource === 'operators'
+      ? await tx.operator.count({ where: { archivedAt: null } })
+      : await tx.asset.count({ where: { archivedAt: null } });
     if (current >= limit) {
       throw new HttpException(
         {

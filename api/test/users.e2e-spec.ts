@@ -89,7 +89,7 @@ describe('User management', () => {
     expect(listAfter.body.items.some((u: { id: string }) => u.id === created.body.id)).toBe(false);
   });
 
-  it('rejects creating a user with a username that is already taken', async () => {
+  it('rejects re-using a username with a generic not-found (no cross-tenant enumeration oracle)', async () => {
     const token = await loginAsFullyPermissionedAdmin();
     const roleId = await createRole(token, 'Role A', []);
     const body = {
@@ -104,12 +104,16 @@ describe('User management', () => {
       .send(body)
       .expect(201);
 
+    // Usernames are globally unique. A distinguishable 409 USERNAME_TAKEN would
+    // turn create-user into an oracle for probing usernames that belong to
+    // *other* tenants, so the service deliberately returns the same generic
+    // 404 USER_NOT_FOUND it returns for any other unresolvable identity.
     const res = await request(app.getHttpServer())
       .post('/v1/users')
       .set('Authorization', `Bearer ${token}`)
       .send(body)
-      .expect(409);
-    expect(res.body.error.code).toBe('USERNAME_TAKEN');
+      .expect(404);
+    expect(res.body.error.code).toBe('USER_NOT_FOUND');
   });
 
   it("does not let one company see or manage another company's users", async () => {

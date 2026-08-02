@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { isIP } from 'net';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as webpush from 'web-push';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscribePushDto } from './dto/subscribe-push.dto';
+import { isBlockedAddress } from '../../common/net/safe-fetch';
 
 export interface PushPayload {
   title: string;
@@ -46,11 +48,44 @@ export class PushService {
   }
 
   async subscribe(userId: string, dto: SubscribePushDto): Promise<void> {
+    // The endpoint is a client-supplied URL the server later POSTs to (via
+    // web-push). Reject the obvious SSRF targets (localhost, private/loopback IP
+    // literals, bad scheme, embedded creds) so a subscription can't point the
+    // server at internal/metadata URLs. Syntactic only (no live DNS lookup):
+    // this value is stored, not fetched here, and a real push endpoint is always
+    // an https URL on a public push service.
+    this.assertEndpointAllowed(dto.endpoint);
     await this.prisma.pushSubscription.upsert({
       where: { endpoint: dto.endpoint },
       update: { userId, p256dh: dto.keys.p256dh, auth: dto.keys.auth },
       create: { userId, endpoint: dto.endpoint, p256dh: dto.keys.p256dh, auth: dto.keys.auth },
     });
+  }
+
+  /**
+   * Syntactic SSRF guard for a stored push endpoint: http(s) only, no embedded
+   * credentials, no localhost/`*.localhost`, and no private/loopback/link-local
+   * IP literal (reusing the same blocklist as safeFetch). Deliberately does no
+   * DNS resolution — a hostname is validated at send time by web-push, and this
+   * only needs to stop the endpoint being an obviously-internal URL before it's
+   * persisted.
+   */
+  private assertEndpointAllowed(endpoint: string): void {
+    const reject = () =>
+      new BadRequestException({ code: 'INVALID_PUSH_ENDPOINT', message: 'The push endpoint is not an allowed URL.' });
+    let url: URL;
+    try {
+      url = new URL(endpoint);
+    } catch {
+      throw reject();
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw reject();
+    if (url.username || url.password) throw reject();
+    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (!host || host === 'localhost' || host.endsWith('.localhost')) throw reject();
+    // Only literal IPs are checked here (isIP > 0); a hostname is left to
+    // resolve at send time — no DNS lookup happens in this path.
+    if (isIP(host) && isBlockedAddress(host)) throw reject();
   }
 
   async unsubscribe(userId: string, endpoint: string): Promise<void> {

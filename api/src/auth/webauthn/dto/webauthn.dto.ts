@@ -22,6 +22,25 @@ export class WebauthnRegisterVerifyDto {
   @IsString()
   @MaxLength(100)
   deviceLabel?: string;
+
+  /**
+   * Step-up re-authentication proof. Adding a passkey is as sensitive as
+   * changing the password or toggling MFA, so — exactly like those flows — the
+   * caller must re-prove a live credential rather than rely on a possibly
+   * 12h/30-day-old access token. Supply EITHER the current password OR a
+   * current MFA code (TOTP or a backup code, for accounts with MFA enabled);
+   * the server rejects the registration if neither is valid.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  currentPassword?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(6)
+  @MaxLength(20)
+  mfaCode?: string;
 }
 
 export class WebauthnAuthenticateVerifyDto {

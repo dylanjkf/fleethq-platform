@@ -35,9 +35,15 @@ named people before go-live.
 ### 1. Detect & report
 Sources: the append-only **audit log** (`audit_logs` — failed logins, lockouts,
 privilege changes, data exports), **Sentry** (application errors, once the DSN is
-set), **CloudWatch** infrastructure alarms, customer reports, and the
-`SECURITY.md` disclosure channel. Anyone who suspects an incident raises it to the
-Incident Lead immediately.
+set), the **hosting platform's metrics and log alerts** (Railway for the API,
+Vercel for the frontends), customer reports, and the `SECURITY.md` disclosure
+channel. Anyone who suspects an incident raises it to the Incident Lead
+immediately.
+
+> **Infrastructure note.** This runbook targets the current Railway (API) /
+> Vercel (frontends) deployment. It does **not** assume AWS CloudWatch, Secrets
+> Manager, or RDS — those are a planned target architecture, not built. Secrets
+> are managed as environment variables in the hosting platform.
 
 ### 2. Triage & declare
 The Incident Lead confirms the event is a real incident, assigns a severity, opens
@@ -48,14 +54,16 @@ SEV1/SEV2, start the clock on the NDB assessment (below) in parallel.
 Stop the bleeding without destroying evidence:
 - Revoke suspected-compromised sessions/accounts — bump `tokenVersion` (invalidates
   all of a user's sessions) and/or deactivate the membership.
-- Rotate exposed credentials — the deploy pipeline can rotate the DB app-role
-  passwords from Secrets Manager (`db:rotate-role-passwords`), and JWT/other
-  secrets are Secrets-Manager-sourced.
+- Rotate exposed credentials — rotate the database app-role passwords
+  (`db:rotate-role-passwords`) and JWT/other secrets, updating the corresponding
+  environment variables in the hosting platform (Railway/Vercel), which is where
+  secrets are stored.
 - If tenant isolation is implicated, consider read-only mode or taking the
   affected service offline.
 - Preserve evidence *before* changing state: the `audit_logs` table is append-only
-  (cannot be altered from the app) and CloudWatch retains logs; snapshot the RDS
-  instance to capture point-in-time state.
+  (cannot be altered from the app) and the hosting platform retains recent logs;
+  capture a database backup/snapshot via the managed database provider to preserve
+  point-in-time state.
 
 ### 4. Eradicate
 Remove the root cause — patch the vulnerability, revoke the foothold, invalidate

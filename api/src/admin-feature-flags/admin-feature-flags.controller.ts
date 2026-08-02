@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Patch, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
@@ -34,7 +34,7 @@ export class AdminFeatureFlagsController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.FEATURE_FLAGS_MANAGE)
   @Patch(':id')
   update(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateFeatureFlagDto,
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
     @Ip() ip: string,
@@ -47,7 +47,7 @@ export class AdminFeatureFlagsController {
   @RequireAdminPermission(ADMIN_PERMISSIONS.FEATURE_FLAGS_MANAGE)
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
-  async remove(@Param('id') id: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
+  async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
     await this.featureFlags.remove(id, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
     return { ok: true };
   }

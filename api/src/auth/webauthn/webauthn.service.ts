@@ -1,6 +1,8 @@
+import { createHash } from 'crypto';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Prisma } from '@prisma/client';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -16,16 +18,26 @@ import type {
   WebAuthnCredential,
 } from '@simplewebauthn/server';
 import { SystemPrismaService } from '../../prisma/system-prisma.service';
+import { AuditService, AUDIT_ACTIONS } from '../../audit/audit.service';
 
 /** Self-contained, short-lived challenge — the same "no server-side session
  *  state" pattern PreAuthJwtPayload/MfaChallengePayload already use. `sub` is
  *  present only for a registration ceremony (it's tied to the enrolling
  *  account); a login ceremony is usernameless/discoverable-credential, so it
- *  has none. */
+ *  has none. `exp` is added by the JWT signer and read back to bound how long
+ *  the single-use consumption marker needs to be retained. */
 interface WebauthnChallengePayload {
   sub?: string;
   challenge: string;
   purpose: 'register' | 'authenticate';
+  exp?: number;
+}
+
+/** Optional request context threaded from AuthService for the audit trail. */
+export interface WebauthnAuditContext {
+  actorLabel?: string | null;
+  ip?: string | null;
+  requestId?: string | null;
 }
 
 const CHALLENGE_EXPIRES_IN = '2m';
@@ -49,6 +61,7 @@ export class WebauthnService {
     private readonly systemPrisma: SystemPrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly audit: AuditService,
   ) {}
 
   private rpID(): string {
@@ -94,8 +107,14 @@ export class WebauthnService {
     return { options, challengeToken: this.jwt.sign(payload, { expiresIn: CHALLENGE_EXPIRES_IN }) };
   }
 
-  async verifyRegistration(userId: string, challengeToken: string, response: RegistrationResponseJSON, deviceLabel?: string): Promise<void> {
-    const payload = this.consumeChallenge(challengeToken, 'register');
+  async verifyRegistration(
+    userId: string,
+    challengeToken: string,
+    response: RegistrationResponseJSON,
+    deviceLabel?: string,
+    auditContext: WebauthnAuditContext = {},
+  ): Promise<void> {
+    const payload = await this.consumeChallenge(challengeToken, 'register');
     if (payload.sub !== userId) {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This passkey challenge is not valid for this account.' });
     }
@@ -116,7 +135,7 @@ export class WebauthnService {
     }
 
     const { credential } = verification.registrationInfo;
-    await this.systemPrisma.webauthnCredential.create({
+    const created = await this.systemPrisma.webauthnCredential.create({
       data: {
         userId,
         credentialId: credential.id,
@@ -125,6 +144,19 @@ export class WebauthnService {
         transports: credential.transports ?? [],
         deviceLabel: deviceLabel ?? null,
       },
+    });
+
+    // Audited exactly like MFA_ENABLED — a new passkey is a durable, standalone
+    // credential and every enrolment belongs in the security trail.
+    void this.audit.recordSystem({
+      action: AUDIT_ACTIONS.WEBAUTHN_CREDENTIAL_ADDED,
+      actorUserId: userId,
+      actorLabel: auditContext.actorLabel ?? null,
+      targetType: 'user',
+      targetId: userId,
+      ip: auditContext.ip ?? null,
+      requestId: auditContext.requestId ?? null,
+      metadata: { credentialId: created.id, deviceLabel: deviceLabel ?? null },
     });
   }
 
@@ -137,7 +169,7 @@ export class WebauthnService {
 
   /** Verifies the assertion and returns the userId it authenticated for, or null if it doesn't verify. */
   async verifyAuthentication(challengeToken: string, response: AuthenticationResponseJSON): Promise<string | null> {
-    const payload = this.consumeChallenge(challengeToken, 'authenticate');
+    const payload = await this.consumeChallenge(challengeToken, 'authenticate');
 
     const stored = await this.systemPrisma.webauthnCredential.findUnique({ where: { credentialId: response.id } });
     if (!stored) return null;
@@ -179,11 +211,34 @@ export class WebauthnService {
     return rows.map((r) => ({ id: r.id, deviceLabel: r.deviceLabel, createdAt: r.createdAt, lastUsedAt: r.lastUsedAt }));
   }
 
-  async removeCredential(userId: string, id: string): Promise<void> {
-    await this.systemPrisma.webauthnCredential.deleteMany({ where: { id, userId } });
+  async removeCredential(userId: string, id: string, auditContext: WebauthnAuditContext = {}): Promise<void> {
+    const { count } = await this.systemPrisma.webauthnCredential.deleteMany({ where: { id, userId } });
+    // Only audit a real removal — deleteMany is a no-op for an id that isn't
+    // this user's, and a no-op shouldn't leave a "removed" line in the trail.
+    if (count > 0) {
+      void this.audit.recordSystem({
+        action: AUDIT_ACTIONS.WEBAUTHN_CREDENTIAL_REMOVED,
+        actorUserId: userId,
+        actorLabel: auditContext.actorLabel ?? null,
+        targetType: 'user',
+        targetId: userId,
+        ip: auditContext.ip ?? null,
+        requestId: auditContext.requestId ?? null,
+        metadata: { credentialId: id },
+      });
+    }
   }
 
-  private consumeChallenge(token: string, purpose: WebauthnChallengePayload['purpose']): WebauthnChallengePayload {
+  /**
+   * Verify the challenge JWT, assert its purpose, and atomically mark it
+   * consumed so it can never be redeemed twice. The JWT's own ~2-minute expiry
+   * bounds the window but doesn't make a captured-and-replayed challenge
+   * single-use on its own; the DB consumption marker (keyed on a hash of the
+   * random challenge nonce, unique-constrained) is what actually rejects a
+   * replay within that window. Best-effort cleanup is unnecessary — the
+   * `expiresAt` column lets a sweep prune rows the token can no longer present.
+   */
+  private async consumeChallenge(token: string, purpose: WebauthnChallengePayload['purpose']): Promise<WebauthnChallengePayload> {
     let payload: WebauthnChallengePayload;
     try {
       payload = this.jwt.verify<WebauthnChallengePayload>(token);
@@ -192,6 +247,20 @@ export class WebauthnService {
     }
     if (payload.purpose !== purpose) {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'Invalid passkey challenge.' });
+    }
+
+    const challengeHash = createHash('sha256').update(payload.challenge).digest('hex');
+    // exp is seconds-since-epoch; fall back to the signed TTL if somehow absent.
+    const expiresAt = payload.exp ? new Date(payload.exp * 1000) : new Date(Date.now() + 2 * 60 * 1000);
+    try {
+      await this.systemPrisma.webauthnChallengeConsumption.create({ data: { challengeHash, purpose, expiresAt } });
+    } catch (err) {
+      // Unique-constraint violation ⇒ this exact challenge was already redeemed:
+      // a replay. Reject rather than let the second use through.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new UnauthorizedException({ code: 'CHALLENGE_ALREADY_USED', message: 'This passkey challenge has already been used. Please try again.' });
+      }
+      throw err;
     }
     return payload;
   }
