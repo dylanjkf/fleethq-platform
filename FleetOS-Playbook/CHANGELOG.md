@@ -2,6 +2,12 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-02 — Enterprise Production Readiness Audit **Round 2** remediation
+
+Second independent audit (Round 2) treated as source of truth. Work sequenced Critical → High → Medium → Low across `fleethq-platform`, `fleethq-frontend`, `fleethq-driveros`.
+
+- **C1 — Compliance-documentation integrity (Critical, carried forward).** Finished the reclassification pass on the four documents Batch J missed. `05-malware-and-file-upload-protection.md`: the S3/object-storage subsection moved out of "What's implemented" into an explicit **Planned — target infrastructure (not yet built)** section, with the fabricated `infra/terraform/...` line-range citations removed. `07-authentication-and-password-security.md` and `08-device-and-session-management.md`: the false "no multi-factor authentication anywhere" claims replaced with the real, shipped capability set (TOTP + WebAuthn/passkeys, admin-tier enforcement, per-org mandatory-MFA policy, self-service password change, per-session listing/revocation), with genuinely-remaining gaps (refresh-token rotation, enterprise SSO/SCIM) moved into honest Gaps tables and standards mappings corrected. `readiness-assessment.md`: replaced with a superseded-pointer stub to `docs/compliance/readiness.md` (the maintained scorecard: ~CE 93 / ISO 88 / SOC 2 87), eliminating the contradictory pre-MFA 80/55/58 scores. `incident-response.md`: CloudWatch / Secrets Manager / RDS references reclassified to the real Railway/Vercel deployment.
+
 ## 2026-08-01 — Enterprise Production Readiness Audit remediation (initiative complete)
 
 Remediation of the independent *FleetHQ Enterprise Production Readiness Audit*, treated as the source of truth. Every confirmed, in-scope finding was fixed and verified across the three repositories (`fleethq-platform`, `fleethq-frontend`, `fleethq-driveros`); an adversarial re-verification pass (multi-agent, read-only) re-checked all 103 audit items against the committed code before this entry was written (51 already-satisfied, 18 real in-scope gaps, the rest out-of-scope/roadmap/other-repo).

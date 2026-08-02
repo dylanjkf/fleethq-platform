@@ -68,7 +68,8 @@ Each domain document has the same shape:
 | 11 | Security testing | [11-security-testing.md](./11-security-testing.md) |
 | — | Incident response plan | [incident-response.md](./incident-response.md) |
 | — | Backup & disaster recovery | [backup-and-disaster-recovery.md](./backup-and-disaster-recovery.md) |
-| — | **Readiness assessment & roadmap** | [readiness-assessment.md](./readiness-assessment.md) |
+| — | **Readiness assessment (current)** | [../../compliance/readiness.md](../../compliance/readiness.md) — the maintained scorecard |
+| — | Readiness assessment (superseded stub) | [readiness-assessment.md](./readiness-assessment.md) |
 
 The vulnerability-disclosure channel lives at the repository root as
 [`SECURITY.md`](../../../SECURITY.md), where researchers and tools look for it.
