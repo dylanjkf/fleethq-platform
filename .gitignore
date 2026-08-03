@@ -4,3 +4,5 @@
 !.vscode/extensions.json
 .idea
 *.swp
+__pycache__/
+*.pyc
