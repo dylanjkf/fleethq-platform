@@ -133,8 +133,9 @@ properties, adapted to FleetHQ staff accounts:
 | `POST mfa/setup` / `mfa/enable` / `mfa/disable` | admin session | TOTP enrolment |
 
 **Post-login obligations.** A staff account with a pending obligation — a forced
-password reset (`mustResetPassword`, set on bootstrap-created accounts), or MFA not
-yet enrolled where required (`ENFORCE_STAFF_ADMIN_MFA`, default on) — is blocked by
+password reset (`mustResetPassword`, set on bootstrap-created accounts), or — only
+when an org opts into mandatory MFA via `ENFORCE_STAFF_ADMIN_MFA=true` (default
+off; MFA is otherwise optional) — MFA not yet enrolled — is blocked by
 `AdminPermissionGuard` from every route except the setup-exempt ones above
 (`me`, `change-password`, `sessions`, `logout`, `mfa/setup`, `mfa/enable`) with
 `403 ADMIN_SETUP_REQUIRED`, until it clears them. `GET me` returns an `obligations`
