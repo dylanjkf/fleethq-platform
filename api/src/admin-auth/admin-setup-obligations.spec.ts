@@ -10,9 +10,9 @@
  * unblocked after clearing it) lives in the admin-auth e2e suite, which api-ci
  * runs against a real Postgres.
  */
-import { ForbiddenException } from '@nestjs/common';
 import { AdminPermissionGuard } from './guards/admin-permission.guard';
 import { staffAdminMfaEnforced } from './staff-admin-mfa-policy';
+import * as adminRolePermissions from '../common/permissions/admin-role-has-permission';
 
 type MockReflector = { getAllAndOverride: jest.Mock };
 
@@ -122,7 +122,7 @@ describe('AdminPermissionGuard — ADMIN_SETUP_REQUIRED obligations gate', () =>
   it('does NOT block an un-enrolled admin when MFA is optional (default OFF)', async () => {
     delete process.env.ENFORCE_STAFF_ADMIN_MFA;
     const adminRoleHasPermission = jest
-      .spyOn(require('../common/permissions/admin-role-has-permission'), 'adminRoleHasPermission')
+      .spyOn(adminRolePermissions, 'adminRoleHasPermission')
       .mockResolvedValue(true);
     const { guard } = makeGuard({
       required: 'required-admin-permission',
