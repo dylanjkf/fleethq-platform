@@ -12,6 +12,7 @@ export const ADMIN_AUDIT_ACTIONS = {
   MFA_ENABLED: 'admin_auth.mfa_enabled',
   MFA_DISABLED: 'admin_auth.mfa_disabled',
   MFA_BACKUP_CODE_USED: 'admin_auth.mfa_backup_code_used',
+  MFA_BACKUP_CODES_REGENERATED: 'admin_auth.mfa_backup_codes_regenerated',
   SESSION_REVOKED: 'admin_auth.session_revoked',
   LOGOUT: 'admin_auth.logout',
   DEVICE_TRUSTED: 'admin_auth.device_trusted',
