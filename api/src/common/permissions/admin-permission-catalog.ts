@@ -41,6 +41,8 @@ export const ADMIN_PERMISSIONS = {
   ADMIN_USERS_VIEW: 'admin_users:view',
   ADMIN_USERS_MANAGE: 'admin_users:manage',
 
+  SECURITY_VIEW: 'security:view',
+
   AUDIT_LOG_VIEW: 'audit_log:view',
 } as const;
 
@@ -86,6 +88,8 @@ export const ADMIN_PERMISSION_CATALOG: AdminPermissionCatalogEntry[] = [
 
   { key: ADMIN_PERMISSIONS.ADMIN_USERS_VIEW, category: 'Administration', description: 'View FleetHQ staff accounts and roles' },
   { key: ADMIN_PERMISSIONS.ADMIN_USERS_MANAGE, category: 'Administration', description: 'Create/disable FleetHQ staff accounts and assign roles' },
+
+  { key: ADMIN_PERMISSIONS.SECURITY_VIEW, category: 'Security', description: 'View the platform security centre (MFA adoption, locked accounts, sign-in risk)' },
 
   { key: ADMIN_PERMISSIONS.AUDIT_LOG_VIEW, category: 'Administration', description: 'View the administration platform\'s own audit log' },
 ];
