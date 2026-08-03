@@ -1,0 +1,10 @@
+# The deploy workflow runs `railway up` from the repo root so the uploaded
+# snapshot contains the `api/` folder the Railway service's Root Directory
+# points at. Only api/ is built, so keep the upload lean by excluding the
+# repo's documentation and local-dev files. Do NOT ignore api/.
+/FleetOS-Playbook
+/docs
+/.github
+/README.md
+/CLAUDE.md
+/docker-compose.yml
