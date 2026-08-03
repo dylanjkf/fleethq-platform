@@ -34,6 +34,14 @@ export class AdminUsersController {
     return this.adminUsers.list(query);
   }
 
+  // Declared before ':id' so "roles" is not captured as an :id path param.
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.ADMIN_USERS_VIEW)
+  @Get('roles')
+  listRoles() {
+    return this.adminUsers.listRoles();
+  }
+
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ADMIN_USERS_VIEW)
   @Get(':id')

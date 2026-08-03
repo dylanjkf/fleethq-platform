@@ -95,6 +95,11 @@ export class AdminUsersService {
     return this.toView(user);
   }
 
+  /** The admin roles a staff account can hold — powers the create/edit role picker in the console. */
+  async listRoles() {
+    return this.adminPrisma.adminRole.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, description: true } });
+  }
+
   private async requireRole(roleId: string) {
     const role = await this.adminPrisma.adminRole.findUnique({ where: { id: roleId }, select: { id: true, name: true } });
     if (!role) throw new NotFoundException({ code: 'ADMIN_ROLE_NOT_FOUND', message: 'Admin role not found.' });
