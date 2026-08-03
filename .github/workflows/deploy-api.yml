@@ -68,6 +68,15 @@ jobs:
         # being shipped against main's current tip. If main has already advanced
         # past it, stand down — the newer commit's own deploy is authoritative.
         # Manual dispatches are exempt: an operator forcing a specific ref means it.
+        #
+        # FAIL-CLOSED (R5 Critical #1): when superseded, this step both sets
+        # SUPERSEDED=1 (belt) AND `exit 1` (braces). The exit is what actually stops
+        # the deploy — a red guard means no later step runs at all, so forgetting an
+        # `if:` on any future downstream step can't silently re-open the race the way
+        # it did before (Install/Deploy had no condition and deployed regardless).
+        # The downstream `if: env.SUPERSEDED != '1'` conditions are kept as a second
+        # layer in case the exit is ever softened. A red run here is the intended,
+        # visible signal "this stale deploy was refused", not a failure to fix.
         if: ${{ github.event_name != 'workflow_dispatch' }}
         run: |
           DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
@@ -80,10 +89,11 @@ jobs:
             exit 0
           fi
           if git merge-base --is-ancestor "$DEPLOY_SHA" "$MAIN_TIP"; then
-            echo "::warning::main has already advanced past $DEPLOY_SHA to $MAIN_TIP." \
-                 "A newer commit's deploy supersedes this one — standing down to avoid" \
-                 "shipping stale code over newer."
             echo "SUPERSEDED=1" >> "$GITHUB_ENV"
+            echo "::error::main has already advanced past $DEPLOY_SHA to $MAIN_TIP." \
+                 "A newer commit's deploy supersedes this one — standing down (fail-closed)" \
+                 "to avoid shipping stale code over newer."
+            exit 1
           else
             echo "$DEPLOY_SHA is not an ancestor of main tip (diverged/branch) — proceeding."
           fi
@@ -103,9 +113,14 @@ jobs:
           fi
 
       - name: Install Railway CLI
+        # Second layer behind the fail-closed guard above (R5 Critical #1): even if
+        # the guard's `exit 1` is ever removed, a superseded run still won't install
+        # the CLI or deploy.
+        if: ${{ env.SUPERSEDED != '1' }}
         run: npm install -g @railway/cli
 
       - name: Deploy api/ to Railway
+        if: ${{ env.SUPERSEDED != '1' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
@@ -117,3 +132,40 @@ jobs:
         # A root .railwayignore keeps the upload to just what api/ needs.
         # --ci keeps it non-interactive; the build + healthcheck run on Railway.
         run: railway up --ci --service "$RAILWAY_SERVICE"
+
+      - name: Post-deploy smoke test — /health/ready must respond
+        # R5 High #4: make the "deploy succeeded" claim self-verifying instead of a
+        # hand-written narrative. After railway up returns, hit the live readiness
+        # endpoint (which pings Postgres) and FAIL the job if it never comes back
+        # healthy — so the workflow's own pass/fail IS the evidence the next audit
+        # can trust, no manual re-check needed.
+        #
+        # Activation is a one-time repo Settings step: set the `API_HEALTH_URL`
+        # variable to the API's public readiness URL (e.g.
+        # https://api.fleethq.online/health/ready). Until it is set, this step
+        # emits a visible warning and passes, exactly like the RAILWAY_* preflight —
+        # it can't hard-fail on config that isn't wired yet, but it also never
+        # silently claims success it didn't verify.
+        if: ${{ env.SUPERSEDED != '1' }}
+        env:
+          API_HEALTH_URL: ${{ vars.API_HEALTH_URL }}
+        run: |
+          if [ -z "$API_HEALTH_URL" ]; then
+            echo "::warning::API_HEALTH_URL not set — post-deploy smoke test skipped." \
+                 "Set it in repo Settings → Variables (Actions) to the API's public" \
+                 "/health/ready URL to make deploys self-verifying (R5 High #4)."
+            exit 0
+          fi
+          echo "Smoke-testing $API_HEALTH_URL after deploy…"
+          for attempt in $(seq 1 12); do
+            code="$(curl -sS -o /tmp/ready.json -w '%{http_code}' --max-time 10 "$API_HEALTH_URL" || echo 000)"
+            body="$(cat /tmp/ready.json 2>/dev/null || true)"
+            echo "attempt $attempt/12 → HTTP $code ${body:0:200}"
+            if [ "$code" = "200" ] && printf '%s' "$body" | grep -q '"status":"ok"'; then
+              echo "✅ Post-deploy readiness confirmed at $API_HEALTH_URL"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Post-deploy smoke test FAILED: $API_HEALTH_URL never reported ready (HTTP 200 + status:ok) within ~3 min. The deploy may be unhealthy."
+          exit 1
