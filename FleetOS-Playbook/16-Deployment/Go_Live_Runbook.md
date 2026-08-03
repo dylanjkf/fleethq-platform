@@ -54,6 +54,20 @@ Follow the repo-root `README.md` → **Deployment → API → Railway**:
 There is no infra bootstrap, no remote state, and nothing to `terraform apply` —
 the schema and roles are created by the migrations themselves.
 
+**Ongoing deploys are CI-gated, not Railway git auto-deploy.** After the initial
+provisioning, production deploys run through `.github/workflows/deploy-api.yml`:
+it triggers on `api-ci` completing successfully on `main` (`workflow_run`), so a
+commit whose lint/typecheck/migrate/build/tests failed can never ship, and it
+`railway up`s the exact validated commit. A recency guard stands the deploy down
+if `main` has already advanced past the commit (so a slow older CI run can't
+regress production). To force a deploy, use the workflow's **Run workflow**
+button (`workflow_dispatch`). Turn OFF Railway's own auto-deploy-on-push in the
+service settings so the two paths don't race. Required: repo secret
+`RAILWAY_TOKEN` and repo variable `RAILWAY_SERVICE` (the deploy job fails fast
+with a clear message if either is missing). Branch-protection on `main`
+(required review + green CI) is the complementary control and must be enabled in
+GitHub → Settings → Branches — it is **not** on by default.
+
 ## 2. Set the runtime role passwords (one-time per database)
 A fresh Railway Postgres only has the master role. Point `DATABASE_URL` at it, let
 the first deploy run the migrations (which create the `fleetos_app`/`fleetos_auth`/
