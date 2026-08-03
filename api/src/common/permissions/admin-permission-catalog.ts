@@ -29,12 +29,19 @@ export const ADMIN_PERMISSIONS = {
 
   FLEET_VIEW: 'fleet:view',
 
+  INSPECTIONS_VIEW: 'inspections:view',
+
+  MAINTENANCE_VIEW: 'maintenance:view',
+  MAINTENANCE_MANAGE: 'maintenance:manage',
+
   SYSTEM_VIEW: 'system:view',
 
   ANALYTICS_VIEW: 'analytics:view',
 
   ADMIN_USERS_VIEW: 'admin_users:view',
   ADMIN_USERS_MANAGE: 'admin_users:manage',
+
+  SECURITY_VIEW: 'security:view',
 
   AUDIT_LOG_VIEW: 'audit_log:view',
 } as const;
@@ -70,12 +77,19 @@ export const ADMIN_PERMISSION_CATALOG: AdminPermissionCatalogEntry[] = [
 
   { key: ADMIN_PERMISSIONS.FLEET_VIEW, category: 'Fleet Administration', description: 'View cross-tenant assets, operators, and integrations' },
 
+  { key: ADMIN_PERMISSIONS.INSPECTIONS_VIEW, category: 'Inspections', description: 'View cross-tenant checklist inspections and submissions' },
+
+  { key: ADMIN_PERMISSIONS.MAINTENANCE_VIEW, category: 'Maintenance', description: 'View cross-tenant maintenance jobs and defects' },
+  { key: ADMIN_PERMISSIONS.MAINTENANCE_MANAGE, category: 'Maintenance', description: 'Reassign, comment on, and close maintenance defects' },
+
   { key: ADMIN_PERMISSIONS.SYSTEM_VIEW, category: 'System', description: 'View system/database health and deployment info' },
 
   { key: ADMIN_PERMISSIONS.ANALYTICS_VIEW, category: 'Analytics', description: 'View the executive dashboard and analytics' },
 
   { key: ADMIN_PERMISSIONS.ADMIN_USERS_VIEW, category: 'Administration', description: 'View FleetHQ staff accounts and roles' },
   { key: ADMIN_PERMISSIONS.ADMIN_USERS_MANAGE, category: 'Administration', description: 'Create/disable FleetHQ staff accounts and assign roles' },
+
+  { key: ADMIN_PERMISSIONS.SECURITY_VIEW, category: 'Security', description: 'View the platform security centre (MFA adoption, locked accounts, sign-in risk)' },
 
   { key: ADMIN_PERMISSIONS.AUDIT_LOG_VIEW, category: 'Administration', description: 'View the administration platform\'s own audit log' },
 ];
