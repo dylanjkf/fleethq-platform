@@ -67,6 +67,7 @@ import { AdminFleetModule } from './admin-fleet/admin-fleet.module';
 import { AdminInspectionsModule } from './admin-inspections/admin-inspections.module';
 import { AdminMaintenanceModule } from './admin-maintenance/admin-maintenance.module';
 import { AdminNotificationsModule } from './admin-notifications/admin-notifications.module';
+import { AdminSearchModule } from './admin-search/admin-search.module';
 import { AdminSecurityModule } from './admin-security/admin-security.module';
 import { AdminUsersModule } from './admin-users/admin-users.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -207,6 +208,7 @@ import { validateEnv } from './config/env.validation';
     AdminInspectionsModule,
     AdminMaintenanceModule,
     AdminNotificationsModule,
+    AdminSearchModule,
     AdminSecurityModule,
     AdminUsersModule,
   ],
