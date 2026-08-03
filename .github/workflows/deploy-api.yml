@@ -57,8 +57,39 @@ jobs:
           # Deploy the exact commit api-ci validated. On workflow_dispatch there is no
           # triggering run, so fall back to the ref the dispatch targeted.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          # Need main's history to decide whether this commit is still the latest.
+          fetch-depth: 0
+
+      - name: Recency guard — don't ship an already-superseded commit
+        # Closes the out-of-order deploy race: if an older commit's api-ci finishes
+        # AFTER a newer commit has already landed on main (slow CI on the earlier
+        # push), the concurrency queue would still run this older deploy last and
+        # regress production to stale code. So before deploying, compare the commit
+        # being shipped against main's current tip. If main has already advanced
+        # past it, stand down — the newer commit's own deploy is authoritative.
+        # Manual dispatches are exempt: an operator forcing a specific ref means it.
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        run: |
+          DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
+          git fetch --quiet origin main
+          MAIN_TIP="$(git rev-parse origin/main)"
+          echo "Deploying: $DEPLOY_SHA"
+          echo "main tip:  $MAIN_TIP"
+          if [ "$DEPLOY_SHA" = "$MAIN_TIP" ]; then
+            echo "This commit is main's tip — proceeding."
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$DEPLOY_SHA" "$MAIN_TIP"; then
+            echo "::warning::main has already advanced past $DEPLOY_SHA to $MAIN_TIP." \
+                 "A newer commit's deploy supersedes this one — standing down to avoid" \
+                 "shipping stale code over newer."
+            echo "SUPERSEDED=1" >> "$GITHUB_ENV"
+          else
+            echo "$DEPLOY_SHA is not an ancestor of main tip (diverged/branch) — proceeding."
+          fi
 
       - name: Preflight — required secret/variable present
+        if: ${{ env.SUPERSEDED != '1' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}

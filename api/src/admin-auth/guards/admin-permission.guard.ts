@@ -63,6 +63,7 @@ export class AdminPermissionGuard implements CanActivate {
       const needsPasswordReset = obligated?.mustResetPassword === true;
       const needsMfaEnrollment = staffAdminMfaEnforced() && !obligated?.mfaEnabledAt;
       if (needsPasswordReset || needsMfaEnrollment) {
+        await this.recordDenial(user, request, 'setup_required');
         throw new ForbiddenException({
           code: 'ADMIN_SETUP_REQUIRED',
           message: needsPasswordReset
@@ -108,7 +109,7 @@ export class AdminPermissionGuard implements CanActivate {
   private async recordDenial(
     user: AuthenticatedAdminRequestUser,
     request: Request & { id?: string },
-    reason: 'permission_denied' | 'route_unclassified',
+    reason: 'permission_denied' | 'route_unclassified' | 'setup_required',
     required?: AdminPermissionKey,
   ): Promise<void> {
     await this.audit.record({

@@ -53,6 +53,8 @@ describe('AdminUsersService', () => {
     const createArg = (adminPrisma.adminUser.create as jest.Mock).mock.calls[0][0];
     expect(createArg.data.passwordHash).toBeDefined();
     expect(createArg.data.passwordHash).not.toBe('correcthorse9');
+    // Onboarded staff must rotate the temporary password on first login.
+    expect(createArg.data.mustResetPassword).toBe(true);
     expect(result).not.toHaveProperty('passwordHash');
     expect(result.deactivated).toBe(false);
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'admin_users.created' }));
