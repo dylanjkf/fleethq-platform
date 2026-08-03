@@ -109,6 +109,35 @@ export class AdminMfaService {
     });
   }
 
+  /**
+   * Regenerate the one-time backup codes for an admin who already has MFA on.
+   * Verifies a current second factor (TOTP or an existing backup code) first,
+   * then replaces the whole set — so lost/used codes can be rotated without
+   * disabling and re-enrolling MFA. Returns the new codes exactly once.
+   */
+  async regenerateBackupCodes(adminUserId: string, code: string, context: AdminAuthContext = {}): Promise<{ backupCodes: string[] }> {
+    const user = await this.requireUser(adminUserId);
+    if (!user.mfaEnabledAt) {
+      throw new BadRequestException({ code: 'MFA_NOT_ENABLED', message: 'Enable MFA before regenerating backup codes.' });
+    }
+    const result = await this.verifyChallenge(user, code);
+    if (!result.ok) {
+      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+    }
+    const backupCodes = this.generateBackupCodes();
+    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), 10)));
+    await this.adminPrisma.adminUser.update({ where: { id: adminUserId }, data: { mfaBackupCodes: hashes } });
+    await this.audit.record({
+      adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.MFA_BACKUP_CODES_REGENERATED,
+      entityType: 'admin_user',
+      entityId: adminUserId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+    return { backupCodes };
+  }
+
   async verifyChallenge(user: AdminMfaUser, code: string): Promise<{ ok: boolean; usedBackupCode: boolean }> {
     if (!user.mfaSecret || !user.mfaEnabledAt) return { ok: false, usedBackupCode: false };
     if (verifyTotp(user.mfaSecret, code)) return { ok: true, usedBackupCode: false };

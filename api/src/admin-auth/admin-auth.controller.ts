@@ -155,4 +155,15 @@ export class AdminAuthController {
     await this.mfa.disable(admin.adminUserId, dto.code, { ip, userAgent: req.get('user-agent') ?? null });
     return { ok: true };
   }
+
+  /** Regenerate the one-time backup codes (e.g. after using or losing them). Verifies
+   *  a current code first, invalidates the old set, and returns the new codes once. */
+  @AdminGuarded()
+  @AdminAuthenticatedOnly()
+  @Throttle(ADMIN_AUTH_THROTTLE)
+  @Post('mfa/backup-codes/regenerate')
+  @HttpCode(HttpStatus.OK)
+  regenerateBackupCodes(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Body() dto: AdminMfaCodeDto, @Ip() ip: string, @Req() req: Request) {
+    return this.mfa.regenerateBackupCodes(admin.adminUserId, dto.code, { ip, userAgent: req.get('user-agent') ?? null });
+  }
 }
