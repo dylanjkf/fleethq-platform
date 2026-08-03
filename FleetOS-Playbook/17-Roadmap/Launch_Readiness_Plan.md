@@ -13,12 +13,15 @@
 ## Framing: "readiness" was mostly written, not run
 
 Most launch-readiness work to date is code and config that has **never executed
-against real infrastructure or real accounts**. The Terraform (network, RDS,
-api-service, frontend/CDN, secrets, monitoring, DNS, DR snapshot copy) and the
-CI/CD workflows (`deploy-api`, `deploy-frontends`) are authored. Billing, email
-(SES), object storage (S3), and push (VAPID) are all "flip a switch" — but the
-switches have never been flipped end-to-end with real credentials. That is the
-core of the remaining work: **prove it in production**, not build more features.
+against real infrastructure or real accounts**. The AWS Terraform (network, RDS,
+api-service, frontend/CDN, secrets, monitoring, DNS, DR snapshot copy) is
+**planned — not yet in the repo** (no `.tf` files exist); it is design intent,
+not authored code. The API deploy workflow (`deploy-api`, CI-gated to Railway)
+*is* committed; a `deploy-frontends` workflow for the AWS/CDN path is planned.
+Billing, email (SES), object storage (S3), and push (VAPID) are all "flip a
+switch" — but the switches have never been flipped end-to-end with real
+credentials. That is the core of the remaining work: **prove it in production**,
+not build more features.
 
 ---
 

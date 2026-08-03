@@ -70,12 +70,63 @@ QUALIFIER = re.compile(
     planned-infra-doc |
     # honest negations / gap phrasing: the line is denying, not asserting, that the
     # infra exists — those are exactly the statements the guard should NOT flag.
+    # NB: deliberately NOT accepting bare "deferred" / "until …" as qualifiers —
+    # "deployment is deferred until X" describes *timing*, not *non-existence*, and
+    # previously let a present-tense "Terraform modules under infra/ (ECS/RDS/…)"
+    # existence claim slip through. An existence claim must be qualified by a
+    # not-built / planned marker, not by a word about when deployment happens.
     not\ present | there\ is\ no | there'?s\ no | nothing\ to\ `?terraform |
-    stands\ in\ for | remainder | small\ remainder | until\ (?:a|an|the|we)
+    stands\ in\ for | remainder | small\ remainder | not\ (?:yet\ )?in\ (?:the\ )?repo
     """,
 )
 
-WINDOW = 5  # a qualifier this many lines before/after the claim counts as adjacent
+WINDOW = 3  # a qualifier this many lines before/after the claim counts as adjacent.
+# Deliberately tight (was 5): a ±5 window let a qualifier belonging to a *different*
+# bullet excuse a bare existence claim (e.g. a "Secrets Manager in production" aside
+# passed because an unrelated "planned" line sat 4 lines away). 3 still covers a
+# multi-line "Planned (target …): …" block where the qualifier heads the paragraph,
+# but no longer leaks across unrelated list items.
+
+
+HEADER = re.compile(r"^\s{0,3}#{1,6}\s")
+
+# Markdown emphasis/inline-code markers, stripped before QUALIFIER matching so that
+# an honest negation like "There is **no** Terraform" isn't missed just because a
+# bold marker splits "is no". Applied to qualifier detection only — CLAIM detection
+# is left as-is so claims are still caught.
+_EMPHASIS = re.compile(r"[*_`]")
+
+
+def _has_qualifier(line: str) -> bool:
+    return bool(QUALIFIER.search(_EMPHASIS.sub("", line)))
+
+
+# A claim that explicitly asserts it is live *now* ("in production", "already
+# provisioned") must NOT be rescued by a governing "(planned)" section header —
+# a planned header can't make an in-production claim honest. Kept narrow so it
+# does not catch honest reality phrasing like "in the current deployment …".
+CURRENT_ASSERTION = re.compile(
+    r"(?i)\bin\ production\b|\balready\ (?:has|have|exists?|provisioned|installed|configured|deployed)\b",
+)
+
+
+def _asserts_current(line: str) -> bool:
+    return bool(CURRENT_ASSERTION.search(_EMPHASIS.sub("", line)))
+
+
+def _governing_header_qualified(lines: list[str], i: int) -> bool:
+    """True if the nearest markdown header at or above line i carries a qualifier.
+
+    A `### Encryption at rest (planned)` header governs every bullet beneath it
+    until the next header, so a claim in that block is qualified even when the
+    header is further than WINDOW lines away. This is what lets the window stay
+    tight (cross-bullet leak protection) without false-positiving on clearly
+    planned sections.
+    """
+    for j in range(i, -1, -1):
+        if HEADER.match(lines[j]):
+            return _has_qualifier(lines[j])
+    return False
 
 
 def scan_lines(lines: list[str]) -> list[tuple[int, str]]:
@@ -83,9 +134,22 @@ def scan_lines(lines: list[str]) -> list[tuple[int, str]]:
     for i, line in enumerate(lines):
         if not CLAIM.search(line):
             continue
+        # A claim that asserts it is live *now* ("in production", "already
+        # provisioned") is only honest if the same sentence qualifies/negates it.
+        # Checked within ±1 line (to cover a wrapped sentence) — NOT the full window
+        # and NOT a governing header, so a "planned" word on a different bullet or a
+        # section header can't make an in-production claim true.
+        if _asserts_current(line):
+            near = range(max(0, i - 1), min(len(lines), i + 2))
+            if not any(_has_qualifier(lines[j]) for j in near):
+                violations.append((i + 1, line.rstrip()))
+            continue
         lo = max(0, i - WINDOW)
         hi = min(len(lines), i + WINDOW + 1)
-        if any(QUALIFIER.search(lines[j]) for j in range(lo, hi)):
+        if any(_has_qualifier(lines[j]) for j in range(lo, hi)):
+            continue
+        # A governing "(planned)" header rescues a planned-topology bullet.
+        if _governing_header_qualified(lines, i):
             continue
         violations.append((i + 1, line.rstrip()))
     return violations
@@ -129,6 +193,50 @@ SELFTEST_CASES = [
         [
             "Integration credentials are encrypted at rest at the application layer "
             "(AES-256-GCM); attachments use S3 and email uses SES when configured.\n"
+        ],
+        False,
+    ),
+    (
+        "honest negation with markdown bold splitting the phrase -> must pass",
+        ["> There is **no** Terraform / infrastructure-as-code in this repository.\n"],
+        False,
+    ),
+    (
+        "planned section header governs its bullets beyond the window -> must pass",
+        [
+            "### Encryption at rest (planned)\n",
+            "- some prose\n",
+            "- more prose\n",
+            "- more prose\n",
+            "- RDS storage encrypted with a customer-managed KMS key; SSE-KMS buckets.\n",
+        ],
+        False,
+    ),
+    (
+        "unqualified claim under a NON-planned header -> must still be flagged",
+        [
+            "### Current production\n",
+            "- The API runs on ECS Fargate behind an ALB with RDS Postgres.\n",
+        ],
+        True,
+    ),
+    (
+        "'in production' claim under a PLANNED header -> header must NOT excuse it",
+        [
+            "## Planned target\n",
+            "- Something genuinely planned (not yet built).\n",
+            "- Unrelated real bullet.\n",
+            "- Secrets are pulled from AWS Secrets Manager (infra/terraform/modules/secrets/) in production.\n",
+        ],
+        True,
+    ),
+    (
+        "honest 'current deployment' reality line under a planned header -> must pass",
+        [
+            "### Encryption at rest (planned)\n",
+            "- RDS with a customer-managed KMS key is the target.\n",
+            "- No such infrastructure exists yet.\n",
+            "- At-rest encryption in the current deployment is the managed platform's default (KMS is planned).\n",
         ],
         False,
     ),
