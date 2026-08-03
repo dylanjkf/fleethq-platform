@@ -86,7 +86,44 @@ async function revokeExtra(prisma: PrismaClient, roleId: string, targetPermissio
   return extra.length;
 }
 
+/**
+ * Delete permission rows that have fallen out of the catalog entirely. Revoking
+ * grants (revokeExtra) unhooks them from the template roles, but a retired
+ * AdminPermission would otherwise linger in the table — a stale key that could be
+ * re-granted to a custom role or muddy an access audit. The AdminRolePermission FK
+ * is onDelete: Cascade, so deleting the permission also removes any remaining
+ * grants (including on custom roles) atomically. Callers MUST have already checked
+ * the catalog is non-empty (see reconcileAdminPermissions' guard) — with an empty
+ * catalog every row here would be classified retired and deleted.
+ */
+async function retireStalePermissions(
+  prisma: PrismaClient,
+  allPermissions: Array<{ id: string; key: string }>,
+): Promise<number> {
+  const catalogKeys = new Set<string>(ADMIN_PERMISSION_CATALOG.map((p) => p.key));
+  const retired = allPermissions.filter((p) => !catalogKeys.has(p.key));
+  if (retired.length === 0) return 0;
+  const result = await prisma.adminPermission.deleteMany({
+    where: { id: { in: retired.map((p) => p.id) } },
+  });
+  return result.count;
+}
+
 export async function reconcileAdminPermissions(prisma: PrismaClient): Promise<AdminReconcileResult> {
+  // Fail-closed guard, twin of the PERMISSION_CATALOG check in prod-bootstrap.ts.
+  // This function computes "retired" as every AdminPermission row NOT in the
+  // catalog, then deletes them — cascading through the AdminRolePermission FK to
+  // strip grants from EVERY role, including future custom ones. If the catalog
+  // import is ever empty (broken build / bad refactor), that turns into a full
+  // wipe of the admin RBAC surface in the highest-privilege boot path. Refuse
+  // to run at all rather than mass-delete on a broken input.
+  if (!Array.isArray(ADMIN_PERMISSION_CATALOG) || ADMIN_PERMISSION_CATALOG.length === 0) {
+    throw new Error(
+      '[bootstrap] FATAL: ADMIN_PERMISSION_CATALOG is empty — refusing to reconcile admin permissions. ' +
+        'This indicates a broken build or import; an empty catalog would classify every existing ' +
+        'admin permission as retired and delete it (cascading to strip every role grant).',
+    );
+  }
   for (const entry of ADMIN_PERMISSION_CATALOG) {
     await prisma.adminPermission.upsert({
       where: { key: entry.key },
@@ -124,21 +161,7 @@ export async function reconcileAdminPermissions(prisma: PrismaClient): Promise<A
     (await revokeExtra(prisma, superAdmin.id, superAdminTargetIds)) +
     (await revokeExtra(prisma, support.id, supportTargetIds));
 
-  // Delete permission rows that have fallen out of the catalog entirely. Revoking
-  // grants (above) unhooks them from the template roles, but a retired
-  // AdminPermission would otherwise linger in the table — a stale key that could be
-  // re-granted to a custom role or muddy an access audit. The AdminRolePermission
-  // FK is onDelete: Cascade, so deleting the permission also removes any remaining
-  // grants (including on custom roles) atomically.
-  const catalogKeys = new Set<string>(ADMIN_PERMISSION_CATALOG.map((p) => p.key));
-  const retired = allPermissions.filter((p) => !catalogKeys.has(p.key));
-  let permissionsRetired = 0;
-  if (retired.length > 0) {
-    const result = await prisma.adminPermission.deleteMany({
-      where: { id: { in: retired.map((p) => p.id) } },
-    });
-    permissionsRetired = result.count;
-  }
+  const permissionsRetired = await retireStalePermissions(prisma, allPermissions);
 
   return {
     permissionsUpserted: ADMIN_PERMISSION_CATALOG.length,
