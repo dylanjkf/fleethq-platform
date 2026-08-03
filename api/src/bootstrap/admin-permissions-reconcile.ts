@@ -42,6 +42,7 @@ export interface AdminReconcileResult {
   superAdminRoleCreated: boolean;
   supportRoleCreated: boolean;
   permissionsGranted: number;
+  permissionsRevoked: number;
 }
 
 async function ensureRole(
@@ -64,6 +65,24 @@ async function grantMissing(prisma: PrismaClient, roleId: string, targetPermissi
     skipDuplicates: true,
   });
   return missing.length;
+}
+
+/**
+ * Revoke grants a SYSTEM-TEMPLATE role holds that are no longer in its target
+ * set — the missing half of reconcile symmetry (Round 3 Medium). Without this,
+ * narrowing a template role's definition (or removing a permission from the
+ * catalog) left the old over-broad grant in place forever, a latent
+ * privilege-creep mechanism. Scoped by exact roleId to the two managed template
+ * roles ONLY; custom operator-defined roles are never touched here.
+ */
+async function revokeExtra(prisma: PrismaClient, roleId: string, targetPermissionIds: string[]): Promise<number> {
+  const target = new Set(targetPermissionIds);
+  const extra = (await prisma.adminRolePermission.findMany({ where: { roleId } }))
+    .map((p) => p.permissionId)
+    .filter((id) => !target.has(id));
+  if (extra.length === 0) return 0;
+  await prisma.adminRolePermission.deleteMany({ where: { roleId, permissionId: { in: extra } } });
+  return extra.length;
 }
 
 export async function reconcileAdminPermissions(prisma: PrismaClient): Promise<AdminReconcileResult> {
@@ -90,14 +109,25 @@ export async function reconcileAdminPermissions(prisma: PrismaClient): Promise<A
     'Front-line support: view organisations/billing, act on support tickets and customer-user issues — no billing changes, feature-flag edits, or staff management.',
   );
 
+  const superAdminTargetIds = allPermissions.map((p) => p.id);
+  const supportTargetIds = supportPermissions.map((p) => p.id);
+
   const permissionsGranted =
-    (await grantMissing(prisma, superAdmin.id, allPermissions.map((p) => p.id))) +
-    (await grantMissing(prisma, support.id, supportPermissions.map((p) => p.id)));
+    (await grantMissing(prisma, superAdmin.id, superAdminTargetIds)) +
+    (await grantMissing(prisma, support.id, supportTargetIds));
+
+  // Symmetry: prune any grants these two template roles hold that fell out of
+  // their target set (catalog narrowed, or a permission removed). Template roles
+  // only — never custom roles.
+  const permissionsRevoked =
+    (await revokeExtra(prisma, superAdmin.id, superAdminTargetIds)) +
+    (await revokeExtra(prisma, support.id, supportTargetIds));
 
   return {
     permissionsUpserted: ADMIN_PERMISSION_CATALOG.length,
     superAdminRoleCreated: superAdmin.created,
     supportRoleCreated: support.created,
     permissionsGranted,
+    permissionsRevoked,
   };
 }

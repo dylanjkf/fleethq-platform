@@ -254,7 +254,17 @@ export class AdminBillingService {
       },
       { idempotencyKey: this.idempotencyKey('manual_invoice', stripeCustomerId, context.adminUserId) },
     );
-    const invoice = await stripe.invoices.finalizeInvoice(draft.id);
+    const invoice = await stripe.invoices.finalizeInvoice(
+      draft.id,
+      undefined,
+      {
+        // Idempotency parity with every other write in this service (Round 3 Medium):
+        // keyed on the draft invoice id + the same per-minute bucket the helper uses,
+        // so a double-click / bare retry can't double-finalize the same draft. The
+        // key belongs in the 3rd (RequestOptions) arg, not the params body.
+        idempotencyKey: this.idempotencyKey('finalize_invoice', draft.id, context.adminUserId),
+      },
+    );
 
     await this.audit.record({
       adminUserId: context.adminUserId,

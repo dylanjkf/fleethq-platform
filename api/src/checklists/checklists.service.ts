@@ -11,7 +11,7 @@ import { SubmitChecklistDto } from './dto/submit-checklist.dto';
 import { ListChecklistSubmissionsDto } from './dto/list-checklist-submissions.dto';
 import { ChecklistItemDto } from './dto/checklist-item.dto';
 import { MAX_AGGREGATION_ROWS } from '../common/query/row-caps';
-import { assertOwnership } from '../common/ownership';
+import { assertOwnership, assertOwnedRecord } from '../common/ownership';
 import { evaluateAnswers } from './checklist-evaluation';
 
 /** The normalized item shape persisted in `items` / `template_snapshot` JSON. */
@@ -120,10 +120,11 @@ export class ChecklistsService {
         include: { appliesToAssetClass: true, assignments: { select: { assetId: true } } },
       }),
     );
-    if (!template || template.companyId !== companyId) {
-      throw new NotFoundException({ code: 'CHECKLIST_TEMPLATE_NOT_FOUND', message: 'Checklist template not found.' });
-    }
-    return template;
+    return assertOwnedRecord(template, companyId, {
+      code: 'CHECKLIST_TEMPLATE_NOT_FOUND',
+      message: 'Checklist template not found.',
+      allowArchived: true,
+    });
   }
 
   async updateTemplate(companyId: string, actorUserId: string, id: string, dto: UpdateChecklistTemplateDto) {
@@ -417,10 +418,11 @@ export class ChecklistsService {
     const submission = await this.prisma.withTenant(companyId, (tx) =>
       tx.checklistSubmission.findUnique({ where: { id }, include: this.submissionInclude() }),
     );
-    if (!submission || submission.companyId !== companyId) {
-      throw new NotFoundException({ code: 'CHECKLIST_SUBMISSION_NOT_FOUND', message: 'Checklist submission not found.' });
-    }
-    return submission;
+    return assertOwnedRecord(submission, companyId, {
+      code: 'CHECKLIST_SUBMISSION_NOT_FOUND',
+      message: 'Checklist submission not found.',
+      allowArchived: true,
+    });
   }
 
   // ---- helpers ------------------------------------------------------------
@@ -475,11 +477,11 @@ export class ChecklistsService {
   }
 
   private async requireTemplate(tx: Prisma.TransactionClient, companyId: string, id: string) {
-    const template = await tx.checklistTemplate.findUnique({ where: { id } });
-    if (!template || template.companyId !== companyId) {
-      throw new NotFoundException({ code: 'CHECKLIST_TEMPLATE_NOT_FOUND', message: 'Checklist template not found.' });
-    }
-    return template;
+    return assertOwnership(tx.checklistTemplate, id, companyId, {
+      code: 'CHECKLIST_TEMPLATE_NOT_FOUND',
+      message: 'Checklist template not found.',
+      allowArchived: true,
+    });
   }
 
   private requireAsset(tx: Prisma.TransactionClient, companyId: string, assetId: string) {

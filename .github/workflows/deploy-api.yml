@@ -1,15 +1,26 @@
 name: deploy-api
 
-# Auto-deploy the API to Railway whenever main advances (i.e. a PR merges) so the
-# running backend never drifts behind the deployed frontend again. A merge that
-# changed nothing under api/ doesn't need a redeploy, hence the path filter; use
-# the manual "Run workflow" button (workflow_dispatch) to force one anyway.
+# Auto-deploy the API to Railway — but ONLY after api-ci has actually passed on the
+# same commit. This workflow is triggered by api-ci completing (workflow_run), not by
+# the raw push, so a commit whose lint/typecheck/migrate/build/tests failed can never
+# reach production. A merge that changed nothing under api/ doesn't run api-ci at all
+# (api-ci has its own api/** path filter), so it also never triggers a deploy; use the
+# manual "Run workflow" button (workflow_dispatch) to force one anyway.
 #
-# Safety: railway.json runs a single replica with healthcheckPath /health/ready,
-# and api/docker-entrypoint.sh applies `prisma migrate deploy` before the app
-# starts. So a deploy is self-contained (pending migrations apply first) and a
-# broken build fails the healthcheck — Railway keeps the previous version live
-# rather than serving the bad one.
+# Safety, in layers:
+#   1. CI gate — this job only runs when the triggering api-ci run concluded 'success'
+#      (see the `if:` below). workflow_run fires on failure too, so the guard is required.
+#   2. Exact-SHA deploy — it checks out the precise commit CI validated
+#      (github.event.workflow_run.head_sha), not whatever the branch tip happens to be
+#      by the time the deploy runs, so what ships is exactly what was tested.
+#   3. Runtime — railway.json runs a single replica with healthcheckPath /health/ready,
+#      and api/docker-entrypoint.sh applies `prisma migrate deploy` before the app
+#      starts. A broken build fails the healthcheck and Railway keeps the previous
+#      version live rather than serving the bad one.
+#
+# Note: required-review branch protection on main (backed by the CODEOWNERS file at the
+# repo root) is the other half of this gate — CI-must-pass protects the deploy, review
+# protects what reaches main in the first place. See docs and the operator runbooks.
 #
 # One-time setup (repo Settings):
 #   - Secret  RAILWAY_TOKEN   — a Railway *project* or *account* token with deploy
@@ -18,11 +29,12 @@ name: deploy-api
 # Without both, the job stops early with a clear message instead of half-deploying.
 
 on:
-  push:
+  # Fires when api-ci finishes on main. The `if:` guard below drops the run unless
+  # that api-ci run actually succeeded, so only green commits deploy.
+  workflow_run:
+    workflows: ["api-ci"]
+    types: [completed]
     branches: [main]
-    paths:
-      - 'api/**'
-      - '.github/workflows/deploy-api.yml'
   workflow_dispatch:
 
 # Never let two deploys of the same service overlap; a newer push supersedes an
@@ -34,8 +46,17 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Only deploy when the CI run succeeded (workflow_run also fires on failure/cancel),
+    # or when a human explicitly forces it via the Run-workflow button.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Deploy the exact commit api-ci validated. On workflow_dispatch there is no
+          # triggering run, so fall back to the ref the dispatch targeted.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Preflight — required secret/variable present
         env:

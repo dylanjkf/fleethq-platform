@@ -19,3 +19,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # Docker base image (api/Dockerfile is digest-pinned to node:22-alpine@sha256:…).
+  # Without this, a digest pin never receives security refreshes — Dependabot bumps
+  # the pinned digest when the upstream tag moves (Round 3 Medium).
+  - package-ecosystem: docker
+    directory: /api
+    schedule:
+      interval: weekly

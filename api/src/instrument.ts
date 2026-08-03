@@ -1,14 +1,15 @@
 /**
  * Error tracking (the commercial-readiness review's "no monitoring exists"
- * finding, application-level half — see infra/terraform/modules/monitoring
- * for the infra-level half). Must be imported and run before anything else,
+ * finding, application-level half; an infra-level half — CloudWatch/alarms via
+ * `infra/terraform/modules/monitoring` — is planned/target architecture, not yet
+ * built). Must be imported and run before anything else,
  * including before @nestjs/core, so Sentry's auto-instrumentation can hook
  * into modules as they're first required — hence this is its own file,
  * imported as the very first line of main.ts rather than initialized inside
  * bootstrap().
  *
  * SENTRY_DSN empty/unset (the default in every environment until a real
- * Sentry project exists — see infra/terraform/modules/secrets) means
+ * Sentry project exists and its DSN is wired into the deploy config) means
  * Sentry.init() runs with no DSN, which is a documented no-op: every
  * Sentry.* call becomes a safe no-op rather than an error. Error tracking
  * being unconfigured must never be a reason the app fails to start or a

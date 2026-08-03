@@ -91,7 +91,7 @@ describe('AdminBillingService (Stripe mocked)', () => {
       withIdempotencyKey,
     );
     expect(stripe.invoices.create.mock.calls[0][0]).not.toHaveProperty('automatic_tax');
-    expect(stripe.invoices.finalizeInvoice).toHaveBeenCalledWith('in_draft');
+    expect(stripe.invoices.finalizeInvoice).toHaveBeenCalledWith('in_draft', undefined, withIdempotencyKey);
     expect(result).toEqual({ invoiceId: 'in_2', status: 'open', hostedInvoiceUrl: 'https://stripe.example/in_2' });
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'billing.manual_invoice_created' }));
   });

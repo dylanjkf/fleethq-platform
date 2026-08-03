@@ -20,10 +20,10 @@ describe('AdminUsersController route protection', () => {
   );
 
   it('exposes the expected CRUD routes', () => {
-    expect(routeMethods.sort()).toEqual(['create', 'deactivate', 'getById', 'list', 'reactivate', 'updateRole']);
+    expect(routeMethods.sort()).toEqual(['create', 'deactivate', 'getById', 'list', 'listRoles', 'reactivate', 'updateRole']);
   });
 
-  it.each(['list', 'getById', 'create', 'updateRole', 'deactivate', 'reactivate'])(
+  it.each(['list', 'listRoles', 'getById', 'create', 'updateRole', 'deactivate', 'reactivate'])(
     'route "%s" carries both admin guards',
     (methodName) => {
       const handler = (prototype as unknown as Record<string, unknown>)[methodName] as object;
@@ -39,6 +39,7 @@ describe('AdminUsersController route protection', () => {
     const permOf = (methodName: string) =>
       Reflect.getMetadata(REQUIRED_ADMIN_PERMISSION_KEY, (prototype as unknown as Record<string, unknown>)[methodName] as object);
     expect(permOf('list')).toBe(ADMIN_PERMISSIONS.ADMIN_USERS_VIEW);
+    expect(permOf('listRoles')).toBe(ADMIN_PERMISSIONS.ADMIN_USERS_VIEW);
     expect(permOf('getById')).toBe(ADMIN_PERMISSIONS.ADMIN_USERS_VIEW);
     for (const m of ['create', 'updateRole', 'deactivate', 'reactivate']) {
       expect(permOf(m)).toBe(ADMIN_PERMISSIONS.ADMIN_USERS_MANAGE);

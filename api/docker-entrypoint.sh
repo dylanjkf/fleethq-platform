@@ -22,13 +22,22 @@ else
 fi
 
 # Seed the permission catalog + built-in reference data (idempotent), and — when
-# BOOTSTRAP_COMPANY_ADMIN=true — create the first company + admin login from env.
-# The ts-node seed/bootstrap scripts don't ship in the runtime image, so this
-# compiled entry point is the only in-container path to seed a fresh production
-# database. It never throws, but guard the call too so a bootstrap hiccup can
-# never stop the app from starting. Set BOOTSTRAP_ON_BOOT=false to skip entirely.
+# BOOTSTRAP_COMPANY_ADMIN / BOOTSTRAP_STAFF_ADMIN are set — create the first
+# company/staff admin logins from env. The ts-node seed/bootstrap scripts don't
+# ship in the runtime image, so this compiled entry point is the only in-container
+# path to seed a fresh production database.
+#
+# This is intentionally FATAL (no `|| echo` swallow, and `set -e` is on above): the
+# script exits non-zero only when the platform is genuinely broken (empty permission
+# catalog, admin catalog not reconciled, a requested admin account that couldn't be
+# created), and that aborts the boot before `exec`-ing the app. So the app only ever
+# starts on a cleanly-bootstrapped database — /health/ready going green already
+# implies bootstrap succeeded, and Railway keeps the previous version live on failure
+# instead of serving a half-initialised one (Round 3 Critical #3). Deliberate no-ops
+# (flag off, weak/missing password) exit 0 and don't block boot. Set
+# BOOTSTRAP_ON_BOOT=false to skip entirely.
 if [ "${BOOTSTRAP_ON_BOOT:-true}" = "true" ]; then
-  node dist/bootstrap/prod-bootstrap.js || echo "[bootstrap] failed (non-fatal) — starting the app anyway."
+  node dist/bootstrap/prod-bootstrap.js
 fi
 
 exec "$@"

@@ -1547,6 +1547,11 @@ model MaintenanceJob {
   @@index([companyId])
   // "All maintenance for this asset" — the asset detail / history page.
   @@index([companyId, assetId])
+  // Cross-tenant admin defect browse (Round 3 Medium): the ops console lists
+  // maintenance jobs across ALL tenants ordered by createdAt with no companyId
+  // filter, so the companyId-leading indexes can't serve the sort. Bare createdAt
+  // index keeps that browse off a sequential scan as tenant count grows.
+  @@index([createdAt])
   @@map("maintenance_jobs")
 }
 
@@ -2022,6 +2027,12 @@ model ChecklistSubmission {
   @@index([companyId, submittedAt])
   // Reverse lookup: "which submissions used this checklist template?"
   @@index([companyId, templateId])
+  // Cross-tenant admin inspection browse (Round 3 Medium): the ops console lists
+  // submissions across ALL tenants ordered by submittedAt with no companyId
+  // filter, so the companyId-leading indexes above can't serve the sort. This
+  // bare submittedAt index keeps that "browse everything, newest first" query off
+  // a sequential scan as tenant count grows.
+  @@index([submittedAt])
   @@map("checklist_submissions")
 }
 

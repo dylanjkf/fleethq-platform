@@ -1,3 +1,6 @@
+<!-- planned-infra-doc -->
+> ⚠️ **Planned / target architecture — not yet provisioned.** Parts of this document describe the intended AWS deployment (RDS, KMS, CloudFront, ECS/Fargate, Secrets Manager, and `infra/terraform/*` modules). **That infrastructure does not exist in this repository yet** — a repo-wide search for `infra/terraform` returns only documentation, no `.tf` files. Statements below that read as present-tense fact describe the *target* state; treat them as planned until the Terraform is actually committed. The app currently deploys to Railway (see `api/README.md` and `FleetOS-Playbook/.../Go_Live_Runbook.md`).
+
 # Database security model
 
 Covers tenant isolation (Part 2) and database security (Part 12): row-level
@@ -66,10 +69,16 @@ carries a dev-only role password.
 
 ## Encryption
 
-- **At rest.** RDS storage is encrypted with a customer-managed KMS key with
-  rotation (`infra/terraform/modules/database`). S3 attachment/site buckets are
-  SSE-KMS encrypted and versioned with a full public-access block.
-- **In transit.** TLS 1.2/1.3 from client → CloudFront/ALB → API, and — as of
+- **At rest.** _Planned (target architecture, not yet built — see banner above):_
+  RDS storage will be encrypted with a customer-managed KMS key with rotation
+  (`infra/terraform/modules/database`), and S3 attachment/site buckets SSE-KMS
+  encrypted and versioned with a full public-access block. **Today** the app runs
+  on Railway; volume-level at-rest encryption there is the provider's, and no
+  customer-managed KMS key exists yet. The only application-level at-rest
+  encryption that exists today is the Integration Hub's AES-256-GCM credential
+  vault (stored integration secrets only), plus field-level hashing below.
+- **In transit.** _Planned:_ TLS 1.2/1.3 from client → CloudFront/ALB → API. What
+  exists today, and — as of
   the E3b infra wave — **forced TLS to the database** (`rds.force_ssl=1` +
   `sslmode=require`), so the API↔Postgres hop is encrypted, not merely private.
 - **Field-level.** Sensitive-but-searchable identifiers are hashed rather than

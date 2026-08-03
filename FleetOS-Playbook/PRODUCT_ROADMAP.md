@@ -1,3 +1,6 @@
+<!-- planned-infra-doc -->
+> ⚠️ **Planned / target architecture — not yet provisioned.** Parts of this document describe the intended AWS deployment (RDS, KMS, CloudFront, ECS/Fargate, Secrets Manager, and `infra/terraform/*` modules). **That infrastructure does not exist in this repository yet** — a repo-wide search for `infra/terraform` returns only documentation, no `.tf` files. Statements below that read as present-tense fact describe the *target* state; treat them as planned until the Terraform is actually committed. The app currently deploys to Railway (see `api/README.md` and `FleetOS-Playbook/.../Go_Live_Runbook.md`).
+
 # Product Roadmap (Repository Build)
 
 Tracks the build-out of the Playbook itself. For the FleetOS *product* roadmap, see `17-Roadmap/Product_Roadmap.md`.
@@ -28,7 +31,7 @@ Honest gap analysis and de-scoping recommendations — see `FOUNDER_NOTES.md`.
 - Cross-cutting Notifications system spec
 - Privacy & data protection spec (Australian Privacy Act, distinct from asset compliance)
 - ~~Billing & subscription management spec~~ ✅ built — `19-Billing/Billing_And_Subscriptions.md` (Stripe-backed, live-config-only away from production)
-- ~~Backup & disaster recovery spec~~ ✅ built — `infra/terraform/modules/database/` (RDS PITR + cross-region snapshot copy, documented RPO/RTO)
+- Backup & disaster recovery — 📋 **Planned (spec only, not yet built).** The design (RDS PITR + cross-region snapshot copy, documented RPO/RTO) is written up for `infra/terraform/modules/database/`, but that Terraform does not exist in this repo yet — see the planned-architecture banner at the top of this file.
 - Asset/operator onboarding & decommissioning workflow specs
 - Support/helpdesk pathway spec
 

@@ -60,17 +60,28 @@ bootstrapped `AdminUser`: `npm run admin:bootstrap` in `api/` (see
    picks up `api/railway.json` (Dockerfile builder) automatically.
 2. Set the environment variables below in Railway's Variables tab.
 3. Every deploy runs `prisma migrate deploy` automatically before the server
-   starts (`api/docker-entrypoint.sh`) — no separate release step to
-   trigger by hand.
-4. **Auto-deploy on merge:** `.github/workflows/deploy-api.yml` deploys the
-   API to Railway whenever `main` changes under `api/` (or via the manual
-   "Run workflow" button), so the running backend can't drift behind the
-   deployed frontend. It needs a `RAILWAY_TOKEN` **secret** (a Railway
-   project/account token) and a `RAILWAY_SERVICE` **variable** (the API
-   service's name) in the repo settings; without both the job stops early
-   with a clear message. This replaces relying on Railway's own GitHub
-   auto-deploy, but the two are compatible — disable one if you enable the
-   other to avoid double deploys.
+   starts (`api/docker-entrypoint.sh`) — no separate release step to trigger
+   by hand. This is gated by `RUN_MIGRATIONS_ON_BOOT` (default `true`). **If
+   you scale the API past a single replica, set `RUN_MIGRATIONS_ON_BOOT=false`**
+   and run `prisma migrate deploy` once as a dedicated pre-deploy step instead
+   — otherwise several replicas racing the same migration on boot can conflict.
+   At one replica (the default) leave it unset.
+4. It also runs `api/src/bootstrap/prod-bootstrap.ts` after migrations to seed
+   the permission catalog and (optionally) create the first accounts. This is
+   **fatal on a genuinely-broken bootstrap** (empty catalog, no admin created):
+   the container refuses to start rather than serving a half-initialised
+   platform, so `/health/ready` going green means bootstrap succeeded.
+5. **Auto-deploy on merge, gated on CI:** `.github/workflows/deploy-api.yml`
+   deploys the API to Railway, but only **after `api-ci.yml` passes on the same
+   commit** (it triggers on `api-ci` completion via `workflow_run` and checks
+   out the exact validated SHA) — a commit whose lint/tests failed can't reach
+   production. It needs a `RAILWAY_TOKEN` **secret** (a Railway project/account
+   token) and a `RAILWAY_SERVICE` **variable** (the API service's name) in the
+   repo settings; without both the job stops early with a clear message. Enable
+   "Require status checks (api-ci)" + "Require review from Code Owners" (see
+   `.github/CODEOWNERS`) branch protection on `main` for the full gate. This
+   replaces relying on Railway's own GitHub auto-deploy — disable one if you
+   enable the other to avoid double deploys.
 
 **Required environment variables** (see `api/.env.example` for the full
 list with rationale):
@@ -99,8 +110,19 @@ Railway Postgres just needs `DATABASE_URL` pointed at it and
 role passwords still need to be set to match `APP_DATABASE_URL`/
 `AUTH_DATABASE_URL`/`ADMIN_DATABASE_URL` (`npm run db:rotate-role-passwords`
 in `api/`, or set them directly via `ALTER ROLE ... PASSWORD ...` against
-the new database). Then `npm run admin:bootstrap` once, against the deployed
-API, to create the first FleetHQ staff account.
+the new database).
+
+To create the first FleetHQ **staff** account (the `/admin` console) on the
+deployed API, set `BOOTSTRAP_STAFF_ADMIN=true` plus
+`BOOTSTRAP_STAFF_ADMIN_USERNAME/PASSWORD/EMAIL/FULL_NAME` in Railway and
+redeploy — `prod-bootstrap` creates it on boot. **Do NOT use
+`npm run admin:bootstrap` against production**: that script is `ts-node` and is
+not included in the runtime image (`npm ci --omit=dev`, `dist/` only), so it
+cannot run in the container — it exists for local dev only. The bootstrap
+account is created `mustResetPassword=true` and (with `ENFORCE_STAFF_ADMIN_MFA`
+on, the default) must enroll MFA on first sign-in; **remove
+`BOOTSTRAP_STAFF_ADMIN` and its password from the env once the account
+exists.** See `api/.env.example` for the full block.
 
 ### fleethq-frontend (+ admin/) → Vercel
 

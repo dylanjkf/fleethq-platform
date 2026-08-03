@@ -73,7 +73,9 @@ export class OperatorsService {
       const [items, total] = await Promise.all([
         tx.operator.findMany({
           where,
-          orderBy: { createdAt: 'desc' },
+          // Client-supplied sort, allowlisted (Round 3 High #8): only these columns
+          // are sortable; anything else falls back to newest-first.
+          orderBy: query.resolveOrderBy(['createdAt', 'fullName'], { createdAt: 'desc' }),
           skip: query.skip,
           take: query.take,
         }),

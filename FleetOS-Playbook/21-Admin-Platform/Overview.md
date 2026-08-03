@@ -129,7 +129,18 @@ properties, adapted to FleetHQ staff accounts:
 | `GET sessions` | admin session | This admin's active sessions |
 | `DELETE sessions/:id` | admin session | Revoke one of the admin's own other sessions |
 | `POST logout` | admin session | Revokes the current session |
+| `POST change-password` | admin session | Change own password: verifies current, enforces strength, clears any forced-reset flag, bumps `tokenVersion` (revokes other sessions), returns a fresh token. Reachable during a pending forced reset. |
 | `POST mfa/setup` / `mfa/enable` / `mfa/disable` | admin session | TOTP enrolment |
+
+**Post-login obligations.** A staff account with a pending obligation — a forced
+password reset (`mustResetPassword`, set on bootstrap-created accounts), or MFA not
+yet enrolled where required (`ENFORCE_STAFF_ADMIN_MFA`, default on) — is blocked by
+`AdminPermissionGuard` from every route except the setup-exempt ones above
+(`me`, `change-password`, `sessions`, `logout`, `mfa/setup`, `mfa/enable`) with
+`403 ADMIN_SETUP_REQUIRED`, until it clears them. `GET me` returns an `obligations`
+object so the SPA forces the same flow. The first staff admin is provisioned at boot
+by `prod-bootstrap.ts` from `BOOTSTRAP_STAFF_ADMIN=*` env vars (see `.env.example`),
+created `mustResetPassword=true`.
 
 ### Env vars
 

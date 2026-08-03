@@ -9,6 +9,8 @@ import { AdminPermissionKey } from '../../common/permissions/admin-permission-ca
 import { adminRoleHasPermission } from '../../common/permissions/admin-role-has-permission';
 import { REQUIRED_ADMIN_PERMISSION_KEY } from '../decorators/require-admin-permission.decorator';
 import { ADMIN_AUTHENTICATED_ONLY_KEY } from '../decorators/admin-authenticated-only.decorator';
+import { ADMIN_SETUP_EXEMPT_KEY } from '../decorators/admin-setup-exempt.decorator';
+import { staffAdminMfaEnforced } from '../staff-admin-mfa-policy';
 
 /**
  * The admin platform's equivalent of the customer API's `PermissionGuard`,
@@ -45,6 +47,30 @@ export class AdminPermissionGuard implements CanActivate {
       // AdminJwtAuthGuard runs first and would already have rejected this
       // request; defensive only.
       throw new ForbiddenException({ code: 'FORBIDDEN', message: 'Authentication required.' });
+    }
+
+    // Post-login obligations (Round 3 High #1/#3): a staff admin with a pending
+    // forced password reset, or who hasn't yet enrolled MFA where it's required,
+    // is blocked from every route except the handful marked @AdminSetupExempt()
+    // that exist to satisfy those obligations. Resolved fresh per request so the
+    // block lifts the moment the obligation is cleared.
+    const setupExempt = this.reflector.getAllAndOverride<boolean>(ADMIN_SETUP_EXEMPT_KEY, targets);
+    if (!setupExempt) {
+      const obligated = await this.adminPrisma.adminUser.findUnique({
+        where: { id: user.adminUserId },
+        select: { mustResetPassword: true, mfaEnabledAt: true },
+      });
+      const needsPasswordReset = obligated?.mustResetPassword === true;
+      const needsMfaEnrollment = staffAdminMfaEnforced() && !obligated?.mfaEnabledAt;
+      if (needsPasswordReset || needsMfaEnrollment) {
+        throw new ForbiddenException({
+          code: 'ADMIN_SETUP_REQUIRED',
+          message: needsPasswordReset
+            ? 'You must change your password before continuing.'
+            : 'You must enable multi-factor authentication before continuing.',
+          obligations: { passwordReset: needsPasswordReset, mfaEnrollment: needsMfaEnrollment },
+        });
+      }
     }
 
     if (!required) {

@@ -10,7 +10,7 @@ import { SubmitFormDto } from './dto/submit-form.dto';
 import { ListFormSubmissionsDto } from './dto/list-form-submissions.dto';
 import { FormFieldDto, FormFieldType, isSelectType } from './dto/form-field.dto';
 import { FormAnswerDto } from './dto/form-answer.dto';
-import { assertOwnership } from '../common/ownership';
+import { assertOwnership, assertOwnedRecord } from '../common/ownership';
 
 /** The normalized field shape persisted in `fields` / `template_snapshot` JSON. */
 interface NormalizedField {
@@ -124,10 +124,11 @@ export class FormsService {
     const template = await this.prisma.withTenant(companyId, (tx) =>
       tx.formTemplate.findUnique({ where: { id }, include: TEMPLATE_INCLUDE }),
     );
-    if (!template || template.companyId !== companyId) {
-      throw new NotFoundException({ code: 'FORM_TEMPLATE_NOT_FOUND', message: 'Form template not found.' });
-    }
-    return template;
+    return assertOwnedRecord(template, companyId, {
+      code: 'FORM_TEMPLATE_NOT_FOUND',
+      message: 'Form template not found.',
+      allowArchived: true,
+    });
   }
 
   /**
@@ -146,13 +147,15 @@ export class FormsService {
         where: { id },
         select: { companyId: true, referenceDocument: { select: { fileAttachmentId: true } } },
       });
-      if (!template || template.companyId !== companyId || !template.referenceDocument) {
-        throw new NotFoundException({
-          code: 'FORM_REFERENCE_NOT_FOUND',
-          message: 'No reference document on this form.',
-        });
+      const owned = assertOwnedRecord(template, companyId, {
+        code: 'FORM_REFERENCE_NOT_FOUND',
+        message: 'No reference document on this form.',
+        allowArchived: true,
+      });
+      if (!owned.referenceDocument) {
+        throw new NotFoundException({ code: 'FORM_REFERENCE_NOT_FOUND', message: 'No reference document on this form.' });
       }
-      return template.referenceDocument.fileAttachmentId;
+      return owned.referenceDocument.fileAttachmentId;
     });
     return this.attachments.getForDownload(companyId, attachmentId);
   }
@@ -298,10 +301,11 @@ export class FormsService {
     const submission = await this.prisma.withTenant(companyId, (tx) =>
       tx.formSubmission.findUnique({ where: { id }, include: this.submissionInclude() }),
     );
-    if (!submission || submission.companyId !== companyId) {
-      throw new NotFoundException({ code: 'FORM_SUBMISSION_NOT_FOUND', message: 'Form submission not found.' });
-    }
-    return submission;
+    return assertOwnedRecord(submission, companyId, {
+      code: 'FORM_SUBMISSION_NOT_FOUND',
+      message: 'Form submission not found.',
+      allowArchived: true,
+    });
   }
 
   // ---- helpers --------------------------------------------------------------

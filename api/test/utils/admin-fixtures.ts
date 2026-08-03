@@ -30,7 +30,15 @@ export interface TestAdmin {
   roleId: string;
 }
 
-export async function createTestAdmin(permissionKeys: AdminPermissionKey[]): Promise<TestAdmin> {
+export interface CreateTestAdminOptions {
+  /** Set the forced-password-reset obligation (default false). */
+  mustResetPassword?: boolean;
+}
+
+export async function createTestAdmin(
+  permissionKeys: AdminPermissionKey[],
+  options: CreateTestAdminOptions = {},
+): Promise<TestAdmin> {
   const suffix = randomUUID();
   const permissions = await ownerPrisma.adminPermission.findMany({ where: { key: { in: permissionKeys as string[] } } });
   const role = await ownerPrisma.adminRole.create({
@@ -48,6 +56,7 @@ export async function createTestAdmin(permissionKeys: AdminPermissionKey[]): Pro
       passwordHash: await bcrypt.hash(TEST_ADMIN_PASSWORD, 10),
       fullName: 'Test Admin',
       roleId: role.id,
+      mustResetPassword: options.mustResetPassword ?? false,
     },
   });
   return { adminUserId: user.id, username, roleId: role.id };

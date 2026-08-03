@@ -50,9 +50,27 @@ export async function assertOwnership<T extends OwnableRecord>(
   delegate: OwnableDelegate<T>,
   id: string,
   companyId: string,
-  { code, message, allowArchived = false }: AssertOwnershipOptions,
+  options: AssertOwnershipOptions,
 ): Promise<T> {
   const record = await delegate.findUnique({ where: { id } });
+  return assertOwnedRecord(record, companyId, options);
+}
+
+/**
+ * The already-loaded counterpart of `assertOwnership`, for read paths that must
+ * `findUnique` with a rich `include`/`select` (so they can't hand the bare
+ * delegate to `assertOwnership`, whose delegate shape takes no query args). Runs
+ * the identical missing / cross-tenant / archived check against a record the
+ * caller already fetched, throwing the same existence-hiding `NotFoundException`.
+ * This lets those read paths share the one ownership rule instead of repeating
+ * the `if (!row || row.companyId !== companyId) throw` block inline (Round 3
+ * Medium — the ownership-helper consolidation, finished in the read paths).
+ */
+export function assertOwnedRecord<T extends OwnableRecord>(
+  record: T | null | undefined,
+  companyId: string,
+  { code, message, allowArchived = false }: AssertOwnershipOptions,
+): T {
   if (!record || record.companyId !== companyId || (!allowArchived && record.archivedAt)) {
     throw new NotFoundException({ code, message });
   }
