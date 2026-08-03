@@ -75,11 +75,14 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Deploy api/ to Railway
-        working-directory: api
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
-        # `railway up` uploads this exact checkout and triggers a build+deploy of
-        # the named service; --ci keeps it non-interactive and exits once the
-        # deploy is queued (the build + healthcheck then run on Railway).
+        # Run from the repo ROOT (not api/): the Railway service has its Root
+        # Directory set to `api`, so it descends into an `api/` folder inside the
+        # uploaded snapshot. Uploading from api/ instead put the api contents at
+        # the snapshot root with no `api/` subdir, which failed the build with
+        # "lstat …/snapshot-target-unpack/api: no such file or directory".
+        # A root .railwayignore keeps the upload to just what api/ needs.
+        # --ci keeps it non-interactive; the build + healthcheck run on Railway.
         run: railway up --ci --service "$RAILWAY_SERVICE"
