@@ -113,7 +113,11 @@ export class AdminUsersService {
     let created;
     try {
       created = await this.adminPrisma.adminUser.create({
-        data: { username: dto.username, email: dto.email, fullName: dto.fullName, passwordHash, roleId: dto.roleId },
+        // Onboarded staff must rotate the creator-chosen temporary password on
+        // first login (matches the bootstrap path). Until they do, the
+        // AdminPermissionGuard's obligations gate returns ADMIN_SETUP_REQUIRED,
+        // so the temporary credential can't be used to actually operate the console.
+        data: { username: dto.username, email: dto.email, fullName: dto.fullName, passwordHash, roleId: dto.roleId, mustResetPassword: true },
         select: ADMIN_USER_PUBLIC_SELECT,
       });
     } catch (err) {
