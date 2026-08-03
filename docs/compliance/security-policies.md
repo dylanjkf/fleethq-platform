@@ -73,8 +73,11 @@ policies. Violations are handled under the disciplinary process (§8).
 - **Classes:** Public · Internal · Confidential · Restricted (PII/credentials).
   Driver/customer contact details, licence/medical document numbers, GPS history,
   and delivery proof are **Restricted**.
-- Restricted data is encrypted at rest and in transit, access-controlled by RLS,
-  and access is logged.
+- Restricted data is encrypted in transit (TLS). Stored secrets (integration
+  credentials) are additionally encrypted at rest at the application layer
+  (AES-256-GCM); database/disk-level at-rest encryption is provided by the
+  managed host's defaults rather than a repo-defined control (see `readiness.md`).
+  Restricted data is access-controlled by RLS, and access is logged.
 - **Retention:** operational data is retained for the life of the customer
   relationship; the high-growth append-only tables (`gps_pings`,
   `timeline_events`, `notifications`) have defined retention floors and a

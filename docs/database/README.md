@@ -46,8 +46,11 @@ on the entities that need history, and **53 version-controlled migrations**.
 
 The database foundation is **enterprise-grade for its stage**: database-enforced
 tenant isolation, least-privilege roles, UUID keys, versioned migrations,
-composite indexes on the hot paths, encryption in transit and at rest, and an
-append-only audit trail. The recent database hardening closed the **one
+composite indexes on the hot paths, encryption in transit (TLS) plus
+application-level at-rest encryption of stored secrets (integration
+credentials, AES-256-GCM), and an append-only audit trail. Full
+database/disk-level at-rest encryption depends on the managed host's defaults
+rather than a repo-defined control (see `../compliance/readiness.md`). The recent database hardening closed the **one
 tenant-isolation gap** (the GPS tables were the only tenant tables without RLS)
 and added the missing reverse-lookup indexes.
 

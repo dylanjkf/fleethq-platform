@@ -20,7 +20,7 @@ This Addendum forms part of the FleetOS Terms of Service between [DECISION NEEDE
 FleetOS will:
 3.1 process personal information only on the Customer's instructions and not for its own purposes;
 3.2 ensure personnel with access to personal information are bound by confidentiality;
-3.3 implement and maintain the technical and organisational security measures described in the Privacy Policy and `14-Security/` (row-level tenant isolation, encryption in transit and at rest, hashed credentials, audit logging, least-privilege access, rate limiting);
+3.3 implement and maintain the technical and organisational security measures described in the Privacy Policy and `14-Security/` (row-level tenant isolation, encryption in transit, application-level at-rest encryption of stored secrets with database/disk-level at-rest encryption per the hosting platform's defaults, hashed credentials, audit logging, least-privilege access, rate limiting);
 3.4 keep personal information within Australia (AWS ap-southeast-2 primary, ap-southeast-4 for disaster-recovery snapshots) and not transfer it overseas without the Customer's consent, except as disclosed for sub-processors in clause 4;
 3.5 assist the Customer, taking into account the platform's built-in tools, in responding to data subject access and erasure requests (APP 12 / APP 11.2) — the platform provides self-service export and erasure so the Customer can fulfil these itself;
 3.6 notify the Customer without undue delay after becoming aware of a data breach affecting the Customer's personal information, with enough information to let the Customer meet its Notifiable Data Breaches obligations; **[DECISION NEEDED: specific timeline, e.g. within 48–72 hours.]**
