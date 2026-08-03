@@ -32,4 +32,11 @@ export class AdminAnalyticsController {
   trialsExpiring(@Query() query: AnalyticsDaysQueryDto) {
     return this.analytics.trialsExpiring(query.days);
   }
+
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW)
+  @Get('activity')
+  activity() {
+    return this.analytics.activity();
+  }
 }

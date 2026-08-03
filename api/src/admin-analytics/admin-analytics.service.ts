@@ -208,4 +208,52 @@ export class AdminAnalyticsService {
       userCount: c._count.memberships,
     }));
   }
+
+  /**
+   * The live activity feed — the most recent real events across the platform,
+   * merged from several tables and sorted newest-first. Each event deep-links
+   * into the console. Every source is a table `fleetos_admin` already reads;
+   * nothing is fabricated.
+   */
+  async activity(limit = 20) {
+    const per = Math.min(limit, 15);
+    const [companies, users, inspections, defects, adminActions] = await Promise.all([
+      this.adminPrisma.company.findMany({ orderBy: { createdAt: 'desc' }, take: per, select: { id: true, name: true, createdAt: true } }),
+      this.adminPrisma.user.findMany({ where: { archivedAt: null }, orderBy: { createdAt: 'desc' }, take: per, select: { id: true, fullName: true, createdAt: true } }),
+      this.adminPrisma.checklistSubmission.findMany({
+        orderBy: { submittedAt: 'desc' },
+        take: per,
+        select: { id: true, hasFailures: true, submittedAt: true, company: { select: { name: true } }, template: { select: { name: true } } },
+      }),
+      this.adminPrisma.maintenanceJob.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: per,
+        select: { id: true, title: true, createdAt: true, company: { select: { name: true } } },
+      }),
+      this.adminPrisma.adminAuditLog.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: per,
+        select: { id: true, action: true, createdAt: true, adminUser: { select: { fullName: true } } },
+      }),
+    ]);
+
+    type Event = { type: string; at: Date; title: string; subtitle: string | null; href: string; tone: 'info' | 'success' | 'warning' | 'danger' };
+    const events: Event[] = [
+      ...companies.map((c) => ({ type: 'company_created', at: c.createdAt, title: `New organisation: ${c.name}`, subtitle: null, href: `/organisations/${c.id}`, tone: 'success' as const })),
+      ...users.map((u) => ({ type: 'user_created', at: u.createdAt, title: `New user: ${u.fullName}`, subtitle: null, href: `/customer-users/${u.id}`, tone: 'info' as const })),
+      ...inspections.map((i) => ({
+        type: 'inspection',
+        at: i.submittedAt,
+        title: `Inspection: ${i.template.name}`,
+        subtitle: i.company.name,
+        href: `/inspections/${i.id}`,
+        tone: i.hasFailures ? ('danger' as const) : ('success' as const),
+      })),
+      ...defects.map((d) => ({ type: 'defect', at: d.createdAt, title: `Defect: ${d.title}`, subtitle: d.company.name, href: `/maintenance/${d.id}`, tone: 'warning' as const })),
+      ...adminActions.map((a) => ({ type: 'admin_action', at: a.createdAt, title: a.action, subtitle: a.adminUser?.fullName ?? 'System', href: '/audit-log', tone: 'info' as const })),
+    ];
+
+    events.sort((a, b) => b.at.getTime() - a.at.getTime());
+    return { items: events.slice(0, limit) };
+  }
 }
