@@ -117,13 +117,14 @@ repo and deploy to **Vercel**; DriverOS lives in **`fleethq-driveros`**.
 ## Phase 4 — Turn on the paid/external integrations (as you need them)
 
 Each of these is a **founder-provided value set as an environment variable** in
-Railway (not a Terraform tfvar). Each is **off by default** and the app degrades
+Railway (there is no Terraform in this repo; an IaC tfvar path is **planned
+target**, not built). Each is **off by default** and the app degrades
 gracefully until you set it — so none blocks a pilot, but each is required before
 the corresponding feature is real.
 
 | Feature | What you do | Env vars (Railway Variables) |
 |---|---|---|
-| **Outbound email** (verify/reset/invite, digests) | Verify a From address with your email provider (e.g. **AWS SES** in ap-southeast-2, out of sandbox) | `EMAIL_PROVIDER`, `EMAIL_FROM_ADDRESS`, `AWS_REGION` (+ the provider's credentials) |
+| **Outbound email** (verify/reset/invite, digests) | Verify a From address with your email provider (e.g. **AWS SES**, moved out of its sending sandbox) | `EMAIL_PROVIDER`, `EMAIL_FROM_ADDRESS`, `AWS_REGION` (+ the provider's credentials) |
 | **Attachment storage in S3** (POD/fault photos) | Create a bucket; set it before real photo volume (inline-in-Postgres is fine for a pilot) | `ATTACHMENTS_BUCKET` (+ AWS credentials) |
 | **Billing (Stripe)** | Create a Stripe account, create live-mode Prices, add the keys | `STRIPE_*`, `BILLING_ENFORCED=true` once tested, the three `STRIPE_PRICE_*` ids |
 | **Error tracking (Sentry)** | Create a Sentry project | `SENTRY_DSN` |

@@ -19,6 +19,6 @@ They are deliberately written to be edited down and corrected, not adopted as-is
 - The governing-law jurisdiction and dispute-resolution venue (drafted as an Australian state, **[DECISION NEEDED]** which).
 - The actual company legal entity name, ABN/ACN, and registered address (placeholders throughout).
 - Liability caps, warranty disclaimers, and indemnity scope — drafted conservatively but these are commercial/legal calls.
-- Whether FleetOS uses any sub-processors (hosting is AWS ap-southeast-2 per `infra/`; that's the main one) and how they're disclosed.
+- Whether FleetOS uses any sub-processors (hosting is currently Railway + Vercel; AWS ap-southeast-2 is the planned target, not yet provisioned) and how they're disclosed.
 - Data breach notification commitments and timelines (Notifiable Data Breaches scheme under the Privacy Act).
 - Refund / cancellation terms beyond what Stripe's flow mechanically allows.
