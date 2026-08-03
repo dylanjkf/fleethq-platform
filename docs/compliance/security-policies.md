@@ -36,8 +36,9 @@ policies. Violations are handled under the disciplinary process (§8).
 - Access is **role-based** (RBAC) and **least privilege**; no feature is gated by
   a hardcoded role check — permissions are granular and resolved server-side.
 - Every user has a **unique** identity; shared accounts are prohibited.
-- **MFA (TOTP)** is available to all users and **required for administrative
-  accounts**.
+- **MFA (TOTP)** is available to all users and strongly recommended for
+  administrative accounts; it can be mandated per-org (customer realm) or for the
+  staff console (`ENFORCE_STAFF_ADMIN_MFA=true`), but is optional by default.
 - Database access uses **three separated roles** (migration-owner, RLS-subject
   runtime, narrow BYPASSRLS) — see [DB security model](../database/security-model.md).
 - Access is **granted on provisioning**, **revoked immediately on

@@ -69,8 +69,9 @@ Work top to bottom. Each phase gates the next. Times are rough.
 5. **Bootstrap the first FleetHQ staff account:** set `BOOTSTRAP_STAFF_ADMIN=true`
    + `BOOTSTRAP_STAFF_ADMIN_USERNAME/PASSWORD/EMAIL/FULL_NAME` in the deployed
    environment and redeploy — `prod-bootstrap` creates the account on boot
-   (created `mustResetPassword`, and with `ENFORCE_STAFF_ADMIN_MFA` on it must
-   enroll MFA on first sign-in). **Do not run `npm run admin:bootstrap` against
+   (created `mustResetPassword`, so the temporary password must be changed on
+   first sign-in; MFA is optional unless you set `ENFORCE_STAFF_ADMIN_MFA=true`).
+   **Do not run `npm run admin:bootstrap` against
    production** — that `ts-node` script isn't in the runtime image and can't run
    in the container; it's for local dev. Remove the flag + password from the env
    once the account exists (`api/.env.example` has the full block + warning).

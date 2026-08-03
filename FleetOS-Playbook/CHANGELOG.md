@@ -2,6 +2,10 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-03 — Staff-console MFA made optional (product decision)
+
+- **Staff-admin MFA is now opt-in, not required.** Reversing the R3 H1 default below: `staffAdminMfaEnforced()` now returns `true` **only** when `ENFORCE_STAFF_ADMIN_MFA=true` is set explicitly (default off). MFA remains a first-class feature — any admin can enable it from Security settings and is then challenged for a TOTP code at sign-in — but no account is forced to enrol, and the `AdminPermissionGuard` obligations gate no longer blocks un-enrolled admins by default. The **forced first-login password change** for bootstrap-created accounts (`mustResetPassword`) is unchanged. Orgs that want to mandate MFA for their cross-tenant admins still can, via the same env flag. `.env.example`, `README.md`, the go-live runbook, the admin-platform overview, and the compliance security-policy doc updated to match.
+
 ## 2026-08-03 — Internal Ops Console (governance note) + Enterprise Production Readiness Audit **Round 3** remediation
 
 **Governance / Commercial_Priority.md flag (retroactive).** The **Internal Ops Console** shipped at commit `2b6e2ec` (dashboard KPIs, cross-tenant inspection/defect browsing, a security-posture centre, an alerts feed, ⌘K global search, a billing overview) had no changelog entry and no `Commercial_Priority.md` flag — the governance discipline the Administration Platform and Integration Hub both followed. Recording it now: this is **internal FleetHQ staff tooling**, not courier-customer-facing product, and per `00-Company/Commercial_Priority.md`'s courier-first directive it does **not** directly make the courier product more sellable. It was built to let FleetHQ operate/support the platform (a prerequisite for supporting paying customers at all), on the same "flag the deviation, build on explicit request" basis as the earlier admin work. Flagged for the founder's awareness.
