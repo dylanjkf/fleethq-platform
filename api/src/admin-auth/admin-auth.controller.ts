@@ -1,15 +1,17 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
 import { AdminGuarded } from './decorators/admin-guarded.decorator';
 import { AdminAuthenticatedOnly } from './decorators/admin-authenticated-only.decorator';
+import { AdminSetupExempt } from './decorators/admin-setup-exempt.decorator';
 import { CurrentAdmin } from './decorators/current-admin.decorator';
 import { AuthenticatedAdminRequestUser } from './admin-jwt-payload.interface';
 import { AdminAuthService } from './admin-auth.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
 import { AdminLoginDto, AdminMfaVerifyDto } from './dto/admin-login.dto';
 import { AdminMfaCodeDto } from './dto/admin-mfa-code.dto';
+import { AdminChangePasswordDto } from './dto/admin-change-password.dto';
 
 // Tighter than the app-wide default, matching the customer AuthController's
 // posture — these are the credential/code-checking endpoints a brute-force
@@ -61,13 +63,38 @@ export class AdminAuthController {
 
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt() // identity must be readable so the SPA can learn what to force
   @Get('me')
   getMe(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
     return this.adminAuth.getMe(admin.adminUserId);
   }
 
+  /**
+   * Change your own password. Reachable during a pending forced reset
+   * (@AdminSetupExempt) so an admin flagged mustResetPassword can actually clear
+   * it. Returns a fresh access token because the change bumps tokenVersion.
+   */
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt()
+  @Throttle(ADMIN_AUTH_THROTTLE)
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  changePassword(
+    @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
+    @Body() dto: AdminChangePasswordDto,
+    @Ip() ip: string,
+    @Req() req: Request,
+  ) {
+    return this.adminAuth.changePassword(admin.adminUserId, admin.sessionId, dto.currentPassword, dto.newPassword, {
+      ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
+  @AdminGuarded()
+  @AdminAuthenticatedOnly()
+  @AdminSetupExempt() // listing your own sessions is safe (and useful) during setup
   @Get('sessions')
   listSessions(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
     return this.adminAuth.listSessions(admin.adminUserId, admin.sessionId);
@@ -75,11 +102,12 @@ export class AdminAuthController {
 
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt()
   @Delete('sessions/:sessionId')
   @HttpCode(HttpStatus.OK)
   async revokeSession(
     @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
-    @Param('sessionId') sessionId: string,
+    @Param('sessionId', ParseUUIDPipe) sessionId: string,
     @Ip() ip: string,
     @Req() req: Request,
   ) {
@@ -89,6 +117,7 @@ export class AdminAuthController {
 
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt() // always be able to sign out, even mid-setup
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   async logout(@CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {
@@ -100,6 +129,7 @@ export class AdminAuthController {
 
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt() // enrolling MFA is exactly what a forced-MFA obligation requires
   @Post('mfa/setup')
   @HttpCode(HttpStatus.OK)
   setupMfa(@CurrentAdmin() admin: AuthenticatedAdminRequestUser) {
@@ -108,6 +138,7 @@ export class AdminAuthController {
 
   @AdminGuarded()
   @AdminAuthenticatedOnly()
+  @AdminSetupExempt()
   @Throttle(ADMIN_AUTH_THROTTLE)
   @Post('mfa/enable')
   @HttpCode(HttpStatus.OK)

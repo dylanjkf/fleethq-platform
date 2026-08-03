@@ -98,7 +98,9 @@ export class AssetsService {
         tx.asset.findMany({
           where,
           include: { assetClass: true },
-          orderBy: { createdAt: 'desc' },
+          // Client-supplied sort, allowlisted (Round 3 High #8): only these columns
+          // are sortable; anything else falls back to newest-first.
+          orderBy: query.resolveOrderBy(['createdAt', 'name', 'registration'], { createdAt: 'desc' }),
           skip: query.skip,
           take: query.take,
         }),

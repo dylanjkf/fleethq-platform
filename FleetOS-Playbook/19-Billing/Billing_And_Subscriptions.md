@@ -1,3 +1,6 @@
+<!-- planned-infra-doc -->
+> ⚠️ **Planned / target architecture — not yet provisioned.** Parts of this document describe the intended AWS deployment (RDS, KMS, CloudFront, ECS/Fargate, Secrets Manager, and `infra/terraform/*` modules). **That infrastructure does not exist in this repository yet** — a repo-wide search for `infra/terraform` returns only documentation, no `.tf` files. Statements below that read as present-tense fact describe the *target* state; treat them as planned until the Terraform is actually committed. The app currently deploys to Railway (see `api/README.md` and `FleetOS-Playbook/.../Go_Live_Runbook.md`).
+
 # Billing & Subscriptions
 
 ## Purpose

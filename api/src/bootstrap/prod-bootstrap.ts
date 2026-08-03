@@ -30,21 +30,63 @@
  *     customer app if you want one set of credentials for both. Created with the
  *     Super Admin role. Credentials come from env, never source; idempotent.
  *
- * Never throws: any failure is logged and swallowed, so a bootstrap problem can
- * never stop the API from starting (the entrypoint also guards the call). Uses
- * `DATABASE_URL` — the schema-owner connection that runs migrations — which can
- * insert Company/Role/User rows; on Railway's managed Postgres that role is a
+ * Fail-loud, NOT silent: a genuinely-broken outcome — the permission catalog
+ * didn't seed, the admin catalog didn't reconcile, or a requested admin account
+ * couldn't be created — throws, is reported to Sentry, and exits non-zero. The
+ * entrypoint runs this *before* `exec`-ing the app, so a non-zero exit means the
+ * container never starts serving: Railway's healthcheck never goes green and the
+ * previous (working) version stays live, instead of a half-initialised platform
+ * reporting healthy. Deliberate no-ops (a flag left off, a weak/missing password)
+ * are not failures — they log a reason and return cleanly. This replaces the
+ * earlier swallow-and-continue posture, which could report healthy while the
+ * permission catalog was empty or no staff admin existed (Round 3 Critical #3).
+ *
+ * Uses `DATABASE_URL` — the schema-owner connection that runs migrations — which
+ * can insert Company/Role/User rows; on Railway's managed Postgres that role is a
  * superuser and bypasses RLS. If yours is a restricted, RLS-enforcing role, set
  * `BOOTSTRAP_ADMIN_DB_BYPASSES_RLS=false` and the company GUC is set before the
  * insert (mirrors scripts/create-company-admin.ts).
  */
+import '../instrument'; // initialise Sentry before anything else so bootstrap failures alert (same DSN/config as the app)
+import * as Sentry from '@sentry/node';
 import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { PERMISSION_CATALOG } from '../common/permissions/permission-catalog';
 import { provisionCompany } from '../companies/provision-company';
 import { isStrongPassword } from '../common/validators/is-strong-password.validator';
 import { reconcileAdminPermissions, SUPER_ADMIN_ROLE_NAME } from './admin-permissions-reconcile';
+import { ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
+
+/**
+ * Write a platform audit record for a bootstrap-provisioned account. Every other
+ * account-creation path in the codebase leaves an audit trail; these boot-time
+ * ones must too, so an incident responder can see how the first privileged
+ * accounts came to exist (Round 3 Medium). Never records a password. Best-effort:
+ * an audit-write failure must not itself make bootstrap fatal.
+ */
+async function recordBootstrapAudit(
+  prisma: PrismaClient,
+  entry: { action: string; entityType: string; entityId: string; organisationId?: string; afterValue: Record<string, unknown> },
+): Promise<void> {
+  try {
+    await prisma.adminAuditLog.create({
+      data: {
+        adminUserId: null,
+        ipAddress: 'system-bootstrap',
+        userAgent: 'prod-bootstrap',
+        action: entry.action,
+        entityType: entry.entityType,
+        entityId: entry.entityId,
+        organisationId: entry.organisationId ?? null,
+        reason: 'boot-time bootstrap',
+        afterValue: entry.afterValue as Prisma.InputJsonValue,
+      },
+    });
+  } catch (err) {
+    console.warn('[bootstrap] could not write audit record (non-fatal):', err);
+  }
+}
 
 const BUILT_IN_ASSET_CLASSES = [
   { key: 'LAND', name: 'Land' },
@@ -134,9 +176,20 @@ async function maybeCreateCompanyAdmin(prisma: PrismaClient): Promise<void> {
       adminPassword: password,
       adminFullName: fullName ?? username,
       adminEmail: email,
+      // Force a password change on first login so the temporary credential typed
+      // into deploy config can't outlive it (Round 3 High #3) — same guarantee the
+      // admin-issued "new customer login" flow already provides.
+      adminMustChangePassword: true,
     });
   });
-  console.log(`[bootstrap] created company "${companyName}" with admin login "${username}".`);
+  await recordBootstrapAudit(prisma, {
+    action: ADMIN_AUDIT_ACTIONS.COMPANY_ADMIN_BOOTSTRAPPED,
+    entityType: 'organisation',
+    entityId: companyId,
+    organisationId: companyId,
+    afterValue: { companyName, adminUsername: username, mustChangePassword: true },
+  });
+  console.log(`[bootstrap] created company "${companyName}" with admin login "${username}" (must change password on first login).`);
 }
 
 interface BootstrapStaffAdminInput {
@@ -190,15 +243,36 @@ async function maybeCreateStaffAdmin(prisma: PrismaClient): Promise<void> {
   // Super Admin role exists on a freshly-migrated database.
   const superAdminRole = await prisma.adminRole.findUnique({ where: { name: SUPER_ADMIN_ROLE_NAME } });
   if (!superAdminRole) {
-    console.warn(`[bootstrap] "${SUPER_ADMIN_ROLE_NAME}" role not found — skipping staff-admin creation.`);
-    return;
+    // reconcileAdminPermissions ran just before this and is supposed to guarantee the
+    // role exists. If it's missing, the platform is in a genuinely-broken state (a
+    // requested staff admin cannot be created) — fail loudly rather than boot without it.
+    throw new Error(
+      `[bootstrap] BOOTSTRAP_STAFF_ADMIN=true but "${SUPER_ADMIN_ROLE_NAME}" role does not exist after reconcile — cannot create the staff admin.`,
+    );
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  await prisma.adminUser.create({ data: { username, email, fullName, passwordHash, roleId: superAdminRole.id } });
+  const created = await prisma.adminUser.create({
+    data: {
+      username,
+      email,
+      fullName,
+      passwordHash,
+      roleId: superAdminRole.id,
+      // Force a password change on first login (Round 3 High #3): the value typed
+      // into Railway's env at deploy time must not remain a valid credential.
+      mustResetPassword: true,
+    },
+  });
+  await recordBootstrapAudit(prisma, {
+    action: ADMIN_AUDIT_ACTIONS.ADMIN_USER_BOOTSTRAPPED,
+    entityType: 'admin_user',
+    entityId: created.id,
+    afterValue: { username, email, role: SUPER_ADMIN_ROLE_NAME, mustResetPassword: true },
+  });
   console.log(
     `[bootstrap] created FleetHQ staff admin "${username}" (${SUPER_ADMIN_ROLE_NAME}) — sign in at /admin. ` +
-      'Strongly recommend enabling MFA on first login.',
+      'You will be required to change this password and enroll MFA on first login.',
   );
 }
 
@@ -224,7 +298,21 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  // Non-fatal by design: log and let the app boot anyway.
-  console.error('[bootstrap] non-fatal error (the API will still start):', err);
-});
+main()
+  .then(() => {
+    console.log('[bootstrap] complete.');
+  })
+  .catch(async (err) => {
+    // FATAL by design: a broken bootstrap (empty permission catalog, un-reconciled
+    // admin catalog, a requested admin account that couldn't be created) must not
+    // report healthy. Report to Sentry, flush, and exit non-zero so the entrypoint
+    // aborts before the app starts — Railway keeps the previous version live.
+    console.error('[bootstrap] FATAL — refusing to start a half-initialised platform:', err);
+    try {
+      Sentry.captureException(err, { tags: { area: 'prod-bootstrap' } });
+      await Sentry.flush(2000);
+    } catch {
+      // Never let a Sentry problem mask the original failure.
+    }
+    process.exit(1);
+  });

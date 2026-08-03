@@ -1,0 +1,20 @@
+# Code owners for fleethq-platform.
+#
+# Enable "Require review from Code Owners" in branch-protection for `main`
+# (Settings → Branches → Branch protection rules → main) to make these reviews
+# mandatory. Combined with "Require status checks to pass" (select api-ci) this
+# is the second half of the CI-gate-before-deploy control: api-ci must pass AND a
+# code owner must approve before anything merges to main and deploys to Railway.
+
+# Default owner for everything not matched more specifically below.
+*                       @dylanjkf
+
+# The API service and its production-bootstrap / deploy path — the code that puts
+# real customer data in front of the app. Changes here always want an owner's eyes.
+/api/                   @dylanjkf
+/.github/workflows/     @dylanjkf
+/.github/CODEOWNERS     @dylanjkf
+
+# Product/compliance documentation — the tree an auditor or enterprise buyer reads.
+/FleetOS-Playbook/      @dylanjkf
+/docs/                  @dylanjkf

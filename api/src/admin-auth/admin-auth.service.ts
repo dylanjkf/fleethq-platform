@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
@@ -7,6 +7,8 @@ import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
 import { AdminJwtPayload, AdminMfaChallengePayload } from './admin-jwt-payload.interface';
+import { isStrongPassword } from '../common/validators/is-strong-password.validator';
+import { staffAdminMfaEnforced } from './staff-admin-mfa-policy';
 
 export interface AdminAuthContext {
   ip?: string | null;
@@ -172,16 +174,80 @@ export class AdminAuthService {
       where: { id: adminUserId },
       include: { role: { include: { permissions: { include: { permission: true } } } } },
     });
+    const mfaEnabled = !!user.mfaEnabledAt;
     return {
       id: user.id,
       username: user.username,
       email: user.email,
       fullName: user.fullName,
-      mfaEnabled: !!user.mfaEnabledAt,
+      mfaEnabled,
       mustResetPassword: user.mustResetPassword,
       role: { id: user.role.id, name: user.role.name },
       permissions: user.role.permissions.map((p) => p.permission.key),
+      // Pending account-setup obligations the SPA must force before the console
+      // is usable — mirrors AdminPermissionGuard's server-side enforcement so the
+      // UI and the API agree on what's blocked (Round 3 High #1/#3).
+      obligations: {
+        passwordReset: user.mustResetPassword,
+        mfaEnrollment: staffAdminMfaEnforced() && !mfaEnabled,
+      },
     };
+  }
+
+  /**
+   * Change the calling admin's own password. Clears a forced-reset obligation,
+   * stamps passwordChangedAt, and bumps tokenVersion to revoke every *other*
+   * live session immediately (the caller gets a freshly-minted token back so
+   * they stay signed in). Verifies the current password first and enforces the
+   * same strength policy as the rest of the platform. Round 3 High #3.
+   */
+  async changePassword(
+    adminUserId: string,
+    sessionId: string,
+    currentPassword: string,
+    newPassword: string,
+    context: AdminAuthContext = {},
+  ): Promise<{ accessToken: string }> {
+    const user = await this.adminPrisma.adminUser.findUniqueOrThrow({ where: { id: adminUserId } });
+
+    const matches = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!matches) {
+      throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'Your current password is incorrect.' });
+    }
+    if (!isStrongPassword(newPassword)) {
+      throw new BadRequestException({
+        code: 'WEAK_PASSWORD',
+        message: 'Password must be at least 8 characters and mix at least two of lowercase, uppercase, number, and symbol.',
+      });
+    }
+    if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      throw new BadRequestException({ code: 'PASSWORD_REUSED', message: 'Choose a password different from your current one.' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const updated = await this.adminPrisma.adminUser.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        passwordChangedAt: new Date(),
+        mustResetPassword: false,
+        tokenVersion: { increment: 1 }, // revoke all existing sessions' tokens
+      },
+    });
+
+    await this.audit.record({
+      adminUserId: user.id,
+      action: ADMIN_AUDIT_ACTIONS.ADMIN_USER_PASSWORD_CHANGED,
+      entityType: 'admin_user',
+      entityId: user.id,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    // Re-mint the caller's own token against the bumped tokenVersion so this
+    // session survives the mass-revoke it just triggered.
+    const tokenPayload: AdminJwtPayload = { sub: user.id, sid: sessionId, tv: updated.tokenVersion };
+    return { accessToken: this.jwt.sign(tokenPayload, { expiresIn: `${SESSION_EXPIRES_IN_MS}ms` }) };
   }
 
   async listSessions(adminUserId: string, currentSessionId: string): Promise<AdminSessionSummary[]> {

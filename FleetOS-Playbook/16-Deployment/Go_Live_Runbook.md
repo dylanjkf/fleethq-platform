@@ -77,8 +77,13 @@ origin to `CORS_ALLOWED_ORIGINS` on the API.
    a manual redeploy). Railway builds the image, runs `prisma migrate deploy`
    automatically, and starts the server.
 2. Deploy `fleethq-frontend` to Vercel (staging).
-3. Bootstrap the first FleetHQ staff account: `npm run admin:bootstrap` against the
-   deployed API (see `api/scripts/bootstrap-admin.ts`).
+3. Bootstrap the first FleetHQ staff account by setting `BOOTSTRAP_STAFF_ADMIN=true`
+   + `BOOTSTRAP_STAFF_ADMIN_USERNAME/PASSWORD/EMAIL/FULL_NAME` in Railway and
+   redeploying — `prod-bootstrap` creates it on boot (mustResetPassword + forced
+   MFA on first sign-in). **Do not run `npm run admin:bootstrap` against production**
+   — it's `ts-node` and isn't in the runtime image, so it can't run in the
+   container (local dev only). Remove the flag + password from the env once the
+   account exists. See `api/.env.example`.
 4. **Smoke test** the deployed staging URLs (`GET /health/ready` first):
    - Sign up a company → **verify the email link works** (requires §5 email) → log
      in.

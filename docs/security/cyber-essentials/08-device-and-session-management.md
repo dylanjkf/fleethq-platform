@@ -32,7 +32,7 @@ controls (SSO, MDM) that enterprise customers require.
   signal a suspicious-login-detection feature would consume.
   `apps/api/src/auth/auth.controller.ts` (`@Ip()`, `@Req()`).
 
-## Gaps & residual risk
+## Controls in place
 
 - **Multi-factor authentication is implemented** (TOTP + WebAuthn/passkeys, with
   admin-tier enforcement on by default and a per-organisation mandatory-MFA policy).

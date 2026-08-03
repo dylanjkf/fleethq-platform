@@ -66,8 +66,14 @@ Work top to bottom. Each phase gates the next. Times are rough.
    fail-fast env validation will **refuse to boot** in production if a connection
    string still carries a known dev-only password, so this step cannot be silently
    skipped.
-5. **Bootstrap the first FleetHQ staff account:** `npm run admin:bootstrap` once,
-   against the deployed API (see `api/scripts/bootstrap-admin.ts`).
+5. **Bootstrap the first FleetHQ staff account:** set `BOOTSTRAP_STAFF_ADMIN=true`
+   + `BOOTSTRAP_STAFF_ADMIN_USERNAME/PASSWORD/EMAIL/FULL_NAME` in the deployed
+   environment and redeploy — `prod-bootstrap` creates the account on boot
+   (created `mustResetPassword`, and with `ENFORCE_STAFF_ADMIN_MFA` on it must
+   enroll MFA on first sign-in). **Do not run `npm run admin:bootstrap` against
+   production** — that `ts-node` script isn't in the runtime image and can't run
+   in the container; it's for local dev. Remove the flag + password from the env
+   once the account exists (`api/.env.example` has the full block + warning).
 6. **Smoke-test the API**: hit `GET /health` (liveness) and `GET /health/ready`
    (readiness — checks Postgres connectivity), then log in and click through a real
    courier workflow.
