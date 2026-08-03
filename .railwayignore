@@ -2,9 +2,13 @@
 # snapshot contains the `api/` folder the Railway service's Root Directory
 # points at. Only api/ is built, so keep the upload lean by excluding the
 # repo's documentation and local-dev files. Do NOT ignore api/.
+# .git is excluded first: it's large, irrelevant to the build, and shipping repo
+# history into the build context is needless bloat (and a minor info-leak).
+/.git
 /FleetOS-Playbook
 /docs
 /.github
+/scripts
 /README.md
 /CLAUDE.md
 /docker-compose.yml

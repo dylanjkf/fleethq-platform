@@ -98,9 +98,10 @@ None of the following exists in this repository (no `security-scan.yml`, no
   the Security tab), **dependency-review** on PRs, and **gitleaks** secret
   scanning over full history. A `.gitleaks.toml` allowlist for the intentional
   dev-only placeholders would accompany it.
-- **Infrastructure-as-code validation** — `terraform fmt`/`validate` + a **tfsec**
-  scan gating a change that opens a security group, flips `publicly_accessible`,
-  or removes an encryption setting. Requires IaC to exist first.
+- **Infrastructure-as-code validation** (planned) — `terraform fmt`/`validate` + a
+  **tfsec** scan gating a change that opens a security group, flips
+  `publicly_accessible`, or removes an encryption setting. Not yet built — requires
+  IaC to exist first.
 - **A keyless deploy pipeline** — `workflow_dispatch`, GitHub Environment reviewer
   gate, OIDC to a cloud role, SHA-tagged immutable images, and an automatic
   rollback circuit breaker — for a future AWS/registry topology.

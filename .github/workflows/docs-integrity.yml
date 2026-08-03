@@ -1,13 +1,23 @@
 name: docs-integrity
 
 # Guards against the "fabricated-infrastructure" documentation pattern the
-# production-readiness audits flagged as Critical three rounds running: docs that
-# describe AWS/Terraform infrastructure (RDS, KMS, CloudFront, `infra/terraform/*`)
-# in present-tense "already built" language, when no such Terraform exists in this
-# repo. The rule is simple and mechanical, so the pattern can't quietly reappear in
-# a doc nobody thought to re-audit: ANY doc under docs/ or FleetOS-Playbook/ that
-# mentions `infra/terraform` MUST also carry a planned/target-architecture
-# qualifier, so a reader is never told planned infra is real.
+# production-readiness audits flagged as Critical four rounds running: docs that
+# describe an AWS/Terraform target stack (RDS, KMS, CloudFront, ECS/Fargate, ALB,
+# VPC, Secrets Manager, `infra/terraform/*`, …) in present-tense "already built"
+# language, when no such infrastructure exists in this repo (the app runs on
+# Railway + Vercel).
+#
+# The old version of this gate only checked that a file mentioning `infra/terraform`
+# contained a qualifier *somewhere* in the file. That was too weak: a banner at the
+# top of a file "qualified" a false present-tense claim 100 lines below it. The gate
+# is now a PROXIMITY-SCOPED Python checker (`scripts/check-doc-integrity.py`): a
+# present-tense infra claim is a violation unless a planned/target qualifier appears
+# WITHIN 5 LINES of it, so the reader sees "planned" right where the claim is made.
+#
+# The workflow runs the checker's built-in `--selftest` first, so the guard can
+# never silently rot into a no-op: the self-test proves it still FAILS fabricated
+# claims and PASSES correctly-qualified / genuinely-real ones before it is trusted
+# to scan the tree.
 
 on:
   push:
@@ -15,11 +25,15 @@ on:
     paths:
       - 'docs/**'
       - 'FleetOS-Playbook/**'
+      - 'README.md'
+      - 'scripts/check-doc-integrity.py'
       - '.github/workflows/docs-integrity.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'FleetOS-Playbook/**'
+      - 'README.md'
+      - 'scripts/check-doc-integrity.py'
       - '.github/workflows/docs-integrity.yml'
 
 jobs:
@@ -28,24 +42,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: No unqualified infra/terraform claims in docs
-        run: |
-          # A doc may reference infra/terraform ONLY if it also contains one of
-          # these planned-architecture qualifiers somewhere in the file. CHANGELOG
-          # is historical record and is exempt.
-          QUALIFIER='planned architecture|target architecture|not yet built|not yet provisioned|does not exist yet|planned-infra-doc|Planned \('
-          fail=0
-          while IFS= read -r file; do
-            case "$file" in
-              */CHANGELOG.md) continue ;;
-            esac
-            if ! grep -qiE "$QUALIFIER" "$file"; then
-              echo "::error file=$file::mentions infra/terraform but has no planned/target-architecture qualifier — add the planned-infra banner or reword to Planned (see docs-integrity.yml)."
-              fail=1
-            fi
-          done < <(grep -rIl "infra/terraform" docs/ FleetOS-Playbook/ 2>/dev/null || true)
-          if [ "$fail" -ne 0 ]; then
-            echo "Fabricated-infrastructure doc check failed. See errors above."
-            exit 1
-          fi
-          echo "OK — every doc referencing infra/terraform carries a planned/target-architecture qualifier."
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Self-test the guard (must flag fabricated, pass qualified/real)
+        run: python3 scripts/check-doc-integrity.py --selftest
+
+      - name: Scan docs for unqualified infrastructure claims
+        run: python3 scripts/check-doc-integrity.py

@@ -48,7 +48,7 @@
 
 **External integrations.** Stripe (checkout/portal/signature-verified webhook), AWS SES (email, behind config), Web Push/VAPID, S3 (attachments, behind config), OpenStreetMap tiles (no key). All degrade gracefully when unconfigured.
 
-**Deployment architecture.** Terraform modules under `infra/` (ECS/RDS/Secrets Manager/backups/monitoring). Both frontends are static Vite builds. Local dev via Postgres + `ts-node` API + Vite. *Note: deployment is deliberately deferred per the founder's Commercial_Priority directive until the courier vertical is feature-complete.*
+**Deployment architecture.** Today the app deploys to **Railway** (API + managed Postgres) and **Vercel** (both static Vite frontends); local dev via Postgres + `ts-node` API + Vite. A Terraform-defined AWS target (ECS/RDS/Secrets Manager/backups/monitoring under `infra/`) is **planned — not yet in the repo** (no `.tf` files exist); it is the intended future state, not a current control.
 
 ### Good decisions
 - **Multi-tenant via Postgres RLS**, not app-layer `where companyId` alone — defence in depth; a forgotten filter can't leak across tenants.
@@ -196,7 +196,7 @@ The Playbook (`FleetOS-Playbook/`) is unusually thorough — numbered domains, p
 ### Honest ceiling
 
 Getting materially past ~90 is **not** a code exercise — it needs signal only real operation produces, and claiming higher would be dishonest:
-- **Concurrent load at true scale** (many tenants, high RPS) on production-grade RDS — the scale test here proves index behaviour on one large tenant, not contention/connection-pool/replica behaviour.
+- **Concurrent load at true scale** (many tenants, high RPS) on production-grade managed Postgres (RDS is the **planned** target; Railway today) — the scale test here proves index behaviour on one large tenant, not contention/connection-pool/replica behaviour.
 - **Enterprise auth & governance** — SSO/SAML/SCIM, audit-log export, data-residency controls, and a formal security posture (pen test, SOC 2-style controls).
 - **Operational maturity** — real dashboards/alerts wired to live traffic, on-call runbooks, and incidents actually handled.
 - **Battle-testing** — weeks of real customer usage surfacing the edge cases no audit predicts.

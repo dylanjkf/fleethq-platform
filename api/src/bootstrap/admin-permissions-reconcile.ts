@@ -43,6 +43,7 @@ export interface AdminReconcileResult {
   supportRoleCreated: boolean;
   permissionsGranted: number;
   permissionsRevoked: number;
+  permissionsRetired: number;
 }
 
 async function ensureRole(
@@ -123,11 +124,28 @@ export async function reconcileAdminPermissions(prisma: PrismaClient): Promise<A
     (await revokeExtra(prisma, superAdmin.id, superAdminTargetIds)) +
     (await revokeExtra(prisma, support.id, supportTargetIds));
 
+  // Delete permission rows that have fallen out of the catalog entirely. Revoking
+  // grants (above) unhooks them from the template roles, but a retired
+  // AdminPermission would otherwise linger in the table — a stale key that could be
+  // re-granted to a custom role or muddy an access audit. The AdminRolePermission
+  // FK is onDelete: Cascade, so deleting the permission also removes any remaining
+  // grants (including on custom roles) atomically.
+  const catalogKeys = new Set<string>(ADMIN_PERMISSION_CATALOG.map((p) => p.key));
+  const retired = allPermissions.filter((p) => !catalogKeys.has(p.key));
+  let permissionsRetired = 0;
+  if (retired.length > 0) {
+    const result = await prisma.adminPermission.deleteMany({
+      where: { id: { in: retired.map((p) => p.id) } },
+    });
+    permissionsRetired = result.count;
+  }
+
   return {
     permissionsUpserted: ADMIN_PERMISSION_CATALOG.length,
     superAdminRoleCreated: superAdmin.created,
     supportRoleCreated: support.created,
     permissionsGranted,
     permissionsRevoked,
+    permissionsRetired,
   };
 }

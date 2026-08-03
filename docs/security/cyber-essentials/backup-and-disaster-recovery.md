@@ -55,8 +55,10 @@ each as Planned.
   snapshot copied to a second region so a region-level loss does not lose data.
 - **Attachment & site storage (S3).** Versioned, SSE-KMS-encrypted buckets with a
   public-access block, so an object overwrite or delete is recoverable from a
-  prior version. (Only relevant once `ATTACHMENTS_BUCKET` is configured; the
-  default is inline-in-Postgres.)
+  prior version — **planned target** (the customer-managed KMS key is not
+  provisioned; S3 object versioning itself is available once storage is
+  configured). Only relevant once `ATTACHMENTS_BUCKET` is set; the default is
+  inline-in-Postgres.
 - **Multi-AZ + deletion protection.** A synchronous standby and accidental-teardown
   protection in production.
 

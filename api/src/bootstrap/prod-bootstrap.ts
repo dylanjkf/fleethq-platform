@@ -95,6 +95,17 @@ const BUILT_IN_ASSET_CLASSES = [
 ];
 
 async function seedReferenceData(prisma: PrismaClient): Promise<void> {
+  // Fail loud rather than silently seeding an empty permission set. If a broken
+  // build/import left PERMISSION_CATALOG empty, upserting nothing would leave the
+  // permissions table unpopulated — every deny-by-default guard would then have no
+  // grants to resolve, breaking the whole RBAC surface. A bootstrap must never
+  // produce that state quietly.
+  if (!Array.isArray(PERMISSION_CATALOG) || PERMISSION_CATALOG.length === 0) {
+    throw new Error(
+      '[bootstrap] FATAL: PERMISSION_CATALOG is empty — refusing to seed reference data. ' +
+        'This indicates a broken build or import; the RBAC catalog must be non-empty.',
+    );
+  }
   for (const entry of PERMISSION_CATALOG) {
     await prisma.permission.upsert({
       where: { key: entry.key },
@@ -289,6 +300,7 @@ async function main(): Promise<void> {
     const adminReconcile = await reconcileAdminPermissions(prisma);
     console.log(
       `[bootstrap] admin permissions reconciled (${adminReconcile.permissionsUpserted} permission(s); ` +
+        `${adminReconcile.permissionsRetired} retired/removed; ` +
         `Super Admin role ${adminReconcile.superAdminRoleCreated ? 'created' : 'present'}).`,
     );
     await maybeCreateCompanyAdmin(prisma);
