@@ -29,6 +29,11 @@ export const ADMIN_PERMISSIONS = {
 
   FLEET_VIEW: 'fleet:view',
 
+  INSPECTIONS_VIEW: 'inspections:view',
+
+  MAINTENANCE_VIEW: 'maintenance:view',
+  MAINTENANCE_MANAGE: 'maintenance:manage',
+
   SYSTEM_VIEW: 'system:view',
 
   ANALYTICS_VIEW: 'analytics:view',
@@ -69,6 +74,11 @@ export const ADMIN_PERMISSION_CATALOG: AdminPermissionCatalogEntry[] = [
   { key: ADMIN_PERMISSIONS.FEATURE_FLAGS_MANAGE, category: 'Feature Flags', description: 'Create, enable, disable, and target feature flags' },
 
   { key: ADMIN_PERMISSIONS.FLEET_VIEW, category: 'Fleet Administration', description: 'View cross-tenant assets, operators, and integrations' },
+
+  { key: ADMIN_PERMISSIONS.INSPECTIONS_VIEW, category: 'Inspections', description: 'View cross-tenant checklist inspections and submissions' },
+
+  { key: ADMIN_PERMISSIONS.MAINTENANCE_VIEW, category: 'Maintenance', description: 'View cross-tenant maintenance jobs and defects' },
+  { key: ADMIN_PERMISSIONS.MAINTENANCE_MANAGE, category: 'Maintenance', description: 'Reassign, comment on, and close maintenance defects' },
 
   { key: ADMIN_PERMISSIONS.SYSTEM_VIEW, category: 'System', description: 'View system/database health and deployment info' },
 
