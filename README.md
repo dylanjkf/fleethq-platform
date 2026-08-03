@@ -119,9 +119,10 @@ redeploy — `prod-bootstrap` creates it on boot. **Do NOT use
 `npm run admin:bootstrap` against production**: that script is `ts-node` and is
 not included in the runtime image (`npm ci --omit=dev`, `dist/` only), so it
 cannot run in the container — it exists for local dev only. The bootstrap
-account is created `mustResetPassword=true` and (with `ENFORCE_STAFF_ADMIN_MFA`
-on, the default) must enroll MFA on first sign-in; **remove
-`BOOTSTRAP_STAFF_ADMIN` and its password from the env once the account
+account is created `mustResetPassword=true` so the temporary password must be
+changed on first sign-in. MFA is optional (each admin can enable it from
+Security settings); set `ENFORCE_STAFF_ADMIN_MFA=true` to make it mandatory.
+**Remove `BOOTSTRAP_STAFF_ADMIN` and its password from the env once the account
 exists.** See `api/.env.example` for the full block.
 
 ### fleethq-frontend (+ admin/) → Vercel
