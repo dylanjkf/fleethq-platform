@@ -6,7 +6,7 @@
 # be repointed to different bytes under the same name, so pinning the digest
 # makes every build reproducible and defeats a tag-repoint supply-chain swap.
 # Update the digest deliberately (re-resolve `node:22-alpine`) when bumping.
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS deps
+FROM node:26-alpine@sha256:233761595746769ebfdb6090f44fc7cdf818ae0ce62d2b37e0367723b9823e36 AS deps
 WORKDIR /app
 # Alpine ships no OpenSSL at all by default — Prisma's engine binaries shell
 # out to `openssl version` to pick the right build (openssl-1.1.x vs 3.0.x)
@@ -21,13 +21,13 @@ COPY prisma ./prisma
 # present — hence copying it before `npm ci`, not after.
 RUN npm ci
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
+FROM node:26-alpine@sha256:233761595746769ebfdb6090f44fc7cdf818ae0ce62d2b37e0367723b9823e36 AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
+FROM node:26-alpine@sha256:233761595746769ebfdb6090f44fc7cdf818ae0ce62d2b37e0367723b9823e36 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
