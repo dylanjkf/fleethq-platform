@@ -17,31 +17,38 @@ Covers Part 15 (migrations), Part 16 (backup & disaster recovery), and Part 14
   release), never combined with the change that stops using them.
 - **Tested in CI before merge.** `api-ci.yml` spins up a real Postgres, runs
   `prisma migrate deploy` from empty, runs the seed, and runs the full test suite
-  — so a broken or out-of-order migration fails the build. `terraform-ci.yml`
-  guards the infrastructure the database runs on.
+  — so a broken or out-of-order migration fails the build. (A `terraform-ci.yml`
+  to guard the database infrastructure is **planned/target, not yet committed** —
+  there is no `infra/terraform` in this repo today.)
 - **Rollback strategy.** Because migrations are forward-only and additive, a bad
   *code* deploy rolls back to the previous container image without touching the
   schema (the additive migration is harmless to the old code). A bad *migration*
-  (data-affecting) is recovered by RDS point-in-time restore to just before it
-  ran — which is why data-affecting migrations are gated behind the manual,
-  human-approved production deploy.
+  (data-affecting) is recovered by managed-Postgres point-in-time restore to just
+  before it ran (the RDS PITR window under the **planned** AWS target; Railway's
+  managed backups today) — which is why data-affecting migrations are gated behind
+  the manual, human-approved production deploy.
 
 ## Backup & disaster recovery (Part 16)
 
 Full detail — including the tested-restore caveat — is in the security suite's
 [backup-and-disaster-recovery.md](../security/cyber-essentials/backup-and-disaster-recovery.md).
-In brief:
+In brief — the items below are the **planned/target** AWS DR design (no
+`infra/terraform` exists in this repo yet); today the equivalent is Railway's
+managed Postgres backups plus, if `ATTACHMENTS_BUCKET` is configured, S3
+versioning:
 
 - **Automated backups + point-in-time recovery** on RDS (retention window +
   off-peak backup window), with a final snapshot on teardown and deletion
-  protection in production.
+  protection in production — **planned target**.
 - **Cross-region snapshot copy** (EventBridge + Lambda) so a regional loss does
-  not lose data.
-- **Backup encryption** via the same customer-managed KMS key as the volume.
-- **S3 versioning** for attachment/site buckets (object-level recovery).
+  not lose data — **planned target**.
+- **Backup encryption** via the same customer-managed KMS key as the volume —
+  **planned target**.
+- **S3 versioning** for attachment/site buckets (object-level recovery) — active
+  when object storage is configured.
 - **RPO ≈ 5 minutes** (PITR granularity) and **RTO in hours** (RDS restore + ECS
-  redeploy) — design targets; a full timed restore drill on a production-sized
-  dataset is the open validation item.
+  redeploy) — **planned** design targets, not yet validated; a full timed restore
+  drill on a production-sized dataset is the open validation item.
 
 ## Large-scale readiness (Part 14)
 

@@ -78,7 +78,7 @@ Cross-references: [SEC] = `docs/security/cyber-essentials/`, [DB] = `docs/databa
 
 ## A.7 Physical controls (7.1–7.14)
 
-FleetOS operates no physical facilities; production runs in AWS ap-southeast-2.
+FleetOS operates no physical facilities; production currently runs on managed cloud hosting (Railway + Vercel). AWS ap-southeast-2 is the planned target environment (not yet provisioned).
 
 | Control | Status | Evidence / note |
 |---------|:------:|-----------------|

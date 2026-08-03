@@ -24,33 +24,38 @@ DATABASE_URL=postgres://…/fleetos ./scripts/restore-drill.sh
 - Run it on a schedule (weekly is a sensible floor) and **before any risky
   migration**, so a real recovery is never the first time a restore has been
   attempted.
-- The connecting role needs `CREATEDB` — in production run it as the RDS master
-  / an admin role, not the RLS-scoped app role. `ADMIN_URL` overrides the
+- The connecting role needs `CREATEDB` — in production run it as the managed-Postgres
+  admin role (the RDS master under the **planned** AWS target; the Railway Postgres
+  admin role today), not the RLS-scoped app role. `ADMIN_URL` overrides the
   connection used for `CREATE/DROP DATABASE` if it must differ.
 - **Verified 2026-07-23** against the local database: dump → restore → row-count
   match all green.
 - This drill validates *logical* restore. It complements — does not replace —
-  the infra-level automated snapshots + cross-region snapshot copy already in
+  the infra-level automated snapshots + cross-region snapshot copy described in
   `infra/terraform/modules/database` (the disaster-recovery layer from the
-  backups/DR work). A full DR game-day (restore a snapshot into a fresh
-  environment and boot the app against it) is the next rung up, once a live
-  environment exists.
+  backups/DR work). **That Terraform is planned/target, not yet committed** — see
+  the file banner; today at-rest snapshots are whatever Railway's managed Postgres
+  provides. A full DR game-day (restore a snapshot into a fresh environment and
+  boot the app against it) is the next rung up, once that live environment exists.
 
 ## Load / capacity
 `apps/api/scripts/load-test.ts` (+ `seed-load-test-data.ts` to populate a
 realistic dataset first) is the load harness. Pre-launch, run it **against the
 deployed staging environment**, not a local box — the point of the tie-off is to
-measure the real network/RDS/Fargate path, not a laptop. Capture p95 latency and
+measure the real network + managed-database path (the RDS/Fargate path under the
+**planned** AWS target; Railway today), not a laptop. Capture p95 latency and
 error rate at target concurrency and keep the run output with the launch
 checklist.
 
 ## Secrets rotation
 - **Database role passwords**: `apps/api/scripts/rotate-db-role-passwords.ts`
   rotates the app/auth role credentials. Schedule it (quarterly, or immediately
-  on any suspected exposure), and update the corresponding secret in AWS Secrets
-  Manager (`infra/terraform/modules/secrets`) in the same change so the running
-  service picks up the new value.
-- **JWT_SECRET, Stripe keys, VAPID keys, SES config**: live in Secrets Manager,
+  on any suspected exposure), and update the corresponding secret in your deploy
+  secret store (Railway **Variables** today; AWS Secrets Manager —
+  `infra/terraform/modules/secrets` — under the **planned** target) in the same
+  change so the running service picks up the new value.
+- **JWT_SECRET, Stripe keys, VAPID keys, SES config**: live in the deploy secret
+  store (Railway Variables today; Secrets Manager under the **planned** target),
   injected as env at deploy. Rotating JWT_SECRET invalidates all sessions
   (acceptable, forces re-login) — do it on a suspected key compromise. Stripe /
   VAPID rotation follows each provider's key-rollover procedure.

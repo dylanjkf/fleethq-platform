@@ -34,7 +34,8 @@ touch production once staging has passed the smoke test.
 - A **domain name** (optional for the first deploy — Railway/Vercel give you
   default URLs until you wire one).
 - Real third-party accounts, each of which becomes an **environment variable in
-  Railway** (not a Secrets Manager entry): **Sentry** (`SENTRY_DSN`), **Stripe**
+  Railway** (a managed AWS Secrets Manager store is **planned target**, not used
+  today): **Sentry** (`SENTRY_DSN`), **Stripe**
   (`STRIPE_*` + price ids), an **email provider** such as SES
   (`EMAIL_PROVIDER`/`EMAIL_FROM_ADDRESS`/`AWS_REGION`), and **VAPID** keys for web
   push (`npx web-push generate-vapid-keys`).

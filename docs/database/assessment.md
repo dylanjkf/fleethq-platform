@@ -21,7 +21,10 @@ for:
   history (`archived_at`, no unsafe cascades); domain-appropriate timestamps.
 - **Composite indexes on the hot paths**, verified with `EXPLAIN` against a
   12,000-row seeded dataset.
-- **Encryption** in transit (incl. forced TLS to the DB) and at rest (KMS).
+- **Encryption** in transit (TLS today; forced DB TLS via `rds.force_ssl` is
+  **planned target**), plus application-level AES-256-GCM for stored integration
+  credentials; disk/volume at-rest encryption is the managed host's default today
+  (customer-managed KMS is **planned target**, no IaC in this repo).
 - **An append-only, RLS-scoped audit trail** and a per-entity business Timeline.
 - **Version-controlled, forward-only, CI-tested migrations.**
 
@@ -91,8 +94,10 @@ strong; the governance wrapper is the gap.
 **~65/100.**
 
 - **CC6 (logical & physical access):** strong — RLS tenant isolation, role
-  separation, encrypted credentials from Secrets Manager, UUID keys. The
-  database's strongest criterion.
+  separation, integration credentials encrypted at the application layer
+  (AES-256-GCM; a managed Secrets Manager store is **planned target**, not used
+  today — runtime secrets are Railway Variables), UUID keys. The database's
+  strongest criterion.
 - **CC7 (system operations / monitoring):** the append-only audit trail is in
   place; the gap is *alerting* on database security signals (covered in the
   security suite's monitoring doc) and audit-log retention policy.

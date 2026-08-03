@@ -8,7 +8,7 @@ FleetHQ is a Transport Management System, not a Warehouse Management System — 
 - Integration methods: CSV/Excel import and export, a generic REST poller, and generic incoming/outgoing webhooks are the v1 reference connectors. The connector interface is a plugin — SOAP, GraphQL, EDI, SFTP/FTP, ODBC, and bespoke vendor clients (SAP, Oracle, NetSuite, Dynamics, Pronto, Cin7, Fishbowl, Odoo, etc.) are each a future connector implementing the same interface, not a v1 deliverable.
 - A universal data-mapping engine: external field → FleetHQ field, unlimited mappings per connection, no hardcoded field list — with transforms (uppercase/lowercase/trim, date format, unit conversion, default value, lookup table).
 - A sync engine: manual and scheduled syncing, per-row success/failure tracking, a retry queue and dead-letter queue for rows that fail, sync history/logs.
-- A credential vault: secrets are encrypted at rest and never round-tripped in a connection's config/list view.
+- A credential vault: secrets are encrypted at rest at the application layer (AES-256-GCM) and never round-tripped in a connection's config/list view.
 - A webhook manager: incoming (signature-verified) and outgoing (signed, retried) webhooks, with a delivery log.
 - Monitoring: a sync dashboard (connection health, last sync, pending dead letters, recent errors) and an error centre (every failed row with its raw payload, error, and a retry action).
 - Full audit trail: every connection/credential/mapping/webhook create-edit-archive and every sync run is an audit log entry.

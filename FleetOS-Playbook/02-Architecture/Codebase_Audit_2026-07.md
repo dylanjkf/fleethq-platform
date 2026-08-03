@@ -196,7 +196,7 @@ The Playbook (`FleetOS-Playbook/`) is unusually thorough — numbered domains, p
 ### Honest ceiling
 
 Getting materially past ~90 is **not** a code exercise — it needs signal only real operation produces, and claiming higher would be dishonest:
-- **Concurrent load at true scale** (many tenants, high RPS) on production-grade RDS — the scale test here proves index behaviour on one large tenant, not contention/connection-pool/replica behaviour.
+- **Concurrent load at true scale** (many tenants, high RPS) on production-grade managed Postgres (RDS is the **planned** target; Railway today) — the scale test here proves index behaviour on one large tenant, not contention/connection-pool/replica behaviour.
 - **Enterprise auth & governance** — SSO/SAML/SCIM, audit-log export, data-residency controls, and a formal security posture (pen test, SOC 2-style controls).
 - **Operational maturity** — real dashboards/alerts wired to live traffic, on-call runbooks, and incidents actually handled.
 - **Battle-testing** — weeks of real customer usage surfacing the edge cases no audit predicts.

@@ -46,7 +46,7 @@ A company with `subscriptionStatus` of `NONE`, `PAST_DUE`, or `CANCELED` is **no
 ## Go-live checklist (for when the founder is ready to charge real money)
 1. Create a real Stripe account; complete Stripe's business verification.
 2. In the Stripe Dashboard, create the Product(s) and Price(s) for FleetOS's plan(s).
-3. Set `STRIPE_SECRET_KEY` (live key) and `STRIPE_WEBHOOK_SECRET` in Secrets Manager; set `VITE_STRIPE_PRICE_ID` to the live Price for the FleetHQ build.
+3. Set `STRIPE_SECRET_KEY` (live key) and `STRIPE_WEBHOOK_SECRET` in your deploy secret store (Railway **Variables** today; AWS Secrets Manager under the **planned** target); set `VITE_STRIPE_PRICE_ID` to the live Price for the FleetHQ build.
 4. Register the `POST /v1/billing/webhook` endpoint in the Stripe Dashboard and subscribe it to `checkout.session.completed`, `customer.subscription.*`, `invoice.payment_failed`, and `invoice.paid` events (`22-Auth-Billing-Platform/Overview.md`'s Phase 5 — invoice events, not just subscription status, since Phase 5).
 5. Run one real end-to-end subscribe in Stripe **test mode** first, confirm the webhook drives `subscriptionStatus` to `ACTIVE`, then switch to live keys.
 6. Have the Terms of Service / subscription terms (see `19-Billing/`'s sibling legal drafts, pending lawyer review) in place before taking real payments.

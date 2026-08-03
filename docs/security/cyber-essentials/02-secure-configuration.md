@@ -79,9 +79,10 @@ memory.
   declared on a DTO is refused rather than silently passed through to a service.
   `apps/api/src/main.ts:54-60`.
 - **The proxy trust boundary is set to exactly one hop.** `trust proxy` is `1`,
-  matching the client → CloudFront → ALB → process topology, so `req.ip`
-  resolves to the real client for per-IP rate limiting instead of collapsing
-  every user into the ALB's address. `apps/api/src/main.ts:24`.
+  matching the single managed edge in front of the process (Railway's edge today;
+  the client → CloudFront → ALB topology under the **planned** AWS target), so
+  `req.ip` resolves to the real client for per-IP rate limiting instead of
+  collapsing every user into the edge's address. `apps/api/src/main.ts:24`.
 - **Per-IP rate limiting is on by default.** `ThrottlerModule` applies a global
   300-requests-per-60s default (tightened per-route on login), giving an
   internet-facing surface a baseline cost against brute-force and
@@ -119,8 +120,9 @@ Note: three findings from the original audit for this domain have since been
 remediated and are recorded above under *What's implemented*, not here — default
 admin accounts with a hardcoded password reaching production (HIGH), no fail-fast
 that the dev-only DB role passwords were rotated (HIGH), and database connections
-not forced onto TLS (`rds.force_ssl=1` + `sslmode=require` are now set — carried
-in the Secure network architecture domain).
+not requesting TLS (`sslmode=require` is now set app-side today; server-forced
+`rds.force_ssl=1` is **planned target** infra, not yet built — carried in the
+Secure network architecture domain).
 
 ## Standards mapping
 
@@ -132,18 +134,19 @@ configuration robustness (a mistyped `NODE_ENV` silently softening the posture).
 
 **ISO/IEC 27001:2022 Annex A:**
 - **A.8.9 Configuration management** — Largely met for the application tier: the
-  hardened configuration is defined in code and infrastructure-as-code
-  (`env.validation.ts`, `main.ts`, `app.module.ts`, the Terraform modules) and
-  enforced at boot rather than applied by hand, though there is no
-  allowlist/lint that a change conforms to the intended baseline.
+  hardened configuration is defined in code (`env.validation.ts`, `main.ts`,
+  `app.module.ts`) and enforced at boot rather than applied by hand. (Codifying
+  the infrastructure tier as Terraform is **planned target**, not yet committed.)
+  There is no allowlist/lint that a change conforms to the intended baseline.
 - **A.5.37 Documented operating procedures** — Partially met: the production
   bootstrap and secret-rotation steps are encoded in `deploy-api.yml` with
   explanatory comments, but this is pipeline-as-documentation rather than a
   standalone secure-configuration standard.
 - **A.8.19 Installation of software on operational systems** — Partially met:
   production seeding is constrained to reference data only and secrets are
-  pulled from Secrets Manager via OIDC, but the owner DB credential still enters
-  the serving container's environment unnecessarily.
+  injected from the deploy secret store (Railway Variables today; Secrets Manager
+  via OIDC is **planned target**), but the owner DB credential still enters the
+  serving container's environment unnecessarily.
 
 **SOC 2 (2017 TSC):**
 - **CC6.1** (logical access / protection of information) — Supported by

@@ -28,11 +28,16 @@ core of the remaining work: **prove it in production**, not build more features.
 Everything is verified in dev/CI only. To sell, there must be a hosted,
 internet-reachable, AU-region instance.
 
-- Bootstrap Terraform remote state (S3 + DynamoDB lock) — `infra/terraform/bootstrap` exists.
-- Provision into **ap-southeast-2** (AU data residency): VPC/network, RDS Postgres, api-service (ECS/Fargate), frontend (CloudFront + S3) for both SPAs, Route53 + ACM TLS, Secrets Manager/SSM.
-- Wire CI/CD: `deploy-api` runs `prisma migrate deploy` + deploys the API; `deploy-frontends` builds + publishes both SPAs. Add a **post-deploy smoke test** gate.
+> **Status:** the app is deployed today on **Railway (API + managed Postgres) +
+> Vercel (SPAs)**. The AWS target below is **planned / not yet built** — there is
+> no `infra/terraform` in this repo. The bullets are the target-state work items,
+> not descriptions of existing infrastructure.
+
+- Bootstrap Terraform remote state (S3 + DynamoDB lock) — `infra/terraform/bootstrap` **does not exist yet** (planned).
+- Provision into **ap-southeast-2** (AU data residency): VPC/network, RDS Postgres, api-service (ECS/Fargate), frontend (CloudFront + S3) for both SPAs, Route53 + ACM TLS, Secrets Manager/SSM. *(planned target)*
+- Wire CI/CD: `deploy-api` runs `prisma migrate deploy` + deploys the API; `deploy-frontends` builds + publishes both SPAs. Add a **post-deploy smoke test** gate. *(deploy-api is live on Railway today; the frontend/AWS pieces are planned.)*
 - Seed baseline + run `npm run permissions:sync`.
-- Observability: point Sentry DSN at a real project; CloudWatch alarms → a real alert destination.
+- Observability: point Sentry DSN at a real project (available today); CloudWatch alarms → a real alert destination *(planned target)*.
 - **Production smoke test**: signup → verify email → login → create asset/operator/job → complete a stop with POD → see it on FleetHQ → download a receipt.
 - **Founder inputs:** AWS account, a domain, alert destination (email/Slack), confirm AU region.
 
