@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { ListQueryDto } from '../common/dto/list-query.dto';
+import { AdminFleetQueryDto } from './dto/admin-fleet-query.dto';
 
 /**
  * Cross-tenant fleet browsing for FleetHQ staff (21-Admin-Platform/Overview.md,
@@ -17,9 +18,10 @@ import { ListQueryDto } from '../common/dto/list-query.dto';
 export class AdminFleetService {
   constructor(private readonly adminPrisma: AdminPrismaService) {}
 
-  async listAssets(query: ListQueryDto) {
+  async listAssets(query: AdminFleetQueryDto) {
     const where: Prisma.AssetWhereInput = {
       ...(query.includeArchived ? {} : { archivedAt: null }),
+      ...(query.companyId ? { companyId: query.companyId } : {}),
       ...(query.searchTerm
         ? {
             OR: [
@@ -57,9 +59,10 @@ export class AdminFleetService {
     return { total, page: query.page, pageSize: query.take, items: assets };
   }
 
-  async listOperators(query: ListQueryDto) {
+  async listOperators(query: AdminFleetQueryDto) {
     const where: Prisma.OperatorWhereInput = {
       ...(query.includeArchived ? {} : { archivedAt: null }),
+      ...(query.companyId ? { companyId: query.companyId } : {}),
       ...(query.searchTerm
         ? { OR: [{ fullName: { contains: query.searchTerm, mode: 'insensitive' } }, { email: { contains: query.searchTerm, mode: 'insensitive' } }] }
         : {}),
