@@ -133,6 +133,16 @@ enum BillingAuditEventType {
   WEBHOOK_RECEIVED
   /// A FleetHQ staff admin performed a manual billing override.
   MANUAL_OVERRIDE
+  /// A self-serve signup Checkout Session was created (no company yet).
+  SIGNUP_STARTED
+  /// A paid signup was provisioned into a real company + admin user.
+  SIGNUP_COMPLETED
+  /// A pending signup expired without payment and was cleaned up.
+  SIGNUP_EXPIRED
+  /// A subscription invoice payment failed (dunning).
+  PAYMENT_FAILED
+  /// A subscription was canceled (by the customer, admin, or Stripe).
+  SUBSCRIPTION_CANCELED
 }
 
 /// Append-only evidence trail of billing-relevant events per company — the
@@ -145,7 +155,9 @@ enum BillingAuditEventType {
 /// written on a separate connection, not inside that transaction).
 model BillingAuditLog {
   id           String                @id @default(uuid()) @db.Uuid
-  companyId    String                @map("company_id") @db.Uuid
+  /// Nullable: pre-provisioning signup events (SIGNUP_STARTED / SIGNUP_EXPIRED)
+  /// have no company yet. A company-scoped event always sets it.
+  companyId    String?               @map("company_id") @db.Uuid
   eventType    BillingAuditEventType @map("event_type")
   /// The customer user who triggered it (e.g. tried to add the asset), if any.
   actorUserId  String?               @map("actor_user_id") @db.Uuid
@@ -157,39 +169,74 @@ model BillingAuditLog {
   detail       Json                  @default("{}")
   createdAt    DateTime              @default(now()) @map("created_at")
 
-  company Company @relation(fields: [companyId], references: [id])
+  company Company? @relation(fields: [companyId], references: [id])
 
   @@index([companyId, createdAt])
   @@map("billing_audit_logs")
 }
 
+enum PendingSignupStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+}
+
+/// Bridges the gap between "self-serve signup Checkout Session created" and
+/// "Stripe webhook confirms first payment" — the account is NOT provisioned
+/// until payment succeeds (no free trial), so this row holds the intended
+/// company/admin details until then. NOT tenant data (no company exists yet):
+/// no RLS, written and read only via the privileged fleetos_auth role
+/// (SystemPrismaService) — the public signup endpoint and the provisioning
+/// webhook both go through it, so the bcrypt-hashed password is never exposed
+/// to the tenant runtime role. `stripe_checkout_session_id` is the idempotency
+/// key: provisioning is keyed on it so a redelivered webhook or a double-submit
+/// never creates two companies. Short-lived — a scheduled job expires rows past
+/// `expires_at` (Stripe Checkout Sessions themselves expire after 24h).
+model PendingSignup {
+  id                      String              @id @default(uuid()) @db.Uuid
+  stripeCheckoutSessionId String              @unique @map("stripe_checkout_session_id")
+  companyName             String              @map("company_name")
+  adminEmail              String              @map("admin_email")
+  adminName               String              @map("admin_name")
+  requestedQuantity       Int                 @map("requested_quantity")
+  /// bcrypt hash of the admin's chosen password (password-on-form flow). Applied
+  /// to the real user row at provisioning, then this row is marked COMPLETED.
+  hashedPassword          String?             @map("hashed_password")
+  status                  PendingSignupStatus @default(PENDING)
+  createdAt               DateTime            @default(now()) @map("created_at")
+  expiresAt               DateTime            @map("expires_at")
+
+  @@index([status, expiresAt])
+  @@map("pending_signups")
+}
+
 model Company {
-  id                   String             @id @default(uuid()) @db.Uuid
-  name                 String
+  id                       String             @id @default(uuid()) @db.Uuid
+  name                     String
   /// ISO-ish jurisdiction code. Only "AU" is a supported value at the API layer
   /// today, but the column exists from day one per 08-Compliance/Jurisdiction_Model.md
   /// so a second jurisdiction is configuration, not a schema change.
-  jurisdiction         String             @default("AU")
+  jurisdiction             String             @default("AU")
   /// Auth/Billing Platform Phase 4 (registration depth): 11-digit Australian
   /// Business Number, validated via IsAbn's ABR checksum at intake. Optional
   /// — not every company provides one immediately, and companies provisioned
   /// before this field existed have none.
-  abn                  String?            @map("abn")
+  abn                      String?            @map("abn")
   /// Free-text business category collected at intake (e.g. "Courier & parcel
   /// delivery") — descriptive only, never used to gate a feature.
-  industry             String?            @map("industry")
+  industry                 String?            @map("industry")
   /// Business contact phone collected at intake — distinct from supportPhone
   /// below, which is the driver-facing helpdesk fallback number.
-  phone                String?            @map("phone")
+  phone                    String?            @map("phone")
   /// Rough fleet size at signup — an onboarding/lead-quality signal, not
   /// reconciled against the company's actual Asset count anywhere.
-  fleetSizeEstimate    Int?               @map("fleet_size_estimate")
+  fleetSizeEstimate        Int?               @map("fleet_size_estimate")
   /// When this company's admin accepted the Terms of Service/Privacy Policy
   /// (FleetOS-Playbook/20-Legal/Terms_of_Service.DRAFT.md,
   /// Privacy_Policy.DRAFT.md) — required at signup (SignupCompanyDto's
   /// `acceptedTerms`). `null` only for companies provisioned before this
   /// field existed, or via internal dev/seed scripts.
-  termsAcceptedAt      DateTime?          @map("terms_accepted_at")
+  termsAcceptedAt          DateTime?          @map("terms_accepted_at")
   /// FOUNDER_NOTES.md's Support/help pathway gap: a phone number/note an
   /// operator stuck mid-shift can fall back to when messaging the office
   /// isn't fast enough (or there's no connectivity for DriverOS's own
@@ -197,16 +244,16 @@ model Company {
   /// company via GET /v1/companies/me/support (no companies:view gate,
   /// same "every user can read this slice of their own context" precedent
   /// as notification preferences) — see 01-Product/Support_Help_Pathway.md.
-  supportPhone         String?            @map("support_phone")
-  supportNotes         String?            @map("support_notes")
+  supportPhone             String?            @map("support_phone")
+  supportNotes             String?            @map("support_notes")
   /// FleetHQ internal administration platform (21-Admin-Platform/Overview.md):
   /// a distinct lifecycle state from `archivedAt` below — suspended blocks
   /// login/access temporarily (a billing or abuse action an admin can undo),
   /// archived is the soft-delete end state. Set/cleared only via the admin
   /// API's own RLS-bypassing connection (fleetos_admin), never by the
   /// customer-facing API.
-  suspendedAt          DateTime?          @map("suspended_at")
-  suspensionReason     String?            @map("suspension_reason")
+  suspendedAt              DateTime?          @map("suspended_at")
+  suspensionReason         String?            @map("suspension_reason")
   /// Billing (FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing &
   /// subscription management spec"): one Stripe Customer + Subscription per
   /// Company, mirroring the Company-level singleton shape supportPhone/Notes
@@ -216,44 +263,44 @@ model Company {
   /// existed, or is on a manually-managed arrangement) — see
   /// 19-Billing/Billing_And_Subscriptions.md for the full spec and why
   /// subscription status is surfaced, not enforced as a hard lockout, in v1.
-  stripeCustomerId     String?            @unique @map("stripe_customer_id")
-  stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
-  subscriptionStatus   SubscriptionStatus @default(NONE) @map("subscription_status")
+  stripeCustomerId         String?            @unique @map("stripe_customer_id")
+  stripeSubscriptionId     String?            @unique @map("stripe_subscription_id")
+  subscriptionStatus       SubscriptionStatus @default(NONE) @map("subscription_status")
   /// The Stripe Price ID the company's active subscription is on, e.g.
   /// "price_...". Not an internal plan enum — Stripe's own Price object is
   /// the source of truth for what a plan costs/includes, so there's nothing
   /// to keep in sync if pricing changes in the Stripe Dashboard.
-  planPriceId          String?            @map("plan_price_id")
+  planPriceId              String?            @map("plan_price_id")
   /// Auth/Billing Platform Phase 5 (full Stripe webhook coverage + failed-
   /// payment handling): incremented on each `invoice.payment_failed` webhook,
   /// reset to 0 on the next successful `invoice.paid`. Purely observational —
   /// per 19-Billing/Billing_And_Subscriptions.md's "billing informs, never
   /// hard-locks" v1 decision, a positive count does not by itself change
   /// entitlements (subscriptionStatus going PAST_DUE already covers that).
-  paymentFailureCount  Int                @default(0) @map("payment_failure_count")
+  paymentFailureCount      Int                @default(0) @map("payment_failure_count")
   /// Timestamp of the most recent payment failure. Never cleared on recovery
   /// (unlike paymentFailureCount) — kept as a historical marker of "has this
   /// company ever had a failed payment," which a future support/dunning view
   /// may want.
-  lastPaymentFailedAt  DateTime?          @map("last_payment_failed_at")
+  lastPaymentFailedAt      DateTime?          @map("last_payment_failed_at")
   /// When Stripe will next automatically retry a failed invoice
   /// (`invoice.next_payment_attempt`), or `null` once the retry schedule is
   /// exhausted or the invoice is paid. Surfaced via GET /v1/billing/status so
   /// the billing settings page can tell a customer exactly when the next
   /// charge attempt will happen, not just "your payment failed."
-  nextPaymentAttemptAt DateTime?          @map("next_payment_attempt_at")
+  nextPaymentAttemptAt     DateTime?          @map("next_payment_attempt_at")
   /// `created` timestamp of the most recent Stripe subscription-state webhook
   /// event applied to this company. Guards against out-of-order delivery
   /// (Stripe explicitly documents webhooks can arrive out of order): a
   /// `customer.subscription.updated` older than this is ignored so a retried,
   /// stale event can't revert subscriptionStatus/planPriceId after a newer one
   /// already landed.
-  lastStripeEventAt    DateTime?          @map("last_stripe_event_at")
+  lastStripeEventAt        DateTime?          @map("last_stripe_event_at")
   /// Self-serve free-trial window. Set at signup (14 days) so a new company
   /// experiences the full product before subscribing; entitlements grant the
   /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
   /// of Stripe's own TRIALING status — this is FleetOS's native, no-card trial.
-  trialEndsAt          DateTime?          @map("trial_ends_at")
+  trialEndsAt              DateTime?          @map("trial_ends_at")
   /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
   /// slots this company currently pays for — the Stripe subscription item
   /// quantity on the per-asset price ($19 AUD/asset/month). This is the SOURCE
@@ -263,10 +310,18 @@ model Company {
   /// upgrade action and only decreases via an explicit downgrade — never
   /// implicitly when an asset is added or archived. `null` = the company is not
   /// on the per-asset plan (still on the native trial or Free fallback).
-  assetQuantity        Int?               @map("asset_quantity")
-  createdAt            DateTime           @default(now()) @map("created_at")
-  updatedAt            DateTime           @updatedAt @map("updated_at")
-  archivedAt           DateTime?          @map("archived_at")
+  assetQuantity            Int?               @map("asset_quantity")
+  /// Per-asset billing: the Stripe subscription ITEM id (the line whose
+  /// quantity is the paid asset count) — needed to update quantity on the item
+  /// directly for the buy-more/release flow. And the current Stripe billing
+  /// period, mirrored from the subscription so the admin/customer billing views
+  /// can show "next bills on …" without a live Stripe round-trip.
+  stripeSubscriptionItemId String?            @map("stripe_subscription_item_id")
+  currentPeriodStart       DateTime?          @map("current_period_start")
+  currentPeriodEnd         DateTime?          @map("current_period_end")
+  createdAt                DateTime           @default(now()) @map("created_at")
+  updatedAt                DateTime           @updatedAt @map("updated_at")
+  archivedAt               DateTime?          @map("archived_at")
 
   memberships                  CompanyMembership[]
   roles                        Role[]
