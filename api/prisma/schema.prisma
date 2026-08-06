@@ -48,6 +48,121 @@ model StripeWebhookEvent {
   @@map("stripe_webhook_events")
 }
 
+/// Per-asset billing config (19-Billing/Per_Asset_Billing.md), a deliberate
+/// single-row table so the $19 AUD/asset/month price is one source of truth
+/// read everywhere rather than a literal scattered through the code — and so
+/// making it admin-editable later is a small change, not a rewrite. NOT tenant
+/// data (global platform config): no RLS, seeded with one row (id = 1),
+/// read broadly, written only by the admin role.
+model BillingSettings {
+  /// Fixed singleton id — always 1. A CHECK constraint in the migration keeps
+  /// it that way, so `findUnique({ id: 1 })` always resolves the one config row.
+  id                 Int      @id @default(1)
+  /// Price per active asset, per billing interval, in the smallest currency
+  /// unit (cents). 1900 = $19.00 AUD. Integer cents throughout — never floats —
+  /// to avoid rounding error on money.
+  pricePerAssetCents Int      @default(1900) @map("price_per_asset_cents")
+  currency           String   @default("AUD")
+  billingInterval    String   @default("month") @map("billing_interval")
+  /// GST rate as a fraction (0.10 = 10%). Australian GST. Stripe Tax computes
+  /// the actual tax on each invoice; this is stored for display and as the
+  /// documented rate on the tax-invoice, not to recompute tax in app code.
+  gstRate            Float    @default(0.10) @map("gst_rate")
+  /// The seller's ABN, printed on tax invoices (Stripe attaches it as the
+  /// business tax id). Nullable until the operating entity's ABN is set.
+  abn                String?
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("billing_settings")
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+/// Local read-model / cache of the Stripe invoices relevant to a company, kept
+/// in sync by the billing webhooks (Stripe remains the source of truth — this
+/// exists for fast admin/customer queries and an audit history without a live
+/// Stripe round-trip). Tenant data: RLS-scoped so a customer reads only its
+/// own invoices; the admin console (fleetos_admin, BYPASSRLS) reads across
+/// tenants; the webhook writer (fleetos_auth, BYPASSRLS) upserts them.
+model Invoice {
+  id               String        @id @default(uuid()) @db.Uuid
+  companyId        String        @map("company_id") @db.Uuid
+  /// Stripe invoice id (`in_...`) — unique, the upsert key for idempotent sync.
+  stripeInvoiceId  String        @unique @map("stripe_invoice_id")
+  /// Human-facing sequential number Stripe assigns once finalised (nullable
+  /// while draft).
+  number           String?
+  status           InvoiceStatus
+  /// Integer cents, matching Stripe's own money representation.
+  amountDueCents   Int           @map("amount_due_cents")
+  amountPaidCents  Int           @default(0) @map("amount_paid_cents")
+  /// GST portion of the invoice (Stripe `tax`), in cents.
+  taxCents         Int           @default(0) @map("tax_cents")
+  currency         String        @default("AUD")
+  /// The billing period this invoice covers.
+  periodStart      DateTime?     @map("period_start")
+  periodEnd        DateTime?     @map("period_end")
+  /// Stripe-hosted invoice page + PDF, surfaced to the customer and admin so
+  /// neither needs Stripe Dashboard access to see the actual document.
+  hostedInvoiceUrl String?       @map("hosted_invoice_url")
+  invoicePdfUrl    String?       @map("invoice_pdf_url")
+  issuedAt         DateTime?     @map("issued_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@map("invoices")
+}
+
+enum BillingAuditEventType {
+  /// A create was blocked because it would exceed the paid asset quantity.
+  CAP_BLOCKED
+  /// The paid asset quantity changed (up or down) — via customer or admin.
+  QUANTITY_CHANGED
+  /// A subscription lifecycle change applied from a Stripe webhook.
+  SUBSCRIPTION_SYNCED
+  /// A billing-relevant webhook event was received and processed.
+  WEBHOOK_RECEIVED
+  /// A FleetHQ staff admin performed a manual billing override.
+  MANUAL_OVERRIDE
+}
+
+/// Append-only evidence trail of billing-relevant events per company — the
+/// record to fall back on in a usage dispute or chargeback. Notably records
+/// every CAP_BLOCKED attempt (who tried to exceed their paid quantity and
+/// when) so the admin can spot a company repeatedly hitting its cap (a signal
+/// to upsell). Tenant data (RLS), but writes come from the privileged
+/// fleetos_auth / fleetos_admin roles (a cap-block write must survive the
+/// rollback of the tenant transaction whose create it rejected, so it is
+/// written on a separate connection, not inside that transaction).
+model BillingAuditLog {
+  id           String                @id @default(uuid()) @db.Uuid
+  companyId    String                @map("company_id") @db.Uuid
+  eventType    BillingAuditEventType @map("event_type")
+  /// The customer user who triggered it (e.g. tried to add the asset), if any.
+  actorUserId  String?               @map("actor_user_id") @db.Uuid
+  /// The FleetHQ staff admin who triggered it (manual override), if any.
+  actorAdminId String?               @map("actor_admin_id") @db.Uuid
+  /// Structured event detail (attempted count, paid quantity, Stripe event id,
+  /// old/new quantity, etc.). Free-form JSON so the shape can vary by event
+  /// type without a migration.
+  detail       Json                  @default("{}")
+  createdAt    DateTime              @default(now()) @map("created_at")
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, createdAt])
+  @@map("billing_audit_logs")
+}
+
 model Company {
   id                   String             @id @default(uuid()) @db.Uuid
   name                 String
@@ -139,6 +254,16 @@ model Company {
   /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
   /// of Stripe's own TRIALING status — this is FleetOS's native, no-card trial.
   trialEndsAt          DateTime?          @map("trial_ends_at")
+  /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
+  /// slots this company currently pays for — the Stripe subscription item
+  /// quantity on the per-asset price ($19 AUD/asset/month). This is the SOURCE
+  /// OF TRUTH for the hard asset cap: live assets (archived_at IS NULL) may
+  /// never exceed it. Kept in sync FROM Stripe by the subscription webhooks
+  /// (Stripe remains authoritative); it only ever increases via an explicit
+  /// upgrade action and only decreases via an explicit downgrade — never
+  /// implicitly when an asset is added or archived. `null` = the company is not
+  /// on the per-asset plan (still on the native trial or Free fallback).
+  assetQuantity        Int?               @map("asset_quantity")
   createdAt            DateTime           @default(now()) @map("created_at")
   updatedAt            DateTime           @updatedAt @map("updated_at")
   archivedAt           DateTime?          @map("archived_at")
@@ -187,6 +312,8 @@ model Company {
   checklistBundleItems         ChecklistBundleItem[]
   checklistTemplateAssignments ChecklistTemplateAssignment[]
   addressBooks                 AddressBook[]
+  invoices                     Invoice[]
+  billingAuditLogs             BillingAuditLog[]
   assetClasses                 AssetClass[]
   hiddenAssetClasses           HiddenAssetClass[]
   fuelEntries                  FuelEntry[]
@@ -590,17 +717,17 @@ model OAuthIdentity {
 /// assertion whose counter doesn't strictly increase indicates a cloned
 /// authenticator and is rejected (see WebauthnService).
 model WebauthnCredential {
-  id           String    @id @default(uuid()) @db.Uuid
-  userId       String    @map("user_id") @db.Uuid
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
   /// Base64url, per @simplewebauthn/server — unique across all users since a
   /// physical authenticator's credential id is globally unique by construction.
-  credentialId String    @unique @map("credential_id")
-  publicKey    Bytes     @map("public_key")
-  signCount    BigInt    @default(0) @map("sign_count")
-  transports   String[]  @default([])
-  deviceLabel  String?   @map("device_label")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  lastUsedAt   DateTime  @default(now()) @map("last_used_at")
+  credentialId String   @unique @map("credential_id")
+  publicKey    Bytes    @map("public_key")
+  signCount    BigInt   @default(0) @map("sign_count")
+  transports   String[] @default([])
+  deviceLabel  String?  @map("device_label")
+  createdAt    DateTime @default(now()) @map("created_at")
+  lastUsedAt   DateTime @default(now()) @map("last_used_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -925,13 +1052,13 @@ model MaintenanceScheduleTemplate {
 /// overdue/due-soon status — and the asset's health deduction — is derived at
 /// read time (never stored).
 model AssetMaintenancePlan {
-  id            String    @id @default(uuid()) @db.Uuid
-  companyId     String    @map("company_id") @db.Uuid
-  assetId       String    @map("asset_id") @db.Uuid
-  templateId    String?   @map("template_id") @db.Uuid
-  label         String
-  intervalDays  Int       @map("interval_days")
-  lastServiceAt DateTime? @map("last_service_at")
+  id               String    @id @default(uuid()) @db.Uuid
+  companyId        String    @map("company_id") @db.Uuid
+  assetId          String    @map("asset_id") @db.Uuid
+  templateId       String?   @map("template_id") @db.Uuid
+  label            String
+  intervalDays     Int       @map("interval_days")
+  lastServiceAt    DateTime? @map("last_service_at")
   /// Idempotency marks for the maintenance-due alert sweep (SchedulerService),
   /// mirroring ComplianceDocument.expiringAlertedAt / expiredAlertedAt. Set the
   /// first time a plan's derived next-due date crosses into the "due soon"
@@ -941,9 +1068,9 @@ model AssetMaintenancePlan {
   /// next service cycle starts a fresh alert lifecycle.
   dueAlertedAt     DateTime? @map("due_alerted_at")
   overdueAlertedAt DateTime? @map("overdue_alerted_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
-  archivedAt    DateTime? @map("archived_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  archivedAt       DateTime? @map("archived_at")
 
   company  Company                      @relation(fields: [companyId], references: [id])
   asset    Asset                        @relation(fields: [assetId], references: [id])
@@ -1734,8 +1861,8 @@ model AnalyticsSetting {
 /// the company), not the plain single-branch shape every other per-company
 /// settings table uses.
 model CompanySecuritySettings {
-  id        String   @id @default(uuid()) @db.Uuid
-  companyId String   @unique @map("company_id") @db.Uuid
+  id                 String   @id @default(uuid()) @db.Uuid
+  companyId          String   @unique @map("company_id") @db.Uuid
   /// Every member must have MFA (TOTP) enabled to finish a login. A verified
   /// WebAuthn/passkey assertion also satisfies this — see
   /// AuthService.completeWebauthnLogin's doc comment for why a passkey is

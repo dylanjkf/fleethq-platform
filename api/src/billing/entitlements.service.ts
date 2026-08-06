@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { FeatureKey, PlanTier, UNLIMITED_TIER, isTrialActive, resolvePlanTier } from './plans';
+import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, perAssetTier, resolvePlanTier } from './plans';
 
 export interface Entitlements {
   planKey: string;
@@ -51,6 +51,11 @@ export class EntitlementsService {
     };
   }
 
+  /** The Stripe Price id for the per-asset plan ($19 AUD/asset/month), if configured. */
+  private perAssetPriceId(): string | undefined {
+    return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+  }
+
   private toEntitlements(plan: PlanTier, trialEndsAt: Date | null, usage: { operators: number; assets: number }): Entitlements {
     const enforced = this.isEnforced();
     const effective = enforced ? plan : UNLIMITED_TIER;
@@ -84,11 +89,36 @@ export class EntitlementsService {
   private async resolve(tx: Prisma.TransactionClient, companyId: string): Promise<Entitlements> {
     const company = await tx.company.findUniqueOrThrow({
       where: { id: companyId },
-      select: { subscriptionStatus: true, planPriceId: true, trialEndsAt: true },
+      select: { subscriptionStatus: true, planPriceId: true, trialEndsAt: true, assetQuantity: true },
     });
-    const plan = resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
+    const plan = this.resolvePlan(company);
     const usage = await this.getUsage(tx);
     return this.toEntitlements(plan, company.trialEndsAt, usage);
+  }
+
+  /**
+   * Resolves the plan tier. Under the per-asset model (19-Billing/
+   * Per_Asset_Billing.md) an active subscription on the per-asset price yields
+   * a plan whose asset limit is the company's purchased `assetQuantity` — the
+   * hard cap moves only when quantity changes, never when an asset is added.
+   * Any other state falls through to the legacy tier resolution (trial / Free
+   * fallback still apply), so mixed/legacy tenants keep working.
+   */
+  private resolvePlan(company: {
+    subscriptionStatus: SubscriptionStatus;
+    planPriceId: string | null;
+    trialEndsAt: Date | null;
+    assetQuantity: number | null;
+  }): PlanTier {
+    const perAssetPriceId = this.perAssetPriceId();
+    if (
+      perAssetPriceId &&
+      company.planPriceId === perAssetPriceId &&
+      isSubscriptionActive(company.subscriptionStatus)
+    ) {
+      return perAssetTier(company.assetQuantity);
+    }
+    return resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
   }
 
   /**
