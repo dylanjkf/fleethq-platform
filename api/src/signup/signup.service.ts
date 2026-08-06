@@ -265,13 +265,19 @@ export class SignupService {
 
     const user = await this.systemPrisma.user.findUnique({
       where: { username: pending.adminEmail },
-      select: {
-        id: true,
-        tokenVersion: true,
-        memberships: { select: { id: true, companyId: true, company: { select: { name: true } } }, take: 1 },
-      },
+      select: { id: true, tokenVersion: true },
     });
-    const membership = user?.memberships[0];
+    // Memberships sit behind RLS; the privileged fleetos_auth role has no grant
+    // on company_memberships (by design). Resolve them the same way login does —
+    // the app role under a user-scoped context.
+    const membership = user
+      ? await this.prisma.withUser(user.id, (tx) =>
+          tx.companyMembership.findFirst({
+            where: { userId: user.id, archivedAt: null },
+            select: { id: true, companyId: true, company: { select: { name: true } } },
+          }),
+        )
+      : null;
     if (!user || !membership) {
       // COMPLETED but the admin isn't found — inconsistent; release the claim and report pending.
       await this.systemPrisma.pendingSignup.updateMany({ where: { id: pending.id }, data: { loginClaimedAt: null } });

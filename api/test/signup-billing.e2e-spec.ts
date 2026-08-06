@@ -1,0 +1,230 @@
+/**
+ * Per-asset billing + self-serve signup (19-Billing/Per_Asset_Billing.md,
+ * Self_Serve_Signup.md). Exercises the revenue/security-critical mechanics
+ * end-to-end against real Postgres:
+ *  - the hard asset cap = purchased quantity, enforced at the API (402),
+ *  - its race-safety under concurrent creates (the advisory-lock guarantee),
+ *  - the CAP_BLOCKED audit trail,
+ *  - idempotent, payment-first provisioning from a completed checkout, and the
+ *    single-use instant-login that lands the new admin straight in the app,
+ *  - the signup honeypot, and the abandoned-checkout expiry sweep.
+ *
+ * BILLING_ENFORCED + the per-asset price are set for this file only and torn
+ * down after, so they can't leak into suites that rely on the default
+ * permissive behaviour. Stripe itself is never called: provisioning is driven
+ * with a plain fake session/subscription (the webhook already verified them),
+ * and the best-effort Stripe metadata-tag/email are no-ops when unconfigured.
+ */
+import { randomUUID } from 'crypto';
+import { INestApplication } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+import request from 'supertest';
+import * as bcrypt from 'bcrypt';
+import { PERMISSIONS } from '../src/common/permissions/permission-catalog';
+import { SignupService } from '../src/signup/signup.service';
+import { buildTestApp } from './utils/build-test-app';
+import { TEST_PASSWORD, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
+
+const ownerPrisma = new PrismaClient();
+const PER_ASSET_PRICE = 'price_per_asset_test';
+
+describe('Per-asset billing + self-serve signup', () => {
+  let app: INestApplication;
+  let signup: SignupService;
+
+  beforeAll(async () => {
+    process.env.BILLING_ENFORCED = 'true';
+    process.env.STRIPE_PRICE_PER_ASSET = PER_ASSET_PRICE;
+    process.env.APP_BASE_URL = 'https://app.fleethq.test';
+    app = await buildTestApp();
+    signup = app.get(SignupService);
+    await ensureAssetClasses();
+    await ensurePermissions();
+  });
+
+  afterAll(async () => {
+    delete process.env.BILLING_ENFORCED;
+    delete process.env.STRIPE_PRICE_PER_ASSET;
+    delete process.env.APP_BASE_URL;
+    await app.close();
+    await disconnectFixtures();
+    await ownerPrisma.$disconnect();
+  });
+
+  async function login(username: string): Promise<string> {
+    const res = await request(app.getHttpServer()).post('/v1/auth/login').send({ username, password: TEST_PASSWORD }).expect(200);
+    return res.body.accessToken as string;
+  }
+
+  /** A company on the per-asset plan with `quantity` paid slots. */
+  async function perAssetCompany(quantity: number) {
+    const tenant = await createTestTenant([PERMISSIONS.ASSETS_CREATE, PERMISSIONS.ASSETS_VIEW]);
+    await ownerPrisma.company.update({
+      where: { id: tenant.companyId },
+      data: { subscriptionStatus: 'ACTIVE', planPriceId: PER_ASSET_PRICE, assetQuantity: quantity },
+    });
+    return tenant;
+  }
+
+  const postAsset = (token: string, name: string) =>
+    request(app.getHttpServer()).post('/v1/assets').set('Authorization', `Bearer ${token}`).send({ name });
+
+  describe('the hard asset cap is the purchased quantity', () => {
+    it('reports the per-asset plan and blocks the create past the paid quantity (402) + audits it', async () => {
+      const tenant = await perAssetCompany(2);
+      const token = await login(tenant.username);
+
+      const ent = await request(app.getHttpServer()).get('/v1/billing/entitlements').set('Authorization', `Bearer ${token}`).expect(200);
+      expect(ent.body).toMatchObject({ planKey: 'per_asset', enforced: true, assetQuantity: 2 });
+      expect(ent.body.limits.maxAssets).toBe(2);
+
+      await postAsset(token, 'Truck 1').expect(201);
+      await postAsset(token, 'Truck 2').expect(201);
+      const blocked = await postAsset(token, 'Truck 3 (over cap)').expect(402);
+      expect(blocked.body.error.code).toBe('PLAN_LIMIT_REACHED');
+      expect(blocked.body.error.resource).toBe('assets');
+      expect(blocked.body.error.limit).toBe(2);
+
+      const audits = await ownerPrisma.billingAuditLog.findMany({
+        where: { companyId: tenant.companyId, eventType: 'CAP_BLOCKED' },
+      });
+      expect(audits.length).toBeGreaterThanOrEqual(1);
+      expect(audits[0].detail).toMatchObject({ resource: 'assets', limit: 2, attempted: 3 });
+    });
+
+    it('is race-safe: three concurrent creates at the last slot yield exactly one success', async () => {
+      const tenant = await perAssetCompany(5);
+      const token = await login(tenant.username);
+      for (let i = 0; i < 4; i += 1) {
+        await postAsset(token, `Seed ${i}`).expect(201);
+      }
+
+      // Three creates fired together for the single remaining slot. The advisory
+      // lock must serialise them so only one commits.
+      const statuses = await Promise.all(
+        ['r1', 'r2', 'r3'].map((n) => postAsset(token, n).then((res) => res.status)),
+      );
+      expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+      expect(statuses.filter((s) => s === 402)).toHaveLength(2);
+
+      const live = await ownerPrisma.asset.count({ where: { companyId: tenant.companyId, archivedAt: null } });
+      expect(live).toBe(5); // never 6 or 7
+    });
+  });
+
+  describe('payment-first provisioning from a completed checkout', () => {
+    it('provisions exactly once (idempotent) and instant-login lands an authenticated session', async () => {
+      const suffix = randomUUID();
+      const sessionId = `cs_test_${suffix}`;
+      const email = `founder-${suffix}@example.com`;
+      const companyName = `Provisioned Co ${suffix}`;
+
+      // Stage the pending signup exactly as the public endpoint would (hashed password only).
+      await ownerPrisma.pendingSignup.create({
+        data: {
+          stripeCheckoutSessionId: sessionId,
+          companyName,
+          adminEmail: email,
+          adminName: 'Founder Person',
+          requestedQuantity: 3,
+          hashedPassword: await bcrypt.hash(TEST_PASSWORD, 10),
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      // Unique per run — stripeCustomerId/SubscriptionId are @unique, so reusing
+      // fixed ids would collide with a prior run's provisioned company.
+      const customerId = `cus_${suffix}`;
+      const subId = `sub_${suffix}`;
+      const itemId = `si_${suffix}`;
+      const session = { id: sessionId, customer: customerId, subscription: subId } as never;
+      const subscription = {
+        id: subId,
+        status: 'active',
+        items: { data: [{ id: itemId, quantity: 3, price: { id: PER_ASSET_PRICE } }] },
+        current_period_start: nowSec,
+        current_period_end: nowSec + 30 * 24 * 3600,
+      } as never;
+
+      // Deliver the webhook twice — Stripe redelivers; provisioning must be idempotent.
+      await signup.provisionFromCompletedCheckout(session, subscription);
+      await signup.provisionFromCompletedCheckout(session, subscription);
+
+      const companies = await ownerPrisma.company.findMany({ where: { name: companyName } });
+      expect(companies).toHaveLength(1);
+      expect(companies[0]).toMatchObject({
+        subscriptionStatus: 'ACTIVE',
+        planPriceId: PER_ASSET_PRICE,
+        assetQuantity: 3,
+        stripeCustomerId: customerId,
+        stripeSubscriptionId: subId,
+        stripeSubscriptionItemId: itemId,
+      });
+      const users = await ownerPrisma.user.findMany({ where: { username: email } });
+      expect(users).toHaveLength(1); // one admin, not two
+
+      // Instant login: the success page's poll mints a working session.
+      const status = await signup.getSignupStatus(sessionId, {});
+      expect(status.status).toBe('completed');
+      const accessToken = 'accessToken' in status ? status.accessToken : undefined;
+      expect(accessToken).toBeTruthy();
+      const me = await request(app.getHttpServer())
+        .get('/v1/billing/entitlements')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+      expect(me.body).toMatchObject({ planKey: 'per_asset', assetQuantity: 3 });
+
+      // The login mint is single-use — a replay of the (browser-visible) session id can't re-login.
+      const again = await signup.getSignupStatus(sessionId, {});
+      expect(again).toMatchObject({ status: 'completed', alreadyClaimed: true });
+
+      // SIGNUP_COMPLETED was audited against the new company.
+      const audit = await ownerPrisma.billingAuditLog.findFirst({
+        where: { companyId: companies[0].id, eventType: 'SIGNUP_COMPLETED' },
+      });
+      expect(audit).toBeTruthy();
+    });
+  });
+
+  describe('signup endpoint guards', () => {
+    it('rejects a filled honeypot without starting a checkout', async () => {
+      await request(app.getHttpServer())
+        .post('/v1/signup')
+        .send({
+          companyName: 'Spammer Pty',
+          adminName: 'Bot',
+          adminEmail: `bot-${randomUUID()}@example.com`,
+          adminPassword: 'password123',
+          quantity: 1,
+          acceptedTerms: true,
+          website: 'http://spam.example', // honeypot — real users never fill this
+        })
+        .expect(400);
+    });
+  });
+
+  describe('abandoned checkout cleanup', () => {
+    it('expires stale PENDING signups past their TTL', async () => {
+      const suffix = randomUUID();
+      const sessionId = `cs_stale_${suffix}`;
+      await ownerPrisma.pendingSignup.create({
+        data: {
+          stripeCheckoutSessionId: sessionId,
+          companyName: 'Abandoned Co',
+          adminEmail: `stale-${suffix}@example.com`,
+          adminName: 'Gone',
+          requestedQuantity: 1,
+          hashedPassword: 'x',
+          status: 'PENDING',
+          expiresAt: new Date(Date.now() - 1_000), // already expired
+        },
+      });
+
+      const expired = await signup.expireStalePendingSignups();
+      expect(expired).toBeGreaterThanOrEqual(1);
+      const row = await ownerPrisma.pendingSignup.findUnique({ where: { stripeCheckoutSessionId: sessionId } });
+      expect(row?.status).toBe('EXPIRED');
+    });
+  });
+});
