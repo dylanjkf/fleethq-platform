@@ -303,4 +303,89 @@ export class SignupService {
     if (result.count > 0) this.logger.log(`Expired ${result.count} stale pending signup(s).`);
     return result.count;
   }
+
+  /**
+   * Reconciliation safety net for the worst failure mode a payment-first signup
+   * can have: the customer paid, but the `checkout.session.completed` webhook
+   * never arrived (or kept failing), leaving them charged with no account. Finds
+   * PENDING signups past a short grace window, consults Stripe's authoritative
+   * Checkout Session state, and either:
+   *  - re-drives the idempotent provisioning when the session is actually
+   *    paid + complete (recovering a missed/failed webhook), or
+   *  - raises a staff-actionable SIGNUP_PROVISION_FAILED audit alert (deduped
+   *    per session) when provisioning still fails.
+   *
+   * Unpaid/expired sessions are genuine abandonment and left to the expiry
+   * sweep. Cross-tenant with no company context, so it runs via the privileged
+   * client. No-op when Stripe isn't configured; the batch is bounded so a
+   * backlog can't stall the sweep.
+   */
+  async reconcileStuckSignups(now: Date = new Date()): Promise<{ checked: number; recovered: number; failed: number }> {
+    if (!this.billing.isConfigured()) return { checked: 0, recovered: 0, failed: 0 };
+    const graceMs = Number(this.config.get<string>('SIGNUP_RECONCILE_GRACE_MS')) || 10 * 60 * 1000;
+    const cutoff = new Date(now.getTime() - graceMs);
+    const candidates = await this.systemPrisma.pendingSignup.findMany({
+      where: { status: 'PENDING', createdAt: { lt: cutoff } },
+      orderBy: { createdAt: 'asc' },
+      take: 50,
+    });
+    if (candidates.length === 0) return { checked: 0, recovered: 0, failed: 0 };
+
+    const stripe = this.billing.getStripeClient();
+    let recovered = 0;
+    let failed = 0;
+    for (const pending of candidates) {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(pending.stripeCheckoutSessionId);
+        // Only a paid + complete session represents money actually taken.
+        if (session.payment_status !== 'paid' || session.status !== 'complete' || !session.subscription) continue;
+        const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
+        await this.provisionFromCompletedCheckout(session, subscription);
+        recovered += 1;
+        this.logger.log(`Reconciliation recovered a stuck signup (session ${pending.stripeCheckoutSessionId}).`);
+      } catch (err) {
+        failed += 1;
+        await this.raiseProvisionFailedAlert(pending, err);
+      }
+    }
+    if (recovered > 0 || failed > 0) {
+      this.logger.log(`Signup reconciliation: ${candidates.length} checked, ${recovered} recovered, ${failed} still failing.`);
+    }
+    return { checked: candidates.length, recovered, failed };
+  }
+
+  /**
+   * Raise a staff-actionable alert that a paid signup couldn't be provisioned.
+   * The channel is the billing audit log (companyId null — no company exists) —
+   * the same append-only trail staff already browse — plus an error-level log
+   * line (Sentry-captured where configured). Deduped per session so a persistently
+   * failing signup alerts once, not once per sweep.
+   */
+  private async raiseProvisionFailedAlert(
+    pending: { id: string; stripeCheckoutSessionId: string; adminEmail: string; companyName: string },
+    err: unknown,
+  ): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    this.logger.error(
+      `STUCK SIGNUP: paid checkout ${pending.stripeCheckoutSessionId} (${pending.adminEmail}) failed to provision — ${message}`,
+    );
+    const existing = await this.systemPrisma.billingAuditLog.findFirst({
+      where: { eventType: 'SIGNUP_PROVISION_FAILED', detail: { path: ['sessionId'], equals: pending.stripeCheckoutSessionId } },
+      select: { id: true },
+    });
+    if (existing) return;
+    await this.systemPrisma.billingAuditLog.create({
+      data: {
+        companyId: null,
+        eventType: 'SIGNUP_PROVISION_FAILED',
+        detail: {
+          sessionId: pending.stripeCheckoutSessionId,
+          pendingSignupId: pending.id,
+          email: pending.adminEmail,
+          companyName: pending.companyName,
+          error: message,
+        },
+      },
+    });
+  }
 }

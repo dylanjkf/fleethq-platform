@@ -22,6 +22,7 @@ import request from 'supertest';
 import * as bcrypt from 'bcrypt';
 import { PERMISSIONS } from '../src/common/permissions/permission-catalog';
 import { SignupService } from '../src/signup/signup.service';
+import { BillingService } from '../src/billing/billing.service';
 import { buildTestApp } from './utils/build-test-app';
 import { TEST_PASSWORD, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
 
@@ -31,6 +32,7 @@ const PER_ASSET_PRICE = 'price_per_asset_test';
 describe('Per-asset billing + self-serve signup', () => {
   let app: INestApplication;
   let signup: SignupService;
+  let billing: BillingService;
 
   beforeAll(async () => {
     process.env.BILLING_ENFORCED = 'true';
@@ -38,6 +40,7 @@ describe('Per-asset billing + self-serve signup', () => {
     process.env.APP_BASE_URL = 'https://app.fleethq.test';
     app = await buildTestApp();
     signup = app.get(SignupService);
+    billing = app.get(BillingService);
     await ensureAssetClasses();
     await ensurePermissions();
   });
@@ -225,6 +228,123 @@ describe('Per-asset billing + self-serve signup', () => {
       expect(expired).toBeGreaterThanOrEqual(1);
       const row = await ownerPrisma.pendingSignup.findUnique({ where: { stripeCheckoutSessionId: sessionId } });
       expect(row?.status).toBe('EXPIRED');
+    });
+  });
+
+  describe('reconciliation of paid-but-unprovisioned signups', () => {
+    // Clear any leftover PENDING rows (from earlier suites/runs) so the bounded
+    // reconcile batch is exercised on exactly the rows each test stages.
+    beforeAll(async () => {
+      await ownerPrisma.pendingSignup.deleteMany({ where: { status: 'PENDING' } });
+    });
+
+    /**
+     * A fake Stripe client whose Checkout Session lookup reports `paid + complete`
+     * only for `paidSessionId` (any other id looks abandoned, so reconcile skips
+     * it) and whose subscription lookup returns a per-asset subscription.
+     */
+    function fakeStripe(paidSessionId: string, subId: string, customerId: string, itemId: string, quantity: number) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      return {
+        checkout: {
+          sessions: {
+            retrieve: async (id: string) =>
+              id === paidSessionId
+                ? { id, payment_status: 'paid', status: 'complete', customer: customerId, subscription: subId }
+                : { id, payment_status: 'unpaid', status: 'open', customer: null, subscription: null },
+          },
+        },
+        subscriptions: {
+          retrieve: async () => ({
+            id: subId,
+            status: 'active',
+            items: { data: [{ id: itemId, quantity, price: { id: PER_ASSET_PRICE } }] },
+            current_period_start: nowSec,
+            current_period_end: nowSec + 30 * 24 * 3600,
+          }),
+        },
+      } as never;
+    }
+
+    it('recovers a stuck paid signup by re-driving provisioning (missed webhook)', async () => {
+      const suffix = randomUUID();
+      const sessionId = `cs_stuck_${suffix}`;
+      const email = `stuck-${suffix}@example.com`;
+      const companyName = `Recovered Co ${suffix}`;
+      const customerId = `cus_rec_${suffix}`;
+      const subId = `sub_rec_${suffix}`;
+      const itemId = `si_rec_${suffix}`;
+
+      await ownerPrisma.pendingSignup.create({
+        data: {
+          stripeCheckoutSessionId: sessionId,
+          companyName,
+          adminEmail: email,
+          adminName: 'Stuck Founder',
+          requestedQuantity: 2,
+          hashedPassword: await bcrypt.hash(TEST_PASSWORD, 10),
+          status: 'PENDING',
+          createdAt: new Date(Date.now() - 20 * 60 * 1000), // older than the 10-min grace
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+
+      const cfg = jest.spyOn(billing, 'isConfigured').mockReturnValue(true);
+      const client = jest.spyOn(billing, 'getStripeClient').mockReturnValue(fakeStripe(sessionId, subId, customerId, itemId, 2));
+      try {
+        const result = await signup.reconcileStuckSignups();
+        expect(result.recovered).toBeGreaterThanOrEqual(1);
+      } finally {
+        cfg.mockRestore();
+        client.mockRestore();
+      }
+
+      const companies = await ownerPrisma.company.findMany({ where: { name: companyName } });
+      expect(companies).toHaveLength(1);
+      expect(companies[0]).toMatchObject({ planPriceId: PER_ASSET_PRICE, assetQuantity: 2, stripeSubscriptionId: subId });
+      const row = await ownerPrisma.pendingSignup.findUnique({ where: { stripeCheckoutSessionId: sessionId } });
+      expect(row?.status).toBe('COMPLETED');
+    });
+
+    it('raises exactly one SIGNUP_PROVISION_FAILED alert when provisioning keeps failing', async () => {
+      const suffix = randomUUID();
+      const sessionId = `cs_fail_${suffix}`;
+      const email = `fail-${suffix}@example.com`;
+
+      await ownerPrisma.pendingSignup.create({
+        data: {
+          stripeCheckoutSessionId: sessionId,
+          companyName: `Doomed Co ${suffix}`,
+          adminEmail: email,
+          adminName: 'Doomed',
+          requestedQuantity: 1,
+          hashedPassword: 'x',
+          status: 'PENDING',
+          createdAt: new Date(Date.now() - 20 * 60 * 1000),
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+
+      const cfg = jest.spyOn(billing, 'isConfigured').mockReturnValue(true);
+      const client = jest
+        .spyOn(billing, 'getStripeClient')
+        .mockReturnValue(fakeStripe(sessionId, `sub_x_${suffix}`, `cus_x_${suffix}`, `si_x_${suffix}`, 1));
+      const prov = jest.spyOn(signup, 'provisionFromCompletedCheckout').mockRejectedValue(new Error('db exploded'));
+      try {
+        await signup.reconcileStuckSignups();
+        await signup.reconcileStuckSignups(); // a second sweep must not double-alert
+      } finally {
+        cfg.mockRestore();
+        client.mockRestore();
+        prov.mockRestore();
+      }
+
+      const alerts = await ownerPrisma.billingAuditLog.findMany({
+        where: { eventType: 'SIGNUP_PROVISION_FAILED', detail: { path: ['sessionId'], equals: sessionId } },
+      });
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].companyId).toBeNull();
+      expect(alerts[0].detail).toMatchObject({ email, error: 'db exploded' });
     });
   });
 });
