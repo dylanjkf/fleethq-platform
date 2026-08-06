@@ -153,13 +153,17 @@ export class BillingService {
           subscriptionStatus: true,
           planPriceId: true,
           stripeCustomerId: true,
+          stripeSubscriptionId: true,
           trialEndsAt: true,
+          assetQuantity: true,
           paymentFailureCount: true,
           lastPaymentFailedAt: true,
           nextPaymentAttemptAt: true,
         },
       }),
     );
+    const perAssetPriceId = this.perAssetPriceId();
+    const onPerAsset = !!perAssetPriceId && company.planPriceId === perAssetPriceId;
     return {
       subscriptionStatus: company.subscriptionStatus,
       planPriceId: company.planPriceId,
@@ -170,6 +174,11 @@ export class BillingService {
       paymentFailureCount: company.paymentFailureCount,
       lastPaymentFailedAt: company.lastPaymentFailedAt ? company.lastPaymentFailedAt.toISOString() : null,
       nextPaymentAttemptAt: company.nextPaymentAttemptAt ? company.nextPaymentAttemptAt.toISOString() : null,
+      // Per-asset billing: whether the company is on the per-asset plan and how
+      // many asset slots it currently pays for (the hard cap). Null quantity when
+      // not on the per-asset plan.
+      onPerAssetPlan: onPerAsset,
+      assetQuantity: onPerAsset ? company.assetQuantity : null,
     };
   }
 
