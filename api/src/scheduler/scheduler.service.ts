@@ -23,6 +23,7 @@ const UTILISATION_SNAPSHOT_TASK = 'utilisation_snapshot';
 const INTEGRATION_SYNC_TASK = 'integration_scheduled_sync';
 const INTEGRATION_DEAD_LETTER_RETRY_TASK = 'integration_dead_letter_retry';
 const SIGNUP_EXPIRY_TASK = 'signup_pending_expiry';
+const SIGNUP_RECONCILE_TASK = 'signup_reconcile';
 
 /**
  * Dependency-free background scheduler. Deliberately not `@nestjs/schedule`
@@ -89,6 +90,11 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     // TTL itself is measured in hours, and expiry is just housekeeping so stale
     // rows don't accumulate and a re-signup with the same email isn't blocked.
     const signupExpiryIntervalMs = Number(this.config.get<string>('SCHEDULER_SIGNUP_EXPIRY_INTERVAL_MS')) || HOUR_MS;
+    // Recovery net for a paid checkout whose provisioning webhook was missed or
+    // kept failing (customer charged, no account). Runs more often than expiry —
+    // a stuck paid signup is a live customer waiting to get in — but not so often
+    // it hammers Stripe: every 15 minutes by default.
+    const signupReconcileIntervalMs = Number(this.config.get<string>('SCHEDULER_SIGNUP_RECONCILE_INTERVAL_MS')) || 15 * 60_000;
     this.logger.log(
       `Scheduler enabled — notification digest every ${Math.round(digestIntervalMs / 60000)} min, ` +
         `compliance-expiry sweep every ${Math.round(complianceIntervalMs / 60000)} min, ` +
@@ -99,7 +105,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         `utilisation snapshot every ${Math.round(utilisationIntervalMs / 60000)} min, ` +
         `integration sync every ${Math.round(integrationSyncIntervalMs / 60000)} min, ` +
         `integration dead-letter retry every ${Math.round(integrationDeadLetterIntervalMs / 60000)} min, ` +
-        `pending-signup expiry every ${Math.round(signupExpiryIntervalMs / 60000)} min (leader-elected).`,
+        `pending-signup expiry every ${Math.round(signupExpiryIntervalMs / 60000)} min, ` +
+        `signup reconciliation every ${Math.round(signupReconcileIntervalMs / 60000)} min (leader-elected).`,
     );
     this.timers.push(this.scheduleTask(DIGEST_TASK, digestIntervalMs, () => this.runNotificationDigests()));
     this.timers.push(this.scheduleTask(COMPLIANCE_SWEEP_TASK, complianceIntervalMs, () => this.runComplianceExpirySweeps()));
@@ -111,6 +118,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     this.timers.push(this.scheduleTask(INTEGRATION_SYNC_TASK, integrationSyncIntervalMs, () => this.runIntegrationScheduledSyncs()));
     this.timers.push(this.scheduleTask(INTEGRATION_DEAD_LETTER_RETRY_TASK, integrationDeadLetterIntervalMs, () => this.runIntegrationDeadLetterRetries()));
     this.timers.push(this.scheduleTask(SIGNUP_EXPIRY_TASK, signupExpiryIntervalMs, () => this.runPendingSignupExpiry()));
+    this.timers.push(this.scheduleTask(SIGNUP_RECONCILE_TASK, signupReconcileIntervalMs, () => this.runSignupReconciliation()));
   }
 
   /**
@@ -330,5 +338,15 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   async runPendingSignupExpiry(): Promise<{ expired: number }> {
     const expired = await this.signup.expireStalePendingSignups();
     return { expired };
+  }
+
+  /**
+   * Recover paid-but-unprovisioned signups (a missed/failed provisioning webhook
+   * left a paying customer with no account) and raise a staff alert for any that
+   * still can't be provisioned. Single cross-tenant sweep via the signup service;
+   * a no-op when Stripe isn't configured.
+   */
+  async runSignupReconciliation(): Promise<{ checked: number; recovered: number; failed: number }> {
+    return this.signup.reconcileStuckSignups();
   }
 }

@@ -143,6 +143,9 @@ enum BillingAuditEventType {
   PAYMENT_FAILED
   /// A subscription was canceled (by the customer, admin, or Stripe).
   SUBSCRIPTION_CANCELED
+  /// A paid signup could not be provisioned into a company after retries —
+  /// a staff-actionable alert (customer was charged but has no account yet).
+  SIGNUP_PROVISION_FAILED
 }
 
 /// Append-only evidence trail of billing-relevant events per company — the
