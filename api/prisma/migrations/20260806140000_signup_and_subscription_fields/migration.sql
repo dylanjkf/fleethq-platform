@@ -34,6 +34,7 @@ CREATE TABLE "pending_signups" (
     "requested_quantity" INTEGER NOT NULL,
     "hashed_password" TEXT,
     "status" "PendingSignupStatus" NOT NULL DEFAULT 'PENDING',
+    "login_claimed_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "expires_at" TIMESTAMP(3) NOT NULL,
 

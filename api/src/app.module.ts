@@ -46,6 +46,7 @@ import { PredictiveMaintenanceModule } from './predictive-maintenance/predictive
 import { OperationalRecommendationsModule } from './operational-recommendations/operational-recommendations.module';
 import { PartsModule } from './parts/parts.module';
 import { BillingModule } from './billing/billing.module';
+import { SignupModule } from './signup/signup.module';
 import { FuelModule } from './fuel/fuel.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { HealthModule } from './health/health.module';
@@ -187,6 +188,7 @@ import { validateEnv } from './config/env.validation';
     OperationalRecommendationsModule,
     PartsModule,
     BillingModule,
+    SignupModule,
     FuelModule,
     SchedulerModule,
     HealthModule,

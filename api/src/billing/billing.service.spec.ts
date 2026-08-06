@@ -30,7 +30,8 @@ describe('BillingService — GST tax invoicing (Stripe mocked)', () => {
     };
     const notifications = {};
     const billingMail = {};
-    const service = new BillingService(prisma as never, systemPrisma as never, config as never, notifications as never, billingMail as never);
+    const signup = { provisionFromCompletedCheckout: jest.fn().mockResolvedValue(undefined) };
+    const service = new BillingService(prisma as never, systemPrisma as never, config as never, notifications as never, billingMail as never, signup as never);
 
     const stripe = {
       customers: { create: jest.fn().mockResolvedValue({ id: 'cus_new' }) },
@@ -89,7 +90,7 @@ describe('BillingService — checkout integrity (audit remediation)', () => {
       get: (key: string) =>
         key === 'STRIPE_SECRET_KEY' ? 'sk_test_fake' : key === 'STRIPE_PRICE_STARTER' ? 'price_configured' : undefined,
     };
-    const service = new BillingService(prisma as never, systemPrisma as never, config as never, {} as never, {} as never);
+    const service = new BillingService(prisma as never, systemPrisma as never, config as never, {} as never, {} as never, {} as never);
     const stripe = {
       customers: { create: jest.fn().mockResolvedValue({ id: 'cus_new' }) },
       checkout: { sessions: { create: jest.fn().mockResolvedValue({ url: 'https://checkout.stripe.example/cs_1' }) } },
@@ -132,7 +133,7 @@ describe('BillingService — billing portal allowlist (audit remediation)', () =
         return base[key];
       },
     };
-    const service = new BillingService(prisma as never, {} as never, config as never, {} as never, {} as never);
+    const service = new BillingService(prisma as never, {} as never, config as never, {} as never, {} as never, {} as never);
     const stripe = {
       prices: { retrieve: jest.fn().mockResolvedValue({ id: 'price_1', product: 'prod_1' }) },
       billingPortal: {
@@ -207,7 +208,7 @@ describe('BillingService — native trial-ending reminder (audit remediation)', 
       getPermissionHolders: jest.fn().mockResolvedValue([{ id: 'u1', fullName: 'Ada', email: 'ada@example.com' }]),
     };
     const billingMail = { sendTrialEndingReminder: jest.fn().mockResolvedValue(undefined) };
-    const service = new BillingService(prisma as never, {} as never, {} as never, notifications as never, billingMail as never);
+    const service = new BillingService(prisma as never, {} as never, {} as never, notifications as never, billingMail as never, {} as never);
     return { service, tx, notifications, billingMail };
   }
 
@@ -266,7 +267,8 @@ describe('BillingService — chargeback webhook (audit remediation)', () => {
       getPermissionHolders: jest.fn().mockResolvedValue([{ id: 'u1', fullName: 'Ada', email: 'ada@example.com' }]),
     };
     const billingMail = { sendDisputeCreated: jest.fn().mockResolvedValue(undefined) };
-    const service = new BillingService(prisma as never, systemPrisma as never, config as never, notifications as never, billingMail as never);
+    const signup = { provisionFromCompletedCheckout: jest.fn().mockResolvedValue(undefined) };
+    const service = new BillingService(prisma as never, systemPrisma as never, config as never, notifications as never, billingMail as never, signup as never);
     const stripe = {
       webhooks: { constructEvent: jest.fn() },
       charges: { retrieve: jest.fn().mockResolvedValue({ id: 'ch_1', metadata: { fleetosCompanyId: 'company-1' } }) },
