@@ -1,7 +1,8 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, perAssetTier, resolvePlanTier } from './plans';
 
 export interface Entitlements {
@@ -34,9 +35,12 @@ export interface Entitlements {
  */
 @Injectable()
 export class EntitlementsService {
+  private readonly logger = new Logger(EntitlementsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly systemPrisma: SystemPrismaService,
   ) {}
 
   private isEnforced(): boolean {
@@ -145,6 +149,29 @@ export class EntitlementsService {
       ? await tx.operator.count({ where: { archivedAt: null } })
       : await tx.asset.count({ where: { archivedAt: null } });
     if (current >= limit) {
+      // Record the blocked attempt on a SEPARATE connection before throwing:
+      // this HttpException rolls back `tx` (the create transaction), so an audit
+      // write on `tx` would vanish with it. SystemPrismaService (fleetos_auth,
+      // autocommit) persists it regardless. Best-effort — a failed audit write
+      // must never turn a clean 402 into a 500. This is the signal the admin
+      // console surfaces as "company repeatedly hitting its cap → upsell".
+      try {
+        await this.systemPrisma.billingAuditLog.create({
+          data: {
+            companyId,
+            eventType: 'CAP_BLOCKED',
+            detail: {
+              resource,
+              attempted: current + 1,
+              limit,
+              planKey: entitlements.planKey,
+            },
+          },
+        });
+      } catch (err) {
+        this.logger.warn(`Could not record CAP_BLOCKED audit for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       throw new HttpException(
         {
           code: 'PLAN_LIMIT_REACHED',
