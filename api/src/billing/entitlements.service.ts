@@ -23,6 +23,23 @@ export interface Entitlements {
   trialEndsAt: string | null;
   trialActive: boolean;
   trialDaysLeft: number | null;
+  /**
+   * Per-asset billing: the purchased Stripe quantity (the hard asset cap), or
+   * null when the company isn't on the per-asset plan. Distinct from
+   * `limits.maxAssets` (which is null=unlimited when enforcement is off) — this
+   * is the true paid count regardless of `enforced`, so the UI can always show
+   * "7 of 10 paid asset slots used" and a "buy more" affordance.
+   */
+  assetQuantity: number | null;
+  /**
+   * Payment-failure read-only state: true when enforcement is on and the
+   * company's paid subscription has exhausted its dunning retries (past due with
+   * no next attempt scheduled). The client uses this to show a prominent
+   * "billing action required — your fleet is read-only" banner and disable write
+   * actions; the server-side write block is applied separately at the guard
+   * layer. Never true while enforcement is off, so dev/CI/pilot are unaffected.
+   */
+  billingReadOnly: boolean;
 }
 
 /**
@@ -60,7 +77,34 @@ export class EntitlementsService {
     return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
 
-  private toEntitlements(plan: PlanTier, trialEndsAt: Date | null, usage: { operators: number; assets: number }): Entitlements {
+  /**
+   * Payment-failure read-only predicate: enforcement on, the company actually
+   * has a Stripe subscription, and its dunning retries are exhausted (past due
+   * with no next payment attempt after at least one failure). Voluntary states
+   * (a never-subscribed Free company, an active trial) are never read-only —
+   * only a paid subscription that has stopped paying.
+   */
+  private computeBillingReadOnly(company: {
+    subscriptionStatus: SubscriptionStatus;
+    stripeSubscriptionId: string | null;
+    nextPaymentAttemptAt: Date | null;
+    paymentFailureCount: number;
+  }): boolean {
+    if (!this.isEnforced()) return false;
+    if (!company.stripeSubscriptionId) return false;
+    return (
+      company.subscriptionStatus === SubscriptionStatus.PAST_DUE &&
+      company.nextPaymentAttemptAt == null &&
+      company.paymentFailureCount > 0
+    );
+  }
+
+  private toEntitlements(
+    plan: PlanTier,
+    trialEndsAt: Date | null,
+    usage: { operators: number; assets: number },
+    context: { assetQuantity: number | null; billingReadOnly: boolean },
+  ): Entitlements {
     const enforced = this.isEnforced();
     const effective = enforced ? plan : UNLIMITED_TIER;
     const trialActive = isTrialActive(trialEndsAt);
@@ -75,6 +119,8 @@ export class EntitlementsService {
       trialEndsAt: trialEndsAt ? trialEndsAt.toISOString() : null,
       trialActive,
       trialDaysLeft,
+      assetQuantity: context.assetQuantity,
+      billingReadOnly: context.billingReadOnly,
     };
   }
 
@@ -93,11 +139,22 @@ export class EntitlementsService {
   private async resolve(tx: Prisma.TransactionClient, companyId: string): Promise<Entitlements> {
     const company = await tx.company.findUniqueOrThrow({
       where: { id: companyId },
-      select: { subscriptionStatus: true, planPriceId: true, trialEndsAt: true, assetQuantity: true },
+      select: {
+        subscriptionStatus: true,
+        planPriceId: true,
+        trialEndsAt: true,
+        assetQuantity: true,
+        stripeSubscriptionId: true,
+        nextPaymentAttemptAt: true,
+        paymentFailureCount: true,
+      },
     });
     const plan = this.resolvePlan(company);
     const usage = await this.getUsage(tx);
-    return this.toEntitlements(plan, company.trialEndsAt, usage);
+    return this.toEntitlements(plan, company.trialEndsAt, usage, {
+      assetQuantity: company.assetQuantity,
+      billingReadOnly: this.computeBillingReadOnly(company),
+    });
   }
 
   /**
