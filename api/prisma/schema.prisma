@@ -203,6 +203,11 @@ model PendingSignup {
   /// to the real user row at provisioning, then this row is marked COMPLETED.
   hashedPassword          String?             @map("hashed_password")
   status                  PendingSignupStatus @default(PENDING)
+  /// Set the first time the success-page poll mints a login session for the new
+  /// admin — makes that mint single-use, so the (browser-visible) Checkout
+  /// session id can't be replayed to log in again. Later polls are told to sign
+  /// in normally instead.
+  loginClaimedAt          DateTime?           @map("login_claimed_at")
   createdAt               DateTime            @default(now()) @map("created_at")
   expiresAt               DateTime            @map("expires_at")
 

@@ -40,8 +40,15 @@ export interface ProvisionCompanyInput {
   companyName: string;
   jurisdiction?: string;
   adminUsername: string;
-  /** Plaintext — hashed here so callers never handle a raw password beyond this call. */
-  adminPassword: string;
+  /**
+   * Plaintext — hashed here so callers never handle a raw password beyond this
+   * call. Optional: the self-serve signup flow hashes at intake (so plaintext
+   * never persists in the pending_signups staging row) and passes the hash via
+   * `adminPasswordHash` instead. Exactly one of the two must be provided.
+   */
+  adminPassword?: string;
+  /** Pre-computed bcrypt hash, used instead of `adminPassword` (see above). */
+  adminPasswordHash?: string;
   adminFullName: string;
   /** Optional contact email for the first admin — the target for a verification link. */
   adminEmail?: string;
@@ -140,13 +147,17 @@ export async function provisionCompany(
   // perfectly legitimate. `createMany` has no RETURNING, so it sidesteps the
   // check entirely — found by actually running this against real Postgres,
   // not by inspection.
+  const passwordHash = input.adminPasswordHash ?? (input.adminPassword ? await bcrypt.hash(input.adminPassword, 10) : null);
+  if (!passwordHash) {
+    throw new Error('provisionCompany requires either adminPassword or adminPasswordHash.');
+  }
   const adminUserId = randomUUID();
   await tx.user.createMany({
     data: [
       {
         id: adminUserId,
         username: input.adminUsername,
-        passwordHash: await bcrypt.hash(input.adminPassword, 10),
+        passwordHash,
         fullName: input.adminFullName,
         email: input.adminEmail ?? null,
         mustChangePassword: input.adminMustChangePassword ?? false,

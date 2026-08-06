@@ -2,7 +2,7 @@
 // Pre-existing oversized service (predates this security port; not modified by
 // it). Grandfathered to keep the max-lines rule active for the rest of the repo;
 // a proper split is tracked as separate follow-up work.
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { InvoiceStatus, Prisma, SubscriptionStatus } from '@prisma/client';
@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
+import { SignupService } from '../signup/signup.service';
 import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isSubscriptionActive, isTrialActive } from './plans';
 
@@ -60,6 +61,11 @@ export class BillingService {
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
     private readonly billingMail: BillingMailService,
+    // forwardRef: the signup checkout is created via BillingService (Stripe
+    // client + settings) while the completed-checkout webhook provisions via
+    // SignupService — a genuine two-way dependency that Nest resolves lazily.
+    @Inject(forwardRef(() => SignupService))
+    private readonly signup: SignupService,
   ) {}
 
   isConfigured(): boolean {
@@ -921,10 +927,18 @@ export class BillingService {
   }
 
   private async handleCheckoutSessionCompleted(stripe: Stripe, session: Stripe.Checkout.Session, eventCreatedAt: Date): Promise<void> {
-    const companyId = session.client_reference_id;
-    if (!companyId || !session.customer || !session.subscription) return;
+    if (!session.customer || !session.subscription) return;
     const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
-    await this.syncSubscription(companyId, session.customer as string, subscription, eventCreatedAt);
+    // An existing company subscribing/upgrading sets client_reference_id to its
+    // own id → sync onto it. A self-serve signup has no company yet (client_
+    // reference_id is unset); provisioning creates the company from the matching
+    // pending_signups row, keyed on the session id, and is idempotent (a no-op if
+    // this isn't a signup session or was already provisioned).
+    if (session.client_reference_id) {
+      await this.syncSubscription(session.client_reference_id, session.customer as string, subscription, eventCreatedAt);
+      return;
+    }
+    await this.signup.provisionFromCompletedCheckout(session, subscription);
   }
 
   private async handleSubscriptionEvent(subscription: Stripe.Subscription, eventCreatedAt: Date): Promise<void> {
@@ -1174,7 +1188,7 @@ function mapInvoiceStatus(status: Stripe.Invoice.Status | null): InvoiceStatus {
   }
 }
 
-function mapStripeStatus(status: Stripe.Subscription.Status): SubscriptionStatus {
+export function mapStripeStatus(status: Stripe.Subscription.Status): SubscriptionStatus {
   switch (status) {
     case 'trialing':
       return SubscriptionStatus.TRIALING;
