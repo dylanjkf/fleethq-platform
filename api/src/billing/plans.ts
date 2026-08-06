@@ -68,13 +68,36 @@ export const PAID_TIERS: Record<string, PlanTier> = {
   STRIPE_PRICE_ENTERPRISE: { key: 'enterprise', name: 'Enterprise', features: ['core', 'forms', 'intelligence', 'warehouse'], limits: { maxOperators: null, maxAssets: null } },
 };
 
-const ACTIVE_STATUSES: SubscriptionStatus[] = [
+export const ACTIVE_STATUSES: SubscriptionStatus[] = [
   SubscriptionStatus.ACTIVE,
   SubscriptionStatus.TRIALING,
   // Still entitled during the dunning grace window — losing access the instant a
   // card fails would punish the customer for a transient payment hiccup.
   SubscriptionStatus.PAST_DUE,
 ];
+
+/** Whether a subscription status grants an active (paid or grace-period) plan. */
+export function isSubscriptionActive(status: SubscriptionStatus): boolean {
+  return ACTIVE_STATUSES.includes(status);
+}
+
+/**
+ * Per-asset plan (19-Billing/Per_Asset_Billing.md): the single purchasable
+ * plan under the per-asset model. Every feature is on; the asset limit is the
+ * company's purchased Stripe subscription quantity (`Company.assetQuantity`),
+ * NOT a fixed constant — so the cap moves only when the customer explicitly
+ * changes their quantity. Operators are not capped on this plan (billing is
+ * per asset). A `null` quantity (subscription active but quantity not yet
+ * synced) is treated as 0 to fail closed rather than grant unlimited assets.
+ */
+export function perAssetTier(quantity: number | null): PlanTier {
+  return {
+    key: 'per_asset',
+    name: 'Per-asset',
+    features: ['core', 'forms', 'intelligence', 'warehouse'],
+    limits: { maxOperators: null, maxAssets: quantity ?? 0 },
+  };
+}
 
 /**
  * Resolves the tier a company is on from its subscription state and the
