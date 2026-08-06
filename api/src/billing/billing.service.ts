@@ -5,7 +5,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
-import { Prisma, SubscriptionStatus } from '@prisma/client';
+import { InvoiceStatus, Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -713,6 +713,7 @@ export class BillingService {
         await this.handleChargeDisputeCreated(stripe, event.data.object as Stripe.Dispute);
         break;
       case 'invoice.payment_failed':
+        await this.upsertInvoiceCache(event.data.object as Stripe.Invoice);
         await this.handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
         break;
       // Stripe fires both `invoice.paid` and the older `invoice.payment_succeeded`
@@ -720,7 +721,13 @@ export class BillingService {
       // currently-recommended event) avoids double-counting/double-notifying
       // for what is a single real-world event.
       case 'invoice.paid':
+        await this.upsertInvoiceCache(event.data.object as Stripe.Invoice);
         await this.handleInvoicePaymentSucceeded(event.data.object as Stripe.Invoice);
+        break;
+      // Cache freshly-finalised (open/unpaid) invoices too, so the customer and
+      // admin see an invoice the moment it's issued, not only once it's paid.
+      case 'invoice.finalized':
+        await this.upsertInvoiceCache(event.data.object as Stripe.Invoice);
         break;
       case 'charge.refunded':
         await this.handleChargeRefunded(event.data.object as Stripe.Charge);
@@ -1058,6 +1065,48 @@ export class BillingService {
     return result.holders.length;
   }
 
+  /**
+   * Upserts a Stripe invoice into the local `invoices` cache (Stripe stays
+   * source of truth; this is a read-model for fast customer/admin queries and an
+   * audit history). Idempotent on the Stripe invoice id, so a duplicate or
+   * out-of-order delivery just rewrites the same row with the latest snapshot.
+   * Written via the privileged fleetos_auth role (SystemPrismaService), like the
+   * webhook idempotency ledger — an invoice event isn't tenant-scoped until its
+   * company is resolved from the subscription metadata Stripe snapshots onto it.
+   */
+  private async upsertInvoiceCache(invoice: Stripe.Invoice): Promise<void> {
+    const companyId = invoice.parent?.subscription_details?.metadata?.fleetosCompanyId;
+    if (!companyId || !invoice.id) return;
+    // `tax` has shifted across Stripe API versions; read it defensively for the
+    // stored GST-portion display without pinning to one SDK shape.
+    const taxCents = typeof (invoice as unknown as { tax?: number | null }).tax === 'number' ? (invoice as unknown as { tax: number }).tax : 0;
+    const data = {
+      companyId,
+      number: invoice.number ?? null,
+      status: mapInvoiceStatus(invoice.status),
+      amountDueCents: invoice.amount_due ?? 0,
+      amountPaidCents: invoice.amount_paid ?? 0,
+      taxCents,
+      currency: (invoice.currency ?? 'aud').toUpperCase(),
+      periodStart: invoice.period_start ? new Date(invoice.period_start * 1000) : null,
+      periodEnd: invoice.period_end ? new Date(invoice.period_end * 1000) : null,
+      hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
+      invoicePdfUrl: invoice.invoice_pdf ?? null,
+      issuedAt: invoice.status_transitions?.finalized_at ? new Date(invoice.status_transitions.finalized_at * 1000) : null,
+    };
+    try {
+      await this.systemPrisma.invoice.upsert({
+        where: { stripeInvoiceId: invoice.id },
+        create: { stripeInvoiceId: invoice.id, ...data },
+        update: data,
+      });
+    } catch (err) {
+      // A cache write must never fail the webhook (Stripe would retry the whole
+      // event, re-running the entitlement-affecting handlers). Log and move on.
+      this.logger.warn(`Could not cache Stripe invoice ${invoice.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private async syncSubscription(
     companyId: string,
     stripeCustomerId: string,
@@ -1096,6 +1145,23 @@ export class BillingService {
         },
       });
     });
+  }
+}
+
+function mapInvoiceStatus(status: Stripe.Invoice.Status | null): InvoiceStatus {
+  switch (status) {
+    case 'draft':
+      return InvoiceStatus.DRAFT;
+    case 'open':
+      return InvoiceStatus.OPEN;
+    case 'paid':
+      return InvoiceStatus.PAID;
+    case 'void':
+      return InvoiceStatus.VOID;
+    case 'uncollectible':
+      return InvoiceStatus.UNCOLLECTIBLE;
+    default:
+      return InvoiceStatus.OPEN;
   }
 }
 
