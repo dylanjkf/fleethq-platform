@@ -76,6 +76,7 @@ import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
 import { FeatureGuard } from './common/guards/feature.guard';
 import { FeatureFlagGuard } from './common/guards/feature-flag.guard';
+import { BillingReadOnlyGuard } from './common/guards/billing-read-only.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { DeprecationInterceptor } from './common/deprecation/deprecation.interceptor';
 import { validateEnv } from './config/env.validation';
@@ -229,6 +230,11 @@ import { validateEnv } from './config/env.validation';
     // Admin-managed rollout switch (21-Admin-Platform/Overview.md, Phase 5b)
     // — a separate axis from FeatureGuard's billing entitlement check.
     { provide: APP_GUARD, useClass: FeatureFlagGuard },
+    // Payment-failure read-only: once a paid subscription exhausts its dunning
+    // retries, block every tenant-data write (402) until billing is fixed —
+    // reads stay open, and the routes needed to pay opt out via
+    // `@AllowWhenReadOnly`. A no-op unless BILLING_ENFORCED=true.
+    { provide: APP_GUARD, useClass: BillingReadOnlyGuard },
     // Emits the RFC 8594 Deprecation/Sunset headers for any route marked
     // `@Deprecated(...)` (12-API/API_Versioning_Policy.md's "signal at runtime").
     // A no-op on undecorated routes.

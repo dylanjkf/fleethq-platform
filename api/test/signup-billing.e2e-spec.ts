@@ -347,4 +347,57 @@ describe('Per-asset billing + self-serve signup', () => {
       expect(alerts[0].detail).toMatchObject({ email, error: 'db exploded' });
     });
   });
+
+  describe('payment-failure read-only enforcement', () => {
+    // A per-asset company whose dunning is exhausted (past due, no next attempt).
+    async function readOnlyCompany() {
+      const tenant = await createTestTenant([PERMISSIONS.ASSETS_CREATE, PERMISSIONS.ASSETS_VIEW, PERMISSIONS.BILLING_MANAGE]);
+      await ownerPrisma.company.update({
+        where: { id: tenant.companyId },
+        data: {
+          subscriptionStatus: 'PAST_DUE',
+          planPriceId: PER_ASSET_PRICE,
+          assetQuantity: 5,
+          stripeSubscriptionId: `sub_ro_${randomUUID()}`,
+          stripeCustomerId: `cus_ro_${randomUUID()}`,
+          paymentFailureCount: 4,
+          nextPaymentAttemptAt: null,
+        },
+      });
+      return tenant;
+    }
+
+    it('blocks tenant-data writes with 402 BILLING_READ_ONLY while reads stay open', async () => {
+      const tenant = await readOnlyCompany();
+      const token = await login(tenant.username);
+
+      const ent = await request(app.getHttpServer()).get('/v1/billing/entitlements').set('Authorization', `Bearer ${token}`).expect(200);
+      expect(ent.body.billingReadOnly).toBe(true); // read works, and surfaces the state
+
+      const blocked = await postAsset(token, 'Should not create').expect(402);
+      expect(blocked.body.error.code).toBe('BILLING_READ_ONLY');
+
+      const count = await ownerPrisma.asset.count({ where: { companyId: tenant.companyId, archivedAt: null } });
+      expect(count).toBe(0); // the write never happened
+    });
+
+    it('still lets a past-due customer reach the billing pay-path (exempt route)', async () => {
+      const tenant = await readOnlyCompany();
+      const token = await login(tenant.username);
+      // The read-only guard must NOT reject this — the @AllowWhenReadOnly exemption
+      // lets it through to the service (which only errors because Stripe isn't
+      // configured in this test). What matters is it's never the read-only block.
+      const res = await request(app.getHttpServer())
+        .post('/v1/billing/portal-session')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ returnUrl: 'https://app.fleethq.test/billing' });
+      expect(JSON.stringify(res.body)).not.toContain('BILLING_READ_ONLY');
+    });
+
+    it('does not affect a healthy active company', async () => {
+      const tenant = await perAssetCompany(3);
+      const token = await login(tenant.username);
+      await postAsset(token, 'Healthy asset').expect(201);
+    });
+  });
 });
