@@ -11,6 +11,8 @@ import { CreditNoteDto } from './dto/credit-note.dto';
 import { RetryPaymentDto } from './dto/retry-payment.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
 import { ListInvoicesQueryDto } from './dto/list-invoices-query.dto';
+import { ChangeQuantityDto } from './dto/change-quantity.dto';
+import { AuditTrailQueryDto } from './dto/audit-trail-query.dto';
 
 /**
  * FleetHQ staff-facing billing operations layered on top of the existing
@@ -49,7 +51,7 @@ export class AdminBillingService {
   private async requireCompany(companyId: string) {
     const company = await this.adminPrisma.company.findUnique({
       where: { id: companyId },
-      select: { id: true, name: true, stripeCustomerId: true, stripeSubscriptionId: true, subscriptionStatus: true, planPriceId: true, trialEndsAt: true },
+      select: { id: true, name: true, stripeCustomerId: true, stripeSubscriptionId: true, subscriptionStatus: true, planPriceId: true, trialEndsAt: true, assetQuantity: true },
     });
     if (!company) throw new NotFoundException({ code: 'ORGANISATION_NOT_FOUND', message: 'Organisation not found.' });
     return company;
@@ -113,6 +115,20 @@ export class AdminBillingService {
       const stripe = this.billing.getStripeClient();
       subscription = await stripe.subscriptions.retrieve(company.stripeSubscriptionId);
     }
+    // Per-asset usage-vs-paid. `assetQuantity` is only ever set for a company on
+    // the per-asset plan (it's the purchased Stripe subscription-item quantity =
+    // the hard cap), so its presence is the reliable "on per-asset" signal. The
+    // live count is read cross-tenant via the BYPASSRLS admin client, explicitly
+    // scoped by companyId. `overCap` should never be true (the cap is enforced),
+    // so surfacing it flags a data-integrity issue worth a staff look.
+    const paidQuantity = company.assetQuantity;
+    const perAsset =
+      paidQuantity != null
+        ? await (async () => {
+            const liveAssets = await this.adminPrisma.asset.count({ where: { companyId, archivedAt: null } });
+            return { paidQuantity, liveAssets, availableSlots: paidQuantity - liveAssets, overCap: liveAssets > paidQuantity };
+          })()
+        : null;
     return {
       billingConfigured,
       subscriptionStatus: company.subscriptionStatus,
@@ -120,6 +136,7 @@ export class AdminBillingService {
       trialEndsAt: company.trialEndsAt,
       hasStripeCustomer: !!company.stripeCustomerId,
       hasStripeSubscription: !!company.stripeSubscriptionId,
+      perAsset,
       stripe: subscription
         ? {
             status: subscription.status,
@@ -154,6 +171,50 @@ export class AdminBillingService {
         invoicePdf: inv.invoice_pdf,
       })),
     };
+  }
+
+  /**
+   * The company's append-only billing audit trail (cap blocks, quantity changes,
+   * signup lifecycle, dunning, staff overrides). Read cross-tenant via the
+   * BYPASSRLS admin client, newest first, bounded.
+   */
+  async getAuditTrail(companyId: string, query: AuditTrailQueryDto) {
+    await this.requireCompany(companyId);
+    const take = query.limit ?? 50;
+    const items = await this.adminPrisma.billingAuditLog.findMany({
+      where: { companyId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: { id: true, eventType: true, actorUserId: true, detail: true, createdAt: true },
+    });
+    return { items };
+  }
+
+  /**
+   * Staff-side manual change of the paid asset quantity (the hard cap). Delegates
+   * to the customer BillingService so the same Stripe-first path applies — proration,
+   * the below-live-usage guard, and a QUANTITY_CHANGED billing-audit row tagged
+   * `via: 'admin'`; the resulting subscription webhook is what moves
+   * Company.assetQuantity, keeping "Stripe is the source of truth" intact for this
+   * write too. A second admin-action audit row records who did it (and why).
+   */
+  async changeQuantity(companyId: string, dto: ChangeQuantityDto, context: AdminActionContext) {
+    const company = await this.requireCompany(companyId);
+    const before = company.assetQuantity;
+    const result = await this.billing.changeAssetQuantity(companyId, dto.quantity, undefined, 'admin');
+    await this.audit.record({
+      adminUserId: context.adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.BILLING_QUANTITY_CHANGED,
+      entityType: 'company',
+      entityId: companyId,
+      organisationId: companyId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+      reason: dto.reason ?? null,
+      beforeValue: { assetQuantity: before },
+      afterValue: { assetQuantity: result.quantity },
+    });
+    return result;
   }
 
   async refund(companyId: string, dto: RefundDto, context: AdminActionContext) {

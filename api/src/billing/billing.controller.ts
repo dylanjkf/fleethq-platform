@@ -7,12 +7,14 @@ import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthenticatedOnly } from '../common/decorators/authenticated-only.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { AllowWhenReadOnly } from '../common/decorators/allow-when-read-only.decorator';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
 import { BillingService } from './billing.service';
 import { EntitlementsService } from './entitlements.service';
 import { CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { CreatePortalSessionDto } from './dto/create-portal-session.dto';
+import { ChangeAssetQuantityDto } from './dto/change-asset-quantity.dto';
 
 @Controller({ path: 'billing', version: '1' })
 export class BillingController {
@@ -47,12 +49,26 @@ export class BillingController {
 
   @Post('checkout-session')
   @RequirePermission(PERMISSIONS.BILLING_MANAGE)
+  @AllowWhenReadOnly() // A past-due customer must be able to start a checkout to pay.
   createCheckoutSession(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: CreateCheckoutSessionDto) {
-    return this.billingService.createCheckoutSession(user.companyId, dto.priceId, dto.successUrl, dto.cancelUrl);
+    return this.billingService.createCheckoutSession(user.companyId, dto.priceId, dto.successUrl, dto.cancelUrl, dto.quantity ?? 1);
+  }
+
+  /**
+   * Change the number of paid asset slots on the per-asset plan (buy more or
+   * release). Prorated by Stripe; the server blocks reducing below current live
+   * asset usage. The new cap is applied by the resulting subscription webhook.
+   */
+  @Post('quantity')
+  @RequirePermission(PERMISSIONS.BILLING_MANAGE)
+  @AllowWhenReadOnly() // Managing the subscription (e.g. reducing seats) is a billing action, allowed while past-due.
+  changeAssetQuantity(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: ChangeAssetQuantityDto) {
+    return this.billingService.changeAssetQuantity(user.companyId, dto.quantity, user.userId);
   }
 
   @Post('portal-session')
   @RequirePermission(PERMISSIONS.BILLING_MANAGE)
+  @AllowWhenReadOnly() // The Stripe customer portal is how a past-due customer updates their card / retries payment.
   createPortalSession(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: CreatePortalSessionDto) {
     return this.billingService.createPortalSession(user.companyId, dto.returnUrl);
   }

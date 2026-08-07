@@ -1,8 +1,9 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { FeatureKey, PlanTier, UNLIMITED_TIER, isTrialActive, resolvePlanTier } from './plans';
+import { SystemPrismaService } from '../prisma/system-prisma.service';
+import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, perAssetTier, resolvePlanTier } from './plans';
 
 export interface Entitlements {
   planKey: string;
@@ -22,6 +23,23 @@ export interface Entitlements {
   trialEndsAt: string | null;
   trialActive: boolean;
   trialDaysLeft: number | null;
+  /**
+   * Per-asset billing: the purchased Stripe quantity (the hard asset cap), or
+   * null when the company isn't on the per-asset plan. Distinct from
+   * `limits.maxAssets` (which is null=unlimited when enforcement is off) — this
+   * is the true paid count regardless of `enforced`, so the UI can always show
+   * "7 of 10 paid asset slots used" and a "buy more" affordance.
+   */
+  assetQuantity: number | null;
+  /**
+   * Payment-failure read-only state: true when enforcement is on and the
+   * company's paid subscription has exhausted its dunning retries (past due with
+   * no next attempt scheduled). The client uses this to show a prominent
+   * "billing action required — your fleet is read-only" banner and disable write
+   * actions; the server-side write block is applied separately at the guard
+   * layer. Never true while enforcement is off, so dev/CI/pilot are unaffected.
+   */
+  billingReadOnly: boolean;
 }
 
 /**
@@ -34,9 +52,12 @@ export interface Entitlements {
  */
 @Injectable()
 export class EntitlementsService {
+  private readonly logger = new Logger(EntitlementsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly systemPrisma: SystemPrismaService,
   ) {}
 
   private isEnforced(): boolean {
@@ -51,7 +72,39 @@ export class EntitlementsService {
     };
   }
 
-  private toEntitlements(plan: PlanTier, trialEndsAt: Date | null, usage: { operators: number; assets: number }): Entitlements {
+  /** The Stripe Price id for the per-asset plan ($19 AUD/asset/month), if configured. */
+  private perAssetPriceId(): string | undefined {
+    return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+  }
+
+  /**
+   * Payment-failure read-only predicate: enforcement on, the company actually
+   * has a Stripe subscription, and its dunning retries are exhausted (past due
+   * with no next payment attempt after at least one failure). Voluntary states
+   * (a never-subscribed Free company, an active trial) are never read-only —
+   * only a paid subscription that has stopped paying.
+   */
+  private computeBillingReadOnly(company: {
+    subscriptionStatus: SubscriptionStatus;
+    stripeSubscriptionId: string | null;
+    nextPaymentAttemptAt: Date | null;
+    paymentFailureCount: number;
+  }): boolean {
+    if (!this.isEnforced()) return false;
+    if (!company.stripeSubscriptionId) return false;
+    return (
+      company.subscriptionStatus === SubscriptionStatus.PAST_DUE &&
+      company.nextPaymentAttemptAt == null &&
+      company.paymentFailureCount > 0
+    );
+  }
+
+  private toEntitlements(
+    plan: PlanTier,
+    trialEndsAt: Date | null,
+    usage: { operators: number; assets: number },
+    context: { assetQuantity: number | null; billingReadOnly: boolean },
+  ): Entitlements {
     const enforced = this.isEnforced();
     const effective = enforced ? plan : UNLIMITED_TIER;
     const trialActive = isTrialActive(trialEndsAt);
@@ -66,11 +119,34 @@ export class EntitlementsService {
       trialEndsAt: trialEndsAt ? trialEndsAt.toISOString() : null,
       trialActive,
       trialDaysLeft,
+      assetQuantity: context.assetQuantity,
+      billingReadOnly: context.billingReadOnly,
     };
   }
 
   async getForCompany(companyId: string): Promise<Entitlements> {
     return this.prisma.withTenant(companyId, async (tx) => this.resolve(tx, companyId));
+  }
+
+  /**
+   * Lean payment-failure read-only check for the write guard — one cheap query,
+   * no usage counts or plan resolution. Early-returns false (no query at all)
+   * when enforcement is off, so dev/CI/pilot pay nothing per request.
+   */
+  async isBillingReadOnly(companyId: string): Promise<boolean> {
+    if (!this.isEnforced()) return false;
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: {
+          subscriptionStatus: true,
+          stripeSubscriptionId: true,
+          nextPaymentAttemptAt: true,
+          paymentFailureCount: true,
+        },
+      });
+      return this.computeBillingReadOnly(company);
+    });
   }
 
   private async getUsage(tx: Prisma.TransactionClient): Promise<{ operators: number; assets: number }> {
@@ -84,11 +160,47 @@ export class EntitlementsService {
   private async resolve(tx: Prisma.TransactionClient, companyId: string): Promise<Entitlements> {
     const company = await tx.company.findUniqueOrThrow({
       where: { id: companyId },
-      select: { subscriptionStatus: true, planPriceId: true, trialEndsAt: true },
+      select: {
+        subscriptionStatus: true,
+        planPriceId: true,
+        trialEndsAt: true,
+        assetQuantity: true,
+        stripeSubscriptionId: true,
+        nextPaymentAttemptAt: true,
+        paymentFailureCount: true,
+      },
     });
-    const plan = resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
+    const plan = this.resolvePlan(company);
     const usage = await this.getUsage(tx);
-    return this.toEntitlements(plan, company.trialEndsAt, usage);
+    return this.toEntitlements(plan, company.trialEndsAt, usage, {
+      assetQuantity: company.assetQuantity,
+      billingReadOnly: this.computeBillingReadOnly(company),
+    });
+  }
+
+  /**
+   * Resolves the plan tier. Under the per-asset model (19-Billing/
+   * Per_Asset_Billing.md) an active subscription on the per-asset price yields
+   * a plan whose asset limit is the company's purchased `assetQuantity` — the
+   * hard cap moves only when quantity changes, never when an asset is added.
+   * Any other state falls through to the legacy tier resolution (trial / Free
+   * fallback still apply), so mixed/legacy tenants keep working.
+   */
+  private resolvePlan(company: {
+    subscriptionStatus: SubscriptionStatus;
+    planPriceId: string | null;
+    trialEndsAt: Date | null;
+    assetQuantity: number | null;
+  }): PlanTier {
+    const perAssetPriceId = this.perAssetPriceId();
+    if (
+      perAssetPriceId &&
+      company.planPriceId === perAssetPriceId &&
+      isSubscriptionActive(company.subscriptionStatus)
+    ) {
+      return perAssetTier(company.assetQuantity);
+    }
+    return resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
   }
 
   /**
@@ -115,6 +227,29 @@ export class EntitlementsService {
       ? await tx.operator.count({ where: { archivedAt: null } })
       : await tx.asset.count({ where: { archivedAt: null } });
     if (current >= limit) {
+      // Record the blocked attempt on a SEPARATE connection before throwing:
+      // this HttpException rolls back `tx` (the create transaction), so an audit
+      // write on `tx` would vanish with it. SystemPrismaService (fleetos_auth,
+      // autocommit) persists it regardless. Best-effort — a failed audit write
+      // must never turn a clean 402 into a 500. This is the signal the admin
+      // console surfaces as "company repeatedly hitting its cap → upsell".
+      try {
+        await this.systemPrisma.billingAuditLog.create({
+          data: {
+            companyId,
+            eventType: 'CAP_BLOCKED',
+            detail: {
+              resource,
+              attempted: current + 1,
+              limit,
+              planKey: entitlements.planKey,
+            },
+          },
+        });
+      } catch (err) {
+        this.logger.warn(`Could not record CAP_BLOCKED audit for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       throw new HttpException(
         {
           code: 'PLAN_LIMIT_REACHED',
