@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
 import { AuthRecoveryService } from '../auth/auth-recovery.service';
@@ -191,7 +192,7 @@ export class AdminCustomerUsersService {
     if (isInvite && !dto.email) {
       throw new BadRequestException({ code: 'INVITE_EMAIL_REQUIRED', message: 'An email address is required to invite a user (they set their own password).' });
     }
-    const passwordHash = await bcrypt.hash(dto.password ?? randomBytes(32).toString('hex'), 10);
+    const passwordHash = await bcrypt.hash(dto.password ?? randomBytes(32).toString('hex'), resolveBcryptCost());
     const userId = randomUUID();
 
     try {

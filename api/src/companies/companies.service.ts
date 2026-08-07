@@ -7,6 +7,7 @@ import type { LoginResult } from '../auth/auth.service';
 import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
+import { BreachedPasswordService } from '../auth/breached-password.service';
 import { provisionCompany } from './provision-company';
 import { SignupCompanyDto } from './dto/signup-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
@@ -19,10 +20,15 @@ export class CompaniesService {
     private readonly sessions: AuthSessionsService,
     private readonly authTokens: AuthTokensService,
     private readonly authMail: AuthMailService,
+    private readonly breachedPassword: BreachedPasswordService,
   ) {}
 
   async signup(dto: SignupCompanyDto, context: { ip?: string | null; userAgent?: string | null } = {}): Promise<LoginResult> {
     const companyId = randomUUID();
+
+    // Reject a chosen password that appears in a known breach corpus before we
+    // provision anything (fail-open if HIBP is unreachable — see the service).
+    await this.breachedPassword.assertNotBreached(dto.adminPassword);
 
     try {
       const result = await this.prisma.withTenant(companyId, (tx) =>

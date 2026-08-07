@@ -2,7 +2,7 @@
 // Pre-existing oversized service (predates this security port; not modified by
 // it). Grandfathered to keep the max-lines rule active for the rest of the repo;
 // a proper split is tracked as separate follow-up work.
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
@@ -72,8 +72,9 @@ export class BillingService {
    * a mismatched success/return URL would otherwise bounce a just-paid
    * customer to an attacker-chosen site. Allowed origins are APP_BASE_URL plus
    * any CORS_ALLOWED_ORIGINS (the same origins the SPA is actually served
-   * from). When neither is configured (local dev) the check is skipped, matching
-   * this service's existing "billing informs, never hard-locks" tolerance.
+   * from). When neither is configured the check is skipped in dev/CI, but in
+   * production that's a misconfiguration and fails loud (see below) rather than
+   * silently allowing any redirect target.
    */
   private assertAppOriginUrl(rawUrl: string, field: string): void {
     const configured = [
@@ -82,7 +83,19 @@ export class BillingService {
     ]
       .map((o) => o?.trim())
       .filter((o): o is string => !!o);
-    if (configured.length === 0) return;
+    if (configured.length === 0) {
+      // In production this is a misconfiguration, not a valid state: with no
+      // allowed origin the redirect check would rubber-stamp any URL, so a
+      // just-paid customer could be bounced anywhere. Fail loud instead of
+      // silently permitting. Dev/CI (no NODE_ENV=production) keep the skip.
+      if (this.config.get<string>('NODE_ENV') === 'production') {
+        throw new InternalServerErrorException({
+          code: 'REDIRECT_ALLOWLIST_UNCONFIGURED',
+          message: 'Billing redirect allow-list is not configured (set APP_BASE_URL or CORS_ALLOWED_ORIGINS).',
+        });
+      }
+      return;
+    }
 
     let origin: string;
     try {

@@ -2,6 +2,27 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-07 — Dedicated security-audit remediation (platform)
+
+A security-only audit (independent of the production-readiness series) scored the three repos 84/100 — no tenant-isolation gaps across ~70 services / 65 RLS tables, zero XSS surface, no hardcoded secrets. Two Highs + several Mediums held it below 90. This entry records the **platform** (`fleethq-platform`) items; the DriverOS (H2 outbox ownership, M3 Android backup, M4 PIN re-lock, FLAG_SECURE) and frontend (SW open-redirect) items ship in their own repos' PRs. Each item states *how it was proven*, per the standing methodology.
+
+**High**
+
+- **H1 — SSRF in web-push delivery, closed (with proof).** Every other user-influenced outbound request goes through `common/net/safe-fetch.ts` (resolves DNS, blocklists internal/metadata/RFC1918/link-local, pins the socket to the validated IP, re-validates redirects). The push endpoint did **not**: `assertEndpointAllowed` only blocklisted a *literal* internal IP and never resolved a hostname, and delivery went through raw `web-push.sendNotification()` — outside safeFetch, no pinning, no redirect check. Any authenticated user could `POST /v1/push/subscribe` an endpoint whose *hostname resolves* to `169.254.169.254`, then trigger a self-notification and make the server POST there (self-service blind SSRF, DNS-rebindable). **Fix:** subscribe-time validation now calls the shared `assertUrlAllowed` (real DNS resolve + blocklist); delivery builds the encrypted VAPID request with `web-push.generateRequestDetails()` (no send) and pushes it out through `safeFetch`, so it is pinned and re-validated. `safe-fetch` now resolves `dns.lookup` at call time (no behaviour change; makes the guard testable). **Proof** (`src/notifications/push/push.service.spec.ts`, 6 tests, DNS stubbed — no real I/O): a hostname resolving to `169.254.169.254` / `10.x` / `127.0.0.1` is rejected at subscribe time and never persisted; a public-resolving endpoint is stored and delivered via `safeFetch` carrying the encrypted VAPID payload; a stored endpoint that resolves internal at send time raises `SsrfBlockedError` and is refused, not fetched; a 410 prunes the subscription. `safe-fetch.spec` (pinning/blocklist) stays green.
+
+**Medium**
+
+- **M1 — Breached-password screening (HIBP k-anonymity).** The composition rule still admitted `Password1!`/`Summer2025!`. Added `BreachedPasswordService.assertNotBreached()` at signup, self-service change, expiry-forced change, and reset: SHA-1 the candidate, send only the 5-char prefix to the HIBP range API (via `safeFetch`, `Add-Padding: true`), match the returned suffix locally — the full password/hash never leave the box. **Fails open** (logs + allows) on a HIBP outage; composition + reuse checks still apply. **Proof** (`breached-password.service.spec.ts`, 5 tests, `safeFetch` stubbed): a corpus hit is rejected `PASSWORD_BREACHED` and only the 5-char prefix is sent; a padded count-0 decoy and an absent suffix pass; a 502 and a network error both fail open.
+- **M2 — bcrypt cost configurable, default 12.** Every hash used a hardcoded 10. Centralised in `resolveBcryptCost()` (`BCRYPT_COST`, default 12, clamped 10–15) and applied at all 13 hash sites (customer/admin auth, MFA backup codes, provisioning, bootstrap scripts). Existing cost-10 hashes stay valid (bcrypt encodes its own cost). Measured locally: cost 10 ≈ 60 ms, cost 12 ≈ 235 ms per hash/compare — the expected ~4×, within interactive-login budget.
+
+**Low**
+
+- Raw-SQL hygiene: the two provisioning scripts set the tenant GUC via string-interpolated `SET LOCAL app.current_company_id = '<uuid>'`; both switched to the parameterized `SELECT set_config(..., $1, true)` the runtime already uses.
+- Sentry: explicit `beforeSend` strips request bodies, cookies and auth/cookie/`stripe-signature`/api-key headers — a visible layer over `sendDefaultPii:false`.
+- Throttles: added the auth throttle to the two public auth routes that lacked one (`webauthn/login/options`, `mfa-setup/begin`) and a per-IP throttle to `POST /billing/webhook` (signature is the real gate; Stripe retries 429s).
+- Billing redirect allow-list (`assertAppOriginUrl`) now **fails loud in production** when neither `APP_BASE_URL` nor `CORS_ALLOWED_ORIGINS` is set (was a silent skip that would rubber-stamp any redirect target); dev/CI keep the skip.
+- Documented the 30-day "remember me" lifetime as a reviewed, deliberate bearer-token tradeoff (real server-side revocation via session row + `tokenVersion` on every request).
+
 ## 2026-08-03 — Enterprise Production Readiness Audit **Round 5** remediation
 
 Fifth audit. Both stuck scores (Production 65, Enterprise 61) traced to the same root: two Round-4 changelog claims that **did not hold up under direct code inspection**. This round fixes the underlying issues and, per the brief, records for each item *how it was verified against the running system* — not just "done".

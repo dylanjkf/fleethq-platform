@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Permission, Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { TimelineService } from '../timeline/timeline.service';
 import { ROLE_TEMPLATES } from '../common/permissions/permission-catalog';
 
@@ -146,7 +147,7 @@ export async function provisionCompany(
       {
         id: adminUserId,
         username: input.adminUsername,
-        passwordHash: await bcrypt.hash(input.adminPassword, 10),
+        passwordHash: await bcrypt.hash(input.adminPassword, resolveBcryptCost()),
         fullName: input.adminFullName,
         email: input.adminEmail ?? null,
         mustChangePassword: input.adminMustChangePassword ?? false,

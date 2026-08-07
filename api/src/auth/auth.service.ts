@@ -6,6 +6,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { OAuthProvider, type User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
@@ -14,6 +15,7 @@ import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
 import { AuthRecoveryService } from './auth-recovery.service';
 import { PasswordPolicyService } from './password-policy.service';
+import { BreachedPasswordService } from './breached-password.service';
 import { AuthPolicyGateService } from './auth-policy-gate.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 import { MfaService } from './mfa/mfa.service';
@@ -90,6 +92,7 @@ export class AuthService {
     private readonly sessions: AuthSessionsService,
     private readonly recovery: AuthRecoveryService,
     private readonly passwordPolicy: PasswordPolicyService,
+    private readonly breachedPassword: BreachedPasswordService,
     private readonly policyGate: AuthPolicyGateService,
     private readonly audit: AuditService,
     private readonly mfa: MfaService,
@@ -695,13 +698,14 @@ export class AuthService {
   async changeExpiredPassword(changeToken: string, newPassword: string, context: AuthContext = {}): Promise<LoginResult> {
     const payload = this.policyGate.verifyPolicyToken(changeToken, 'password_expired');
     const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+    await this.breachedPassword.assertNotBreached(newPassword);
     await this.passwordPolicy.assertNotReused(user.id, newPassword, user.passwordHash);
     await this.passwordPolicy.recordPreviousHash(user.id, user.passwordHash);
     await this.systemPrisma.user.update({
       where: { id: user.id },
       // Clear the admin-issued "must change" flag: the temporary credential has
       // now been rotated, so the account is usable and can't be forced again.
-      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date(), tokenVersion: { increment: 1 }, mustChangePassword: false },
+      data: { passwordHash: await bcrypt.hash(newPassword, resolveBcryptCost()), passwordChangedAt: new Date(), tokenVersion: { increment: 1 }, mustChangePassword: false },
     });
     await this.sessions.revokeAllSessions(user.id);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: user.id, actorLabel: user.username, ip: context.ip, requestId: context.requestId });

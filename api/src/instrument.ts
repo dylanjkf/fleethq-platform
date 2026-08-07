@@ -18,6 +18,16 @@
  */
 import * as Sentry from '@sentry/node';
 
+/** Header names that must never reach Sentry (auth material / cookies). */
+const SENSITIVE_HEADERS = ['authorization', 'cookie', 'set-cookie', 'stripe-signature', 'x-api-key', 'x-device-key'];
+
+/** Strip sensitive headers in place (kept as its own function to bound nesting depth). */
+function scrubSensitiveHeaders(headers: Record<string, unknown>): void {
+  for (const key of Object.keys(headers)) {
+    if (SENSITIVE_HEADERS.includes(key.toLowerCase())) delete headers[key];
+  }
+}
+
 Sentry.init({
   dsn: process.env.SENTRY_DSN || undefined,
   environment: process.env.NODE_ENV || 'development',
@@ -27,4 +37,20 @@ Sentry.init({
   // Sentry to hold a second copy of anything the app itself already logs
   // responsibly via nestjs-pino's own redaction.
   sendDefaultPii: false,
+  /**
+   * Explicit scrub as a visible, belt-and-braces layer over `sendDefaultPii:
+   * false` (security audit, Low): strip request bodies and sensitive headers,
+   * and drop cookies, from every event before it leaves the process — so a
+   * future change that turns on PII, or an SDK integration that attaches a
+   * request, can't silently start exfiltrating credentials/PII.
+   */
+  beforeSend(event) {
+    const request = event.request;
+    if (request) {
+      delete request.data; // request body
+      delete request.cookies;
+      if (request.headers) scrubSensitiveHeaders(request.headers);
+    }
+    return event;
+  },
 });

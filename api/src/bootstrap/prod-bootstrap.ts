@@ -51,6 +51,7 @@ import '../instrument'; // initialise Sentry before anything else so bootstrap f
 import * as Sentry from '@sentry/node';
 import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { PERMISSION_CATALOG } from '../common/permissions/permission-catalog';
 import { provisionCompany } from '../companies/provision-company';
@@ -178,7 +179,10 @@ async function maybeCreateCompanyAdmin(prisma: PrismaClient): Promise<void> {
 
   await prisma.$transaction(async (tx) => {
     if (!bypassesRls) {
-      await tx.$executeRawUnsafe(`SET LOCAL app.current_company_id = '${companyId}'`);
+      // Parameterized (set_config, not string-interpolated SET LOCAL) to match
+      // PrismaService.withTenant — the value is always a server-generated UUID,
+      // but binding it keeps it uninjectable regardless of where it comes from.
+      await tx.$executeRaw`SELECT set_config('app.current_company_id', ${companyId}, true)`;
     }
     return provisionCompany(tx, {
       companyId,
@@ -262,7 +266,7 @@ async function maybeCreateStaffAdmin(prisma: PrismaClient): Promise<void> {
     );
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(password, resolveBcryptCost());
   const created = await prisma.adminUser.create({
     data: {
       username,
