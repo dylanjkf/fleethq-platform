@@ -241,7 +241,10 @@ async function main() {
     return {
       id,
       companyId,
-      name: `${pick(LAST_NAMES, i)} ${pick(CUSTOMER_SUFFIX, i)}`,
+      // Unique (last-name, suffix) grid so no two customers collide on the
+      // (company_id, lower(name)) constraint: last name cycles fastest, suffix
+      // advances every full pass — 25×10 = 250 unique names, well above the count.
+      name: `${LAST_NAMES[i % LAST_NAMES.length]} ${CUSTOMER_SUFFIX[Math.floor(i / LAST_NAMES.length) % CUSTOMER_SUFFIX.length]}`,
       address: `${randInt(1, 400)} ${pick(SUBURBS, i)} Rd, ${pick(SUBURBS, i + 1)}`,
       contactName: `${pick(FIRST_NAMES, i)} ${pick(LAST_NAMES, i + 3)}`,
       phone: `04${randInt(10, 99)} ${randInt(100, 999)} ${randInt(100, 999)}`,
