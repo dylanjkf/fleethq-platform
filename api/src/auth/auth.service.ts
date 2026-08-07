@@ -6,6 +6,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { OAuthProvider, type User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
@@ -701,7 +702,7 @@ export class AuthService {
       where: { id: user.id },
       // Clear the admin-issued "must change" flag: the temporary credential has
       // now been rotated, so the account is usable and can't be forced again.
-      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date(), tokenVersion: { increment: 1 }, mustChangePassword: false },
+      data: { passwordHash: await bcrypt.hash(newPassword, resolveBcryptCost()), passwordChangedAt: new Date(), tokenVersion: { increment: 1 }, mustChangePassword: false },
     });
     await this.sessions.revokeAllSessions(user.id);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: user.id, actorLabel: user.username, ip: context.ip, requestId: context.requestId });

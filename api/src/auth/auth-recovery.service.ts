@@ -1,5 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
@@ -64,7 +65,7 @@ export class AuthRecoveryService {
       // Bump tokenVersion so every session issued before the reset is revoked
       // at once (a reset is exactly when you want existing sessions killed).
       data: {
-        passwordHash: await bcrypt.hash(newPassword, 10),
+        passwordHash: await bcrypt.hash(newPassword, resolveBcryptCost()),
         passwordChangedAt: new Date(),
         emailVerifiedAt: new Date(),
         failedLoginCount: 0,
@@ -104,7 +105,7 @@ export class AuthRecoveryService {
     await this.passwordPolicy.recordPreviousHash(userId, user.passwordHash);
     await this.systemPrisma.user.update({
       where: { id: userId },
-      data: { passwordHash: await bcrypt.hash(newPassword, 10), passwordChangedAt: new Date() },
+      data: { passwordHash: await bcrypt.hash(newPassword, resolveBcryptCost()), passwordChangedAt: new Date() },
     });
     await this.sessions.revokeOtherSessions(userId, currentSessionId);
     void this.audit.recordSystem({ action: AUDIT_ACTIONS.PASSWORD_CHANGED, actorUserId: userId, actorLabel: user.username, targetType: 'user', targetId: userId });

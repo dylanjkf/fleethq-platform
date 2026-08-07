@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
@@ -9,7 +10,7 @@ import { UpdateAdminUserRoleDto } from './dto/update-admin-user-role.dto';
 import { ListAdminUsersDto } from './dto/list-admin-users.dto';
 
 /** Same bcrypt cost the rest of the platform uses (customer + admin auth). */
-const BCRYPT_ROUNDS = 10;
+const BCRYPT_ROUNDS = resolveBcryptCost();
 
 /** Fields safe to return for a staff account — never the passwordHash/MFA secret. */
 const ADMIN_USER_PUBLIC_SELECT = {
