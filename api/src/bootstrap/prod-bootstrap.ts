@@ -179,7 +179,10 @@ async function maybeCreateCompanyAdmin(prisma: PrismaClient): Promise<void> {
 
   await prisma.$transaction(async (tx) => {
     if (!bypassesRls) {
-      await tx.$executeRawUnsafe(`SET LOCAL app.current_company_id = '${companyId}'`);
+      // Parameterized (set_config, not string-interpolated SET LOCAL) to match
+      // PrismaService.withTenant — the value is always a server-generated UUID,
+      // but binding it keeps it uninjectable regardless of where it comes from.
+      await tx.$executeRaw`SELECT set_config('app.current_company_id', ${companyId}, true)`;
     }
     return provisionCompany(tx, {
       companyId,

@@ -1,6 +1,8 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
+import { INBOUND_WEBHOOK_THROTTLE } from '../common/throttles';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthenticatedOnly } from '../common/decorators/authenticated-only.decorator';
@@ -64,6 +66,10 @@ export class BillingController {
    * for this route.
    */
   @Public()
+  // Signature verification is the real gate; this is a lightweight per-IP cap
+  // for consistency with the other public webhook. Stripe retries on 429, so a
+  // brief burst over the limit is redelivered rather than lost.
+  @Throttle(INBOUND_WEBHOOK_THROTTLE)
   @Post('webhook')
   @HttpCode(HttpStatus.OK)
   async handleWebhook(@Req() req: RawBodyRequest<Request>) {
