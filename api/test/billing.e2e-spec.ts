@@ -132,18 +132,26 @@ describe('Billing / subscriptions', () => {
     expect(res.body.hasStripeCustomer).toBe(false);
   });
 
-  it('lists the purchasable plan tiers for the plan picker', async () => {
+  it('leads the plan picker with the per-asset plan', async () => {
     const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW]);
     const token = await login(tenant.username);
 
     const res = await request(app.getHttpServer()).get('/v1/billing/plans').set('Authorization', `Bearer ${token}`).expect(200);
     expect(Array.isArray(res.body.plans)).toBe(true);
-    const keys = res.body.plans.map((p: { key: string }) => p.key);
-    expect(keys).toEqual(expect.arrayContaining(['starter', 'pro', 'enterprise']));
-    const pro = res.body.plans.find((p: { key: string }) => p.key === 'pro');
-    expect(pro.features).toEqual(expect.arrayContaining(['core', 'intelligence']));
-    expect(pro).toHaveProperty('priceId');
-    expect(pro).toHaveProperty('purchasable');
+    // Under the per-asset model the picker leads with the single per-asset plan;
+    // legacy fixed tiers (starter/pro/enterprise) only surface when their Stripe
+    // price ids are configured on this deployment (they are not in CI).
+    const perAsset = res.body.plans[0];
+    expect(perAsset.key).toBe('per_asset');
+    expect(perAsset.perAsset).toBe(true);
+    expect(perAsset.features).toEqual(expect.arrayContaining(['core', 'intelligence']));
+    expect(perAsset).toHaveProperty('priceId');
+    expect(perAsset).toHaveProperty('purchasable');
+    expect(perAsset).toHaveProperty('pricePerAssetCents');
+    // Any legacy tier that does appear must be marked purchasable.
+    for (const p of res.body.plans.slice(1)) {
+      expect(p.purchasable).toBe(true);
+    }
   });
 
   it('plans list requires billing:view', async () => {
