@@ -28,6 +28,11 @@ export class BreachedPasswordService {
   /** Throws PASSWORD_BREACHED if the password appears in the HIBP corpus; no-op (fail-open) if HIBP can't be reached. */
   async assertNotBreached(password: string): Promise<void> {
     if (typeof password !== 'string' || password.length === 0) return;
+    // The offline e2e suite has no external egress and reuses a weak shared test
+    // password; a real HIBP call would either hang or flag it. Skip the network
+    // call there. The check runs in every real environment; the unit test
+    // (breached-password.service.spec) forces it on to prove the logic.
+    if (process.env.NODE_ENV === 'test' && process.env.HIBP_CHECK_IN_TEST !== 'true') return;
 
     const sha1 = createHash('sha1').update(password, 'utf8').digest('hex').toUpperCase();
     const prefix = sha1.slice(0, 5);

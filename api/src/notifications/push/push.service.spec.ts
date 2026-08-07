@@ -81,6 +81,15 @@ describe('PushService SSRF hardening (H1)', () => {
   };
   let service: PushService;
 
+  // Force the subscribe-time DNS/SSRF check on under NODE_ENV=test (skipped by
+  // default in the offline suite); scoped so it can't leak into e2e suites.
+  beforeAll(() => {
+    process.env.PUSH_SSRF_CHECK_IN_TEST = 'true';
+  });
+  afterAll(() => {
+    delete process.env.PUSH_SSRF_CHECK_IN_TEST;
+  });
+
   beforeEach(() => {
     prisma = {
       pushSubscription: {

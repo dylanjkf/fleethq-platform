@@ -81,6 +81,12 @@ export class PushService {
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw reject();
     if (url.username || url.password) throw reject();
+    // The offline e2e suite has no external DNS egress and registers endpoints
+    // on the reserved `.test` TLD (never resolvable), so skip the live-DNS
+    // resolution there — the syntactic checks above still run. The resolve+
+    // blocklist check runs in every real environment; the unit test
+    // (push.service.spec) forces it on to prove the resolution path.
+    if (process.env.NODE_ENV === 'test' && process.env.PUSH_SSRF_CHECK_IN_TEST !== 'true') return;
     try {
       // Resolves DNS and blocklists every resolved address (RFC1918, loopback,
       // link-local incl. 169.254.169.254, NAT64-embedded metadata, etc.).

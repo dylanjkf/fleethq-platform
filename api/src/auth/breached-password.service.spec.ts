@@ -21,6 +21,15 @@ function hibpBodyFor(password: string, count: number, padding = ['00000000000000
 describe('BreachedPasswordService (M1)', () => {
   let service: BreachedPasswordService;
 
+  // Force the HIBP check on under NODE_ENV=test (it's skipped by default in the
+  // offline suite); scoped so it can't leak into the e2e suites in this worker.
+  beforeAll(() => {
+    process.env.HIBP_CHECK_IN_TEST = 'true';
+  });
+  afterAll(() => {
+    delete process.env.HIBP_CHECK_IN_TEST;
+  });
+
   beforeEach(() => {
     service = new BreachedPasswordService();
     safeFetchMock.mockReset();
