@@ -13,11 +13,14 @@
  * customer-facing checkout/portal tests.
  */
 import { INestApplication } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 import request from 'supertest';
 import { ADMIN_PERMISSIONS } from '../src/common/permissions/admin-permission-catalog';
 import { buildTestApp } from './utils/build-test-app';
 import { createTestTenant, disconnectFixtures, ensurePermissions } from './utils/fixtures';
 import { createTestAdmin, disconnectAdminFixtures, TEST_ADMIN_PASSWORD } from './utils/admin-fixtures';
+
+const ownerPrisma = new PrismaClient();
 
 describe('Admin Billing', () => {
   let app: INestApplication;
@@ -51,6 +54,7 @@ describe('Admin Billing', () => {
     await app.close();
     await disconnectFixtures();
     await disconnectAdminFixtures();
+    await ownerPrisma.$disconnect();
   });
 
   it('rejects an admin route request without a token', async () => {
@@ -120,6 +124,68 @@ describe('Admin Billing', () => {
       .post(`/v1/admin/organisations/${companyId}/billing/refund`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ invoiceId: '', amountCents: -5 })
+      .expect(400);
+  });
+
+  it('reports per-asset usage-vs-paid for a company on the per-asset plan', async () => {
+    const perAssetTenant = await createTestTenant([]);
+    await ownerPrisma.company.update({
+      where: { id: perAssetTenant.companyId },
+      data: { subscriptionStatus: 'ACTIVE', assetQuantity: 5 },
+    });
+    const res = await request(app.getHttpServer())
+      .get(`/v1/admin/organisations/${perAssetTenant.companyId}/billing`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(res.body.perAsset).toMatchObject({ paidQuantity: 5, liveAssets: 0, availableSlots: 5, overCap: false });
+    // A non-per-asset company reports null (no assetQuantity).
+    const plain = await request(app.getHttpServer())
+      .get(`/v1/admin/organisations/${companyId}/billing`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(plain.body.perAsset).toBeNull();
+  });
+
+  it('returns the company billing audit trail (newest first)', async () => {
+    const auditTenant = await createTestTenant([]);
+    await ownerPrisma.billingAuditLog.createMany({
+      data: [
+        { companyId: auditTenant.companyId, eventType: 'SIGNUP_COMPLETED', detail: { quantity: 3 } },
+        { companyId: auditTenant.companyId, eventType: 'QUANTITY_CHANGED', detail: { from: 3, to: 4, via: 'admin' } },
+      ],
+    });
+    const res = await request(app.getHttpServer())
+      .get(`/v1/admin/organisations/${auditTenant.companyId}/billing/audit?limit=10`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(res.body.items.length).toBeGreaterThanOrEqual(2);
+    const types = res.body.items.map((r: { eventType: string }) => r.eventType);
+    expect(types).toContain('SIGNUP_COMPLETED');
+    expect(types).toContain('QUANTITY_CHANGED');
+  });
+
+  it('rejects a manual quantity change from a view-only admin', async () => {
+    await request(app.getHttpServer())
+      .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
+      .set('Authorization', `Bearer ${viewOnlyToken}`)
+      .send({ quantity: 3 })
+      .expect(403);
+  });
+
+  it('refuses a manual quantity change for a company not on the per-asset plan', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ quantity: 3 })
+      .expect(400);
+    expect(res.body.error.code).toBe('NOT_ON_PER_ASSET_PLAN');
+  });
+
+  it('rejects an invalid manual quantity payload', async () => {
+    await request(app.getHttpServer())
+      .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ quantity: 0 })
       .expect(400);
   });
 });
