@@ -15,6 +15,7 @@ import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
 import { AuthRecoveryService } from './auth-recovery.service';
 import { PasswordPolicyService } from './password-policy.service';
+import { BreachedPasswordService } from './breached-password.service';
 import { AuthPolicyGateService } from './auth-policy-gate.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 import { MfaService } from './mfa/mfa.service';
@@ -91,6 +92,7 @@ export class AuthService {
     private readonly sessions: AuthSessionsService,
     private readonly recovery: AuthRecoveryService,
     private readonly passwordPolicy: PasswordPolicyService,
+    private readonly breachedPassword: BreachedPasswordService,
     private readonly policyGate: AuthPolicyGateService,
     private readonly audit: AuditService,
     private readonly mfa: MfaService,
@@ -696,6 +698,7 @@ export class AuthService {
   async changeExpiredPassword(changeToken: string, newPassword: string, context: AuthContext = {}): Promise<LoginResult> {
     const payload = this.policyGate.verifyPolicyToken(changeToken, 'password_expired');
     const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: payload.sub } });
+    await this.breachedPassword.assertNotBreached(newPassword);
     await this.passwordPolicy.assertNotReused(user.id, newPassword, user.passwordHash);
     await this.passwordPolicy.recordPreviousHash(user.id, user.passwordHash);
     await this.systemPrisma.user.update({

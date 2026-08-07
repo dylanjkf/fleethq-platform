@@ -6,6 +6,7 @@ import { AuthTokensService } from './auth-tokens.service';
 import { AuthMailService } from './auth-mail.service';
 import { AuthSessionsService } from './auth-sessions.service';
 import { PasswordPolicyService } from './password-policy.service';
+import { BreachedPasswordService } from './breached-password.service';
 import { AuditService, AUDIT_ACTIONS } from '../audit/audit.service';
 
 /**
@@ -24,6 +25,7 @@ export class AuthRecoveryService {
     private readonly mail: AuthMailService,
     private readonly sessions: AuthSessionsService,
     private readonly passwordPolicy: PasswordPolicyService,
+    private readonly breachedPassword: BreachedPasswordService,
     private readonly audit: AuditService,
   ) {}
 
@@ -56,6 +58,7 @@ export class AuthRecoveryService {
       throw new UnauthorizedException({ code: 'INVALID_TOKEN', message: 'This reset link is invalid or has expired.' });
     }
     const user = await this.systemPrisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await this.breachedPassword.assertNotBreached(newPassword);
     await this.passwordPolicy.assertNotReused(userId, newPassword, user.passwordHash);
     await this.passwordPolicy.recordPreviousHash(userId, user.passwordHash);
     await this.systemPrisma.user.update({
@@ -101,6 +104,7 @@ export class AuthRecoveryService {
     if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
       throw new UnauthorizedException({ code: 'INVALID_CREDENTIALS', message: 'That current password is incorrect.' });
     }
+    await this.breachedPassword.assertNotBreached(newPassword);
     await this.passwordPolicy.assertNotReused(userId, newPassword, user.passwordHash);
     await this.passwordPolicy.recordPreviousHash(userId, user.passwordHash);
     await this.systemPrisma.user.update({

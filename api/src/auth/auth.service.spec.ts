@@ -80,6 +80,7 @@ describe('AuthService — account-security fixes', () => {
       sessions as never,
       {} as never, // recovery
       {} as never, // passwordPolicy
+      {} as never, // breachedPassword
       policyGate as never,
       audit as never,
       mfa as never,
