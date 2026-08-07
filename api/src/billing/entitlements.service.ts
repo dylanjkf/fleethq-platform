@@ -128,6 +128,27 @@ export class EntitlementsService {
     return this.prisma.withTenant(companyId, async (tx) => this.resolve(tx, companyId));
   }
 
+  /**
+   * Lean payment-failure read-only check for the write guard — one cheap query,
+   * no usage counts or plan resolution. Early-returns false (no query at all)
+   * when enforcement is off, so dev/CI/pilot pay nothing per request.
+   */
+  async isBillingReadOnly(companyId: string): Promise<boolean> {
+    if (!this.isEnforced()) return false;
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: {
+          subscriptionStatus: true,
+          stripeSubscriptionId: true,
+          nextPaymentAttemptAt: true,
+          paymentFailureCount: true,
+        },
+      });
+      return this.computeBillingReadOnly(company);
+    });
+  }
+
   private async getUsage(tx: Prisma.TransactionClient): Promise<{ operators: number; assets: number }> {
     const [operators, assets] = await Promise.all([
       tx.operator.count({ where: { archivedAt: null } }),
