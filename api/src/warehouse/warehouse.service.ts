@@ -105,7 +105,17 @@ export class WarehouseService {
   async adjustStock(companyId: string, actorUserId: string, id: string, dto: AdjustStockDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
       const item = await this.requireStock(tx, companyId, id);
-      const next = Math.max(0, item.quantity + dto.delta);
+      // Lock the row for the rest of this transaction so two concurrent
+      // adjustments serialize. Without it both reads see the same starting
+      // quantity and each writes its own absolute result, silently losing one
+      // adjustment (read-modify-write race). requireStock above already
+      // tenant-scoped and validated the row; this re-reads the authoritative
+      // quantity under `FOR UPDATE`.
+      const locked = await tx.$queryRaw<{ quantity: number }[]>`
+        SELECT quantity FROM stock_items WHERE id = ${id}::uuid FOR UPDATE
+      `;
+      const current = locked[0]?.quantity ?? item.quantity;
+      const next = Math.max(0, current + dto.delta);
       const updated = await tx.stockItem.update({ where: { id }, data: { quantity: next } });
       // Record the change in the append-only adjustment ledger so the operator's
       // reason ("5 damaged in transit") is kept, not discarded. `delta` is the
