@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Permission, Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { TimelineService } from '../timeline/timeline.service';
 import { ROLE_TEMPLATES } from '../common/permissions/permission-catalog';
 
@@ -147,7 +148,7 @@ export async function provisionCompany(
   // perfectly legitimate. `createMany` has no RETURNING, so it sidesteps the
   // check entirely — found by actually running this against real Postgres,
   // not by inspection.
-  const passwordHash = input.adminPasswordHash ?? (input.adminPassword ? await bcrypt.hash(input.adminPassword, 10) : null);
+  const passwordHash = input.adminPasswordHash ?? (input.adminPassword ? await bcrypt.hash(input.adminPassword, resolveBcryptCost()) : null);
   if (!passwordHash) {
     throw new Error('provisionCompany requires either adminPassword or adminPasswordHash.');
   }

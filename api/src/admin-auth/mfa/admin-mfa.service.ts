@@ -1,6 +1,7 @@
 import { randomInt } from 'crypto';
 import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../../common/security/bcrypt-cost';
 import { AdminPrismaService } from '../../prisma/admin-prisma.service';
 import { generateSecret, otpauthUrl, verifyTotp } from '../../auth/mfa/totp';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS } from '../../admin-audit/admin-audit.service';
@@ -62,7 +63,7 @@ export class AdminMfaService {
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect. Check your authenticator and try again.' });
     }
     const backupCodes = this.generateBackupCodes();
-    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), 10)));
+    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), resolveBcryptCost())));
     await this.adminPrisma.adminUser.update({
       where: { id: adminUserId },
       data: { mfaEnabledAt: new Date(), mfaBackupCodes: hashes },
@@ -125,7 +126,7 @@ export class AdminMfaService {
       throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
     }
     const backupCodes = this.generateBackupCodes();
-    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), 10)));
+    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), resolveBcryptCost())));
     await this.adminPrisma.adminUser.update({ where: { id: adminUserId }, data: { mfaBackupCodes: hashes } });
     await this.audit.record({
       adminUserId,

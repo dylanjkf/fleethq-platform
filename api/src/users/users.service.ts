@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
@@ -52,7 +53,7 @@ export class UsersService {
         message: 'An email address is required to invite a user (they set their own password).',
       });
     }
-    const passwordHash = await bcrypt.hash(dto.password ?? randomBytes(32).toString('hex'), 10);
+    const passwordHash = await bcrypt.hash(dto.password ?? randomBytes(32).toString('hex'), resolveBcryptCost());
 
     const created = await this.prisma.withTenant(companyId, async (tx) => {
       const role = await tx.role.findUnique({ where: { id: dto.roleId } });

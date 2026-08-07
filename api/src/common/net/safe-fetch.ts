@@ -1,4 +1,4 @@
-import { lookup } from 'dns';
+import * as dns from 'dns';
 import type { LookupAddress } from 'dns';
 import * as http from 'node:http';
 import * as https from 'node:https';
@@ -6,7 +6,17 @@ import { isIP } from 'net';
 import type { LookupFunction } from 'net';
 import { promisify } from 'util';
 
-const dnsLookup = promisify(lookup);
+/**
+ * Resolve `dns.lookup` at call time (rather than capturing it once at import)
+ * so the resolver is always the live one — this keeps the SSRF check honest if
+ * anything reconfigures DNS at runtime, and lets tests stub `dns.lookup` to
+ * assert the resolve-then-blocklist path (a hostname resolving to an internal
+ * address) without real network I/O. Behaviour is otherwise identical: with
+ * `{ all: true }` the promisified form returns the full `LookupAddress[]`.
+ */
+function dnsLookup(host: string, options: { all: true; verbatim: boolean }): Promise<LookupAddress[]> {
+  return promisify(dns.lookup)(host, options) as unknown as Promise<LookupAddress[]>;
+}
 
 const DEFAULT_MAX_REDIRECTS = 5;
 

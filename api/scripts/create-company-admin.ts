@@ -107,7 +107,10 @@ async function main() {
 
   const result = await prisma.$transaction(async (tx) => {
     if (!dbBypassesRls) {
-      await tx.$executeRawUnsafe(`SET LOCAL app.current_company_id = '${companyId}'`);
+      // Parameterized (set_config, not string-interpolated SET LOCAL) to match
+      // PrismaService.withTenant — hygiene, even though companyId is a
+      // server-generated UUID here.
+      await tx.$executeRaw`SELECT set_config('app.current_company_id', ${companyId}, true)`;
     }
     return provisionCompany(tx, {
       companyId,

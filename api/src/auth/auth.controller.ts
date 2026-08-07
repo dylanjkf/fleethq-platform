@@ -192,6 +192,7 @@ export class AuthController {
 
   /** Begin a usernameless passkey login (public) — no identifier needed; the platform's own credential picker handles it. */
   @Public()
+  @Throttle(AUTH_THROTTLE)
   @Post('webauthn/login/options')
   @HttpCode(HttpStatus.OK)
   beginWebauthnLogin() {
@@ -212,6 +213,7 @@ export class AuthController {
   // mfa/verify, magic-link/consume, and webauthn/login/verify above).
 
   @Public()
+  @Throttle(AUTH_THROTTLE)
   @Post('mfa-setup/begin')
   @HttpCode(HttpStatus.OK)
   beginPolicyMfaSetup(@Body() dto: PolicyMfaSetupBeginDto) {

@@ -3,6 +3,7 @@ import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/
 import { JwtService } from '@nestjs/jwt';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import * as bcrypt from 'bcrypt';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
@@ -224,7 +225,7 @@ export class AdminAuthService {
       throw new BadRequestException({ code: 'PASSWORD_REUSED', message: 'Choose a password different from your current one.' });
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, resolveBcryptCost());
     const updated = await this.adminPrisma.adminUser.update({
       where: { id: user.id },
       data: {

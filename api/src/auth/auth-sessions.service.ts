@@ -20,6 +20,17 @@ export interface UserSessionSummary {
 
 const TRUSTED_DEVICE_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_EXPIRES_IN_MS = 12 * 60 * 60 * 1000; // 12h — matches JWT_EXPIRES_IN's default
+/**
+ * "Remember me" bearer-token lifetime (security audit, Low — reviewed and kept
+ * deliberately). 30 days is long for a token sitting in localStorage, and the
+ * tradeoff is accepted because revocation is real and server-side: every
+ * request checks the session row (revokedAt / expiresAt) and the user's
+ * tokenVersion, so a "remember me" token is killed the instant the session is
+ * revoked, the password is changed, or all sessions are dropped — it is not a
+ * fire-and-forget 30-day grant. Shorten this constant if the risk posture
+ * changes; the accompanying DB session row's expiry is bounded by
+ * REMEMBER_ME_SESSION_EXPIRES_IN_MS below to match.
+ */
 const REMEMBER_ME_EXPIRES_IN = '30d';
 const REMEMBER_ME_SESSION_EXPIRES_IN_MS = 30 * 24 * 60 * 60 * 1000;
 
