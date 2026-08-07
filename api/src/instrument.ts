@@ -21,6 +21,13 @@ import * as Sentry from '@sentry/node';
 /** Header names that must never reach Sentry (auth material / cookies). */
 const SENSITIVE_HEADERS = ['authorization', 'cookie', 'set-cookie', 'stripe-signature', 'x-api-key', 'x-device-key'];
 
+/** Strip sensitive headers in place (kept as its own function to bound nesting depth). */
+function scrubSensitiveHeaders(headers: Record<string, unknown>): void {
+  for (const key of Object.keys(headers)) {
+    if (SENSITIVE_HEADERS.includes(key.toLowerCase())) delete headers[key];
+  }
+}
+
 Sentry.init({
   dsn: process.env.SENTRY_DSN || undefined,
   environment: process.env.NODE_ENV || 'development',
@@ -38,14 +45,11 @@ Sentry.init({
    * request, can't silently start exfiltrating credentials/PII.
    */
   beforeSend(event) {
-    if (event.request) {
-      delete event.request.data; // request body
-      delete event.request.cookies;
-      if (event.request.headers) {
-        for (const key of Object.keys(event.request.headers)) {
-          if (SENSITIVE_HEADERS.includes(key.toLowerCase())) delete event.request.headers[key];
-        }
-      }
+    const request = event.request;
+    if (request) {
+      delete request.data; // request body
+      delete request.cookies;
+      if (request.headers) scrubSensitiveHeaders(request.headers);
     }
     return event;
   },

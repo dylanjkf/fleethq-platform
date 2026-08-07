@@ -6,9 +6,7 @@ jest.mock('../common/net/safe-fetch', () => ({
   safeFetch: jest.fn(),
 }));
 
-// eslint-disable-next-line import/first
 import { safeFetch } from '../common/net/safe-fetch';
-// eslint-disable-next-line import/first
 import { BreachedPasswordService } from './breached-password.service';
 
 const safeFetchMock = safeFetch as jest.MockedFunction<typeof safeFetch>;
