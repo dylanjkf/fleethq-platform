@@ -426,8 +426,7 @@ export class BillingService {
    * once Stripe confirms it (fail-closed), and the guard already ensures a
    * decrease can't drop below live usage.
    */
-  async changeAssetQuantity(companyId: string, newQuantity: number, actorUserId?: string): Promise<{ quantity: number }> {
-    const stripe = this.getStripe();
+  async changeAssetQuantity(companyId: string, newQuantity: number, actorUserId?: string, via: 'customer' | 'admin' = 'customer'): Promise<{ quantity: number }> {
     const quantity = this.assertValidQuantity(newQuantity);
     const perAssetPriceId = this.perAssetPriceId();
 
@@ -458,7 +457,10 @@ export class BillingService {
     // Update the single subscription item's quantity with proration. Retrieve
     // the subscription to find the item id (the per-asset subscription has one
     // recurring line). Idempotency key collapses a double-submit of the same
-    // target quantity within the hour into one Stripe write.
+    // target quantity within the hour into one Stripe write. Stripe is only
+    // touched here — after the plan/usage validation above — so an invalid
+    // request is rejected without needing Stripe configured.
+    const stripe = this.getStripe();
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
     const item = subscription.items.data[0];
     if (!item) {
@@ -478,7 +480,7 @@ export class BillingService {
           companyId,
           eventType: 'QUANTITY_CHANGED',
           actorUserId: actorUserId ?? null,
-          detail: { from: currentQuantity, to: quantity, liveAssets, via: 'customer' },
+          detail: { from: currentQuantity, to: quantity, liveAssets, via },
         },
       }),
     );

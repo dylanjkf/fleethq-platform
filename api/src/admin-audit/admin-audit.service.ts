@@ -37,6 +37,7 @@ export const ADMIN_AUDIT_ACTIONS = {
   BILLING_PAYMENT_RETRIED: 'billing.payment_retried',
   BILLING_SUBSCRIPTION_CANCELED: 'billing.subscription_canceled',
   BILLING_SUBSCRIPTION_REINSTATED: 'billing.subscription_reinstated',
+  BILLING_QUANTITY_CHANGED: 'billing.quantity_changed',
   CUSTOMER_USER_VERIFICATION_RESENT: 'customer_users.verification_resent',
   ANNOUNCEMENT_CREATED: 'support.announcement_created',
   ANNOUNCEMENT_UPDATED: 'support.announcement_updated',
