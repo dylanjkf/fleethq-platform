@@ -151,11 +151,12 @@ export class ShiftsService {
 
 function startOfDay(d: Date): Date {
   const c = new Date(d);
-  c.setHours(0, 0, 0, 0);
+  // UTC to match this codebase's convention — see dashboard-metrics and reports.
+  c.setUTCHours(0, 0, 0, 0);
   return c;
 }
 function endOfDay(d: Date): Date {
   const c = new Date(d);
-  c.setHours(23, 59, 59, 999);
+  c.setUTCHours(23, 59, 59, 999);
   return c;
 }

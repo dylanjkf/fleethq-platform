@@ -63,8 +63,11 @@ export async function assertOwnership<T extends OwnableRecord>(
  * the identical missing / cross-tenant / archived check against a record the
  * caller already fetched, throwing the same existence-hiding `NotFoundException`.
  * This lets those read paths share the one ownership rule instead of repeating
- * the `if (!row || row.companyId !== companyId) throw` block inline (Round 3
- * Medium — the ownership-helper consolidation, finished in the read paths).
+ * the `if (!row || row.companyId !== companyId) throw` block inline. Adoption is
+ * ongoing, not complete: this helper (and `assertOwnership`) is the intended
+ * home for the check, but an equivalent inline guard is still duplicated across
+ * a number of services — migrate those to this helper as they are touched,
+ * rather than claiming the consolidation is already finished everywhere.
  */
 export function assertOwnedRecord<T extends OwnableRecord>(
   record: T | null | undefined,

@@ -1082,6 +1082,10 @@ model GpsPing {
   device  GpsDevice @relation(fields: [deviceId], references: [id])
 
   @@index([companyId, deviceId])
+  // The daily retention purge deletes pings older than a 540-day window,
+  // filtering on recordedAt across the whole table — index it so that sweep is a
+  // range scan rather than a full-table scan that grows with ping volume.
+  @@index([recordedAt])
   @@map("gps_pings")
 }
 
