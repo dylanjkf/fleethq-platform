@@ -163,7 +163,7 @@ export class AuthService {
 
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) {
-      const locked = await this.recordFailedLogin(user.id, user.failedLoginCount);
+      const locked = await this.recordFailedLogin(user.id);
       if (locked) await this.handleAccountLocked(user, context);
       throw invalidCredentials('wrong_password');
     }
@@ -385,7 +385,7 @@ export class AuthService {
 
     const result = await this.mfa.verifyChallenge(user, code);
     if (!result.ok) {
-      const locked = await this.recordFailedLogin(user.id, user.failedLoginCount);
+      const locked = await this.recordFailedLogin(user.id);
       if (locked) await this.handleAccountLocked(user, context);
       void this.audit.recordSystem({
         action: AUDIT_ACTIONS.MFA_CHALLENGE_FAILED,
@@ -826,16 +826,23 @@ export class AuthService {
   private static readonly MAX_FAILED_LOGINS = 5;
   private static readonly LOCK_WINDOW_MS = 15 * 60 * 1000;
 
-  private async recordFailedLogin(userId: string, currentCount: number): Promise<boolean> {
-    const next = currentCount + 1;
-    const locked = next >= AuthService.MAX_FAILED_LOGINS;
-    await this.systemPrisma.user.update({
+  private async recordFailedLogin(userId: string): Promise<boolean> {
+    // Atomic increment: concurrent failed attempts each apply `+1` at the DB
+    // rather than reading a stale count and writing back the same value, so a
+    // burst of parallel guesses can't slip past MAX_FAILED_LOGINS via lost
+    // updates. The new count is read back from the same statement.
+    const { failedLoginCount } = await this.systemPrisma.user.update({
       where: { id: userId },
-      data: {
-        failedLoginCount: locked ? 0 : next,
-        lockedUntil: locked ? new Date(Date.now() + AuthService.LOCK_WINDOW_MS) : undefined,
-      },
+      data: { failedLoginCount: { increment: 1 } },
+      select: { failedLoginCount: true },
     });
+    const locked = failedLoginCount >= AuthService.MAX_FAILED_LOGINS;
+    if (locked) {
+      await this.systemPrisma.user.update({
+        where: { id: userId },
+        data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + AuthService.LOCK_WINDOW_MS) },
+      });
+    }
     return locked;
   }
 

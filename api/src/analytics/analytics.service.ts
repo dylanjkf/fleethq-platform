@@ -54,7 +54,7 @@ export class AnalyticsService {
     if (good !== undefined && warn !== undefined && warn > good) {
       throw new BadRequestException({ code: 'ANALYTICS_THRESHOLD_ORDER', message: 'The amber threshold must be at or below the green threshold.' });
     }
-    const result = await this.prisma.withTenant(companyId, (tx) =>
+    await this.prisma.withTenant(companyId, (tx) =>
       tx.analyticsSetting.upsert({
         where: { companyId },
         create: { companyId, ...dto },
