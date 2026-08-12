@@ -7,6 +7,7 @@ import { DepotsModule } from '../depots/depots.module';
 import { AssetsModule } from '../assets/assets.module';
 import { OperatorsModule } from '../operators/operators.module';
 import { ComplianceModule } from '../compliance/compliance.module';
+import { FormsModule } from '../forms/forms.module';
 import { JobsController } from './jobs.controller';
 import { JobsService } from './jobs.service';
 import { JobsSupportService } from './jobs.support';
@@ -16,7 +17,7 @@ import { ParcelsService } from './parcels.service';
 import { LoadVerificationService } from './load-verification.service';
 
 @Module({
-  imports: [TimelineModule, AttachmentsModule, NotificationsModule, CustomersModule, DepotsModule, AssetsModule, OperatorsModule, ComplianceModule],
+  imports: [TimelineModule, AttachmentsModule, NotificationsModule, CustomersModule, DepotsModule, AssetsModule, OperatorsModule, ComplianceModule, FormsModule],
   controllers: [JobsController],
   providers: [JobsSupportService, JobsService, JobStopsService, PodReceiptService, ParcelsService, LoadVerificationService],
   exports: [JobsService, JobStopsService],

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
@@ -8,7 +8,7 @@ import { UpdateFormTemplateDto } from './dto/update-form-template.dto';
 import { ListFormTemplatesDto } from './dto/list-form-templates.dto';
 import { SubmitFormDto } from './dto/submit-form.dto';
 import { ListFormSubmissionsDto } from './dto/list-form-submissions.dto';
-import { FormFieldDto, FormFieldType, isSelectType } from './dto/form-field.dto';
+import { FormFieldDto, FormFieldType, isAttachmentType, isSelectType } from './dto/form-field.dto';
 import { FormAnswerDto } from './dto/form-answer.dto';
 import { assertOwnership, assertOwnedRecord } from '../common/ownership';
 
@@ -75,17 +75,19 @@ export class FormsService {
     const fields = this.normalizeFields(dto.fields);
     return this.prisma.withTenant(companyId, async (tx) => {
       if (dto.referenceDocumentId) await this.requireDocument(tx, companyId, dto.referenceDocumentId);
-      const template = await tx.formTemplate.create({
-        data: {
-          companyId,
-          name: dto.name,
-          description: dto.description,
-          targetContext: dto.targetContext ?? 'BOTH',
-          fields: fields as unknown as Prisma.InputJsonValue,
-          referenceDocumentId: dto.referenceDocumentId ?? null,
-        },
-        include: TEMPLATE_INCLUDE,
-      });
+      const template = await this.assertSingleDeliveryTemplate(() =>
+        tx.formTemplate.create({
+          data: {
+            companyId,
+            name: dto.name,
+            description: dto.description,
+            targetContext: dto.targetContext ?? 'BOTH',
+            fields: fields as unknown as Prisma.InputJsonValue,
+            referenceDocumentId: dto.referenceDocumentId ?? null,
+          },
+          include: TEMPLATE_INCLUDE,
+        }),
+      );
 
       await this.timeline.record(tx, {
         companyId,
@@ -169,18 +171,20 @@ export class FormsService {
         nextFields !== undefined && JSON.stringify(nextFields) !== JSON.stringify(existing.fields);
       if (dto.referenceDocumentId) await this.requireDocument(tx, companyId, dto.referenceDocumentId);
 
-      const template = await tx.formTemplate.update({
-        where: { id },
-        data: {
-          name: dto.name,
-          description: dto.description,
-          targetContext: dto.targetContext,
-          fields: nextFields !== undefined ? (nextFields as unknown as Prisma.InputJsonValue) : undefined,
-          referenceDocumentId: dto.referenceDocumentId === undefined ? undefined : dto.referenceDocumentId,
-          version: contentChanged ? { increment: 1 } : undefined,
-        },
-        include: TEMPLATE_INCLUDE,
-      });
+      const template = await this.assertSingleDeliveryTemplate(() =>
+        tx.formTemplate.update({
+          where: { id },
+          data: {
+            name: dto.name,
+            description: dto.description,
+            targetContext: dto.targetContext,
+            fields: nextFields !== undefined ? (nextFields as unknown as Prisma.InputJsonValue) : undefined,
+            referenceDocumentId: dto.referenceDocumentId === undefined ? undefined : dto.referenceDocumentId,
+            version: contentChanged ? { increment: 1 } : undefined,
+          },
+          include: TEMPLATE_INCLUDE,
+        }),
+      );
 
       await this.timeline.record(tx, {
         companyId,
@@ -221,61 +225,133 @@ export class FormsService {
 
   async submit(companyId: string, actorUserId: string, dto: SubmitFormDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
-      // Idempotent replay: a client-provided id that already exists is returned
-      // as-is (the offline outbox may re-send after a lost success response).
-      if (dto.id) {
-        const existing = await tx.formSubmission.findUnique({ where: { id: dto.id }, include: this.submissionInclude() });
-        if (existing) return { ...existing, idempotentReplay: true };
-      }
-
       const template = await this.requireTemplate(tx, companyId, dto.templateId);
+      // The generic submit path trusts the client's snapshot (a faithful record
+      // of what the user was shown). The enforced POD path deliberately does not
+      // — see createDeliverySubmissionInTx.
       const snapshot = this.normalizeFields(dto.templateSnapshot);
-      const answers = await this.validateAnswers(tx, companyId, snapshot, dto.answers);
+      return this.createSubmission(tx, companyId, actorUserId, {
+        template,
+        templateVersion: dto.templateVersion,
+        snapshot,
+        answers: dto.answers,
+        submissionId: dto.id,
+      });
+    });
+  }
 
-      const submission = await tx.formSubmission.create({
-        data: {
-          id: dto.id,
-          companyId,
-          templateId: template.id,
-          templateVersion: dto.templateVersion,
-          templateSnapshot: snapshot as unknown as Prisma.InputJsonValue,
-          answers: answers as unknown as Prisma.InputJsonValue,
-          submittedByUserId: actorUserId,
-        },
+  /**
+   * The tenant's active (non-archived) delivery-confirmation template, or null.
+   * A partial unique index guarantees at most one, so `findFirst` is exact.
+   * Configurable POD — docs/design/Configurable_POD.md.
+   */
+  findActiveDeliveryTemplate(tx: Prisma.TransactionClient, companyId: string) {
+    return tx.formTemplate.findFirst({
+      where: { companyId, targetContext: 'DELIVERY', archivedAt: null },
+    });
+  }
+
+  /**
+   * Create the shared POD evidence submission for a stop completion, inside the
+   * caller's (JobStopsService) transaction so evidence + completion commit
+   * atomically — the same "createInTx" discipline the legacy POD photo used.
+   *
+   * Unlike the generic `submit`, this validates and snapshots against the
+   * SERVER's current template fields, never a client-sent snapshot: the
+   * configured evidence set is enforced server-side, so a client cannot dodge a
+   * required photo by sending a snapshot that marks it optional.
+   */
+  createDeliverySubmissionInTx(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+    template: { id: string; name: string; version: number; fields: Prisma.JsonValue },
+    answers: FormAnswerDto[],
+    submissionId?: string,
+  ) {
+    const snapshot = template.fields as unknown as NormalizedField[];
+    return this.createSubmission(tx, companyId, actorUserId, {
+      template,
+      templateVersion: template.version,
+      snapshot,
+      answers,
+      submissionId,
+    });
+  }
+
+  /**
+   * Shared submission-creation core for both the generic submit and the POD
+   * evidence path: idempotent replay, answer validation against the given
+   * snapshot (which stores photo/signature attachments and enforces required
+   * fields), the immutable row, and the Timeline events.
+   */
+  private async createSubmission(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+    params: {
+      template: { id: string; name: string };
+      templateVersion: number;
+      snapshot: NormalizedField[];
+      answers: FormAnswerDto[];
+      submissionId?: string;
+    },
+  ) {
+    // Idempotent replay: a client-provided id that already exists is returned
+    // as-is (the offline outbox may re-send after a lost success response).
+    if (params.submissionId) {
+      const existing = await tx.formSubmission.findUnique({
+        where: { id: params.submissionId },
         include: this.submissionInclude(),
       });
+      if (existing) return { ...existing, idempotentReplay: true };
+    }
+
+    const answers = await this.validateAnswers(tx, companyId, actorUserId, params.snapshot, params.answers);
+
+    const submission = await tx.formSubmission.create({
+      data: {
+        id: params.submissionId,
+        companyId,
+        templateId: params.template.id,
+        templateVersion: params.templateVersion,
+        templateSnapshot: params.snapshot as unknown as Prisma.InputJsonValue,
+        answers: answers as unknown as Prisma.InputJsonValue,
+        submittedByUserId: actorUserId,
+      },
+      include: this.submissionInclude(),
+    });
+
+    await this.timeline.record(tx, {
+      companyId,
+      entityType: TimelineEntityType.FORM_SUBMISSION,
+      entityId: submission.id,
+      eventType: 'created',
+      summary: `Form "${params.template.name}" submitted.`,
+      actorUserId,
+    });
+
+    // Universal_Forms.md: "Submitted forms produce Timeline events on every
+    // entity they reference" — every asset_ref/operator_ref field with an
+    // answered value gets one, in addition to the submission's own event.
+    const answerByFieldId = new Map(answers.map((a) => [a.fieldId, a.value]));
+    for (const field of params.snapshot) {
+      if (field.type !== 'asset_ref' && field.type !== 'operator_ref') continue;
+      const value = answerByFieldId.get(field.id);
+      if (typeof value !== 'string') continue;
 
       await this.timeline.record(tx, {
         companyId,
-        entityType: TimelineEntityType.FORM_SUBMISSION,
-        entityId: submission.id,
-        eventType: 'created',
-        summary: `Form "${template.name}" submitted.`,
+        entityType: field.type === 'asset_ref' ? TimelineEntityType.ASSET : TimelineEntityType.OPERATOR,
+        entityId: value,
+        eventType: 'form_submitted',
+        summary: `Form "${params.template.name}" submitted, referencing this ${field.type === 'asset_ref' ? 'asset' : 'operator'}.`,
+        payload: { submissionId: submission.id, templateId: params.template.id },
         actorUserId,
       });
+    }
 
-      // Universal_Forms.md: "Submitted forms produce Timeline events on every
-      // entity they reference" — every asset_ref/operator_ref field with an
-      // answered value gets one, in addition to the submission's own event.
-      const answerByFieldId = new Map(answers.map((a) => [a.fieldId, a.value]));
-      for (const field of snapshot) {
-        if (field.type !== 'asset_ref' && field.type !== 'operator_ref') continue;
-        const value = answerByFieldId.get(field.id);
-        if (typeof value !== 'string') continue;
-
-        await this.timeline.record(tx, {
-          companyId,
-          entityType: field.type === 'asset_ref' ? TimelineEntityType.ASSET : TimelineEntityType.OPERATOR,
-          entityId: value,
-          eventType: 'form_submitted',
-          summary: `Form "${template.name}" submitted, referencing this ${field.type === 'asset_ref' ? 'asset' : 'operator'}.`,
-          payload: { submissionId: submission.id, templateId: template.id },
-          actorUserId,
-        });
-      }
-
-      return { ...submission, idempotentReplay: false };
-    });
+    return { ...submission, idempotentReplay: false };
   }
 
   async findAllSubmissions(companyId: string, query: ListFormSubmissionsDto) {
@@ -366,6 +442,7 @@ export class FormsService {
   private async validateAnswers(
     tx: Prisma.TransactionClient,
     companyId: string,
+    actorUserId: string | null,
     snapshot: NormalizedField[],
     answers: FormAnswerDto[],
   ): Promise<AnswerRecord[]> {
@@ -406,7 +483,7 @@ export class FormsService {
         continue;
       }
 
-      const value = await this.validateFieldValue(tx, companyId, field, rawValue);
+      const value = await this.validateFieldValue(tx, companyId, actorUserId, field, rawValue);
       resolvedByFieldId.set(field.id, value);
       result.push({ fieldId: field.id, value });
     }
@@ -425,6 +502,7 @@ export class FormsService {
   private async validateFieldValue(
     tx: Prisma.TransactionClient,
     companyId: string,
+    actorUserId: string | null,
     field: NormalizedField,
     value: unknown,
   ): Promise<unknown> {
@@ -481,6 +559,72 @@ export class FormsService {
         });
         return value;
       }
+      case 'photo':
+      case 'signature': {
+        // Configurable POD (docs/design/Configurable_POD.md): the answer arrives
+        // as a base64 file payload; store it via the same AttachmentsService the
+        // legacy POD path uses (which enforces the size cap, allowed MIME types,
+        // and magic-number sniffing), then persist ONLY the resulting Attachment
+        // id — never the raw base64 in the submission JSON.
+        const payload = this.parseAttachmentPayload(field, value);
+        const defaultName = field.type === 'signature' ? 'signature.png' : 'photo.jpg';
+        const att = await this.attachments.createInTx(tx, companyId, actorUserId, {
+          filename: payload.filename ?? defaultName,
+          contentType: payload.contentType,
+          dataBase64: payload.base64,
+        });
+        return att.id;
+      }
+    }
+  }
+
+  /** Validate the `{ contentType, filename?, base64 }` shape of a photo/signature answer. */
+  private parseAttachmentPayload(
+    field: NormalizedField,
+    value: unknown,
+  ): { contentType: string; filename?: string; base64: string } {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new BadRequestException({
+        code: 'FORM_INVALID_VALUE',
+        message: `Field "${field.label}" must be a { contentType, base64 } file payload.`,
+      });
+    }
+    const v = value as Record<string, unknown>;
+    if (typeof v.contentType !== 'string' || typeof v.base64 !== 'string' || v.base64.length === 0) {
+      throw new BadRequestException({
+        code: 'FORM_INVALID_VALUE',
+        message: `Field "${field.label}" needs a contentType and non-empty base64 payload.`,
+      });
+    }
+    if (v.filename !== undefined && typeof v.filename !== 'string') {
+      throw new BadRequestException({
+        code: 'FORM_INVALID_VALUE',
+        message: `Field "${field.label}" filename must be a string.`,
+      });
+    }
+    return { contentType: v.contentType, filename: v.filename as string | undefined, base64: v.base64 };
+  }
+
+  /**
+   * Run a template write, translating the "one active DELIVERY template per
+   * company" partial-unique-index violation into a clean 409 instead of a raw
+   * Prisma error. Configurable POD — docs/design/Configurable_POD.md.
+   */
+  private async assertSingleDeliveryTemplate<T>(write: () => Promise<T>): Promise<T> {
+    try {
+      return await write();
+    } catch (err) {
+      // `form_templates` carries exactly one unique index — the partial
+      // one-active-DELIVERY-per-company index — so any P2002 on these writes is
+      // that rule. (Prisma reports a raw partial index's target inconsistently
+      // across versions, so we key off the code, not the target string.)
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException({
+          code: 'DELIVERY_TEMPLATE_EXISTS',
+          message: 'This company already has an active delivery-confirmation template. Archive it first.',
+        });
+      }
+      throw err;
     }
   }
 

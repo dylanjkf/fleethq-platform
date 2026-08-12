@@ -22,6 +22,7 @@ import { ImportStopRowDto } from './dto/import-stop-row.dto';
 import { ReorderStopsDto } from './dto/reorder-stops.dto';
 import { ReattemptStopDto } from './dto/reattempt-stop.dto';
 import { JOB_INCLUDE, JobsSupportService } from './jobs.support';
+import { FormsService } from '../forms/forms.service';
 
 /** How far back a client-supplied delivery time is trusted. A DriverOS entry
  *  that syncs after a long dead-zone run is legitimately hours old; anything
@@ -62,6 +63,7 @@ export class JobStopsService {
     private readonly notifications: NotificationsService,
     private readonly customers: CustomersService,
     private readonly support: JobsSupportService,
+    private readonly forms: FormsService,
   ) {}
 
   /**
@@ -360,6 +362,35 @@ export class JobStopsService {
         });
       }
 
+      // Configurable POD (docs/design/Configurable_POD.md): if the tenant has an
+      // active DELIVERY form template, a confirmed drop MUST carry evidence
+      // satisfying it — validated server-side (a missing required photo is
+      // rejected here, not just hidden in a client UI). The one submission is
+      // shared across the stop's parcels. No DELIVERY template → legacy
+      // podPhotoBase64/signatureBase64 path, unchanged.
+      const podTemplate =
+        dto.outcome === StopOutcome.DELIVERED ? await this.forms.findActiveDeliveryTemplate(tx, companyId) : null;
+      let podSubmissionId: string | undefined;
+      if (podTemplate) {
+        if (!dto.evidence) {
+          throw new BadRequestException({
+            code: 'POD_EVIDENCE_REQUIRED',
+            message: `Proof of delivery is required: complete the "${podTemplate.name}" form.`,
+          });
+        }
+        const submission = await this.forms.createDeliverySubmissionInTx(
+          tx,
+          companyId,
+          actorUserId,
+          podTemplate,
+          dto.evidence.answers,
+          dto.evidence.id,
+        );
+        podSubmissionId = submission.id;
+      }
+
+      const completedAt = resolveOccurredAt(dto.occurredAt);
+
       const podAttachmentId = await this.storeStopProof(
         tx,
         companyId,
@@ -381,16 +412,33 @@ export class JobStopsService {
         where: { id: stopId },
         data: {
           outcome: dto.outcome as StopOutcome,
-          completedAt: resolveOccurredAt(dto.occurredAt),
+          completedAt,
           recipientName: dto.recipientName,
           note: dto.note,
           failureReason: dto.failureReason,
           podAttachmentId,
           signatureAttachmentId,
+          podSubmissionId,
         },
       });
 
-      await this.recordStopCompletion(tx, companyId, actorUserId, job, stopId, stop, dto, !!podAttachmentId);
+      // Multi-drop: mark each covered parcel individually delivered, sharing the
+      // one evidence submission. Only on a DELIVERED outcome — a failed stop
+      // delivers nothing.
+      if (dto.outcome === StopOutcome.DELIVERED) {
+        await this.markParcelsDelivered(tx, stopId, dto.parcelIds, completedAt, podSubmissionId);
+      }
+
+      await this.recordStopCompletion(
+        tx,
+        companyId,
+        actorUserId,
+        job,
+        stopId,
+        stop,
+        dto,
+        !!podAttachmentId || !!podSubmissionId,
+      );
 
       // Roll the job up to COMPLETED once every stop is terminal.
       const remaining = await tx.jobStop.count({ where: { jobId, outcome: StopOutcome.PENDING } });
@@ -421,6 +469,46 @@ export class JobStopsService {
     if (!dataBase64) return undefined;
     const att = await this.attachments.createInTx(tx, companyId, actorUserId, { filename, contentType, dataBase64 });
     return att.id;
+  }
+
+  /**
+   * Multi-drop (docs/design/Configurable_POD.md): mark the covered parcels of a
+   * stop delivered, each stamped with its own `deliveredAt` while sharing the
+   * one POD submission. `parcelIds` restricts the set (validated to belong to
+   * the stop); omitted → every parcel at the stop. Already-delivered parcels are
+   * left untouched (idempotent replay). A stop with no parcels is a no-op — the
+   * stop-level completion already recorded the delivery.
+   */
+  private async markParcelsDelivered(
+    tx: Prisma.TransactionClient,
+    stopId: string,
+    parcelIds: string[] | undefined,
+    deliveredAt: Date,
+    podSubmissionId: string | undefined,
+  ) {
+    const parcels = await tx.stopParcel.findMany({ where: { stopId }, select: { id: true } });
+    if (parcels.length === 0) return;
+
+    const stopParcelIds = new Set(parcels.map((p) => p.id));
+    let targetIds: string[];
+    if (parcelIds && parcelIds.length > 0) {
+      for (const id of parcelIds) {
+        if (!stopParcelIds.has(id)) {
+          throw new BadRequestException({
+            code: 'POD_PARCEL_NOT_ON_STOP',
+            message: 'A parcel id in this confirmation does not belong to the stop.',
+          });
+        }
+      }
+      targetIds = parcelIds;
+    } else {
+      targetIds = [...stopParcelIds];
+    }
+
+    await tx.stopParcel.updateMany({
+      where: { id: { in: targetIds }, deliveredAt: null },
+      data: { deliveredAt, podSubmissionId: podSubmissionId ?? null },
+    });
   }
 
   /** Timeline (asset + job) and the failed-delivery office notification for a completed stop. */
