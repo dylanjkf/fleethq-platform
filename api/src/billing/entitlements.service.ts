@@ -5,6 +5,26 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
 import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, perAssetTier, resolvePlanTier } from './plans';
 
+/**
+ * Pure predicate for "is this company past due AND past its non-payment grace
+ * window?". Extracted from `EntitlementsService.computeBillingReadOnly` so the
+ * grace gating — active during the window, restricted only once it elapses — can
+ * be unit-tested directly against fixed clocks (see business-days.spec / this
+ * predicate's spec) without standing up enforcement config or a database. It does
+ * NOT check enforcement or subscription presence; the caller layers those on.
+ */
+export function isPastDueGraceElapsed(
+  company: { subscriptionStatus: SubscriptionStatus; paymentFailureCount: number; gracePeriodEndsAt: Date | null },
+  now: Date = new Date(),
+): boolean {
+  return (
+    company.subscriptionStatus === SubscriptionStatus.PAST_DUE &&
+    company.paymentFailureCount > 0 &&
+    company.gracePeriodEndsAt != null &&
+    now.getTime() > company.gracePeriodEndsAt.getTime()
+  );
+}
+
 export interface Entitlements {
   planKey: string;
   planName: string;
@@ -79,24 +99,26 @@ export class EntitlementsService {
 
   /**
    * Payment-failure read-only predicate: enforcement on, the company actually
-   * has a Stripe subscription, and its dunning retries are exhausted (past due
-   * with no next payment attempt after at least one failure). Voluntary states
-   * (a never-subscribed Free company, an active trial) are never read-only —
-   * only a paid subscription that has stopped paying.
+   * has a Stripe subscription, it's past due after at least one failure, AND its
+   * 5-business-day grace window has elapsed. During the grace window (now on or
+   * before `gracePeriodEndsAt`) the account stays fully writable — losing access
+   * the instant a card fails would punish a transient payment hiccup. Voluntary
+   * states (a never-subscribed Free company, an active trial) are never read-only.
+   * A past-due company with no grace window set (grace null) is not restricted —
+   * the restriction only ever follows an explicit, elapsed grace deadline.
    */
-  private computeBillingReadOnly(company: {
-    subscriptionStatus: SubscriptionStatus;
-    stripeSubscriptionId: string | null;
-    nextPaymentAttemptAt: Date | null;
-    paymentFailureCount: number;
-  }): boolean {
+  private computeBillingReadOnly(
+    company: {
+      subscriptionStatus: SubscriptionStatus;
+      stripeSubscriptionId: string | null;
+      paymentFailureCount: number;
+      gracePeriodEndsAt: Date | null;
+    },
+    now: Date = new Date(),
+  ): boolean {
     if (!this.isEnforced()) return false;
     if (!company.stripeSubscriptionId) return false;
-    return (
-      company.subscriptionStatus === SubscriptionStatus.PAST_DUE &&
-      company.nextPaymentAttemptAt == null &&
-      company.paymentFailureCount > 0
-    );
+    return isPastDueGraceElapsed(company, now);
   }
 
   private toEntitlements(
@@ -141,8 +163,8 @@ export class EntitlementsService {
         select: {
           subscriptionStatus: true,
           stripeSubscriptionId: true,
-          nextPaymentAttemptAt: true,
           paymentFailureCount: true,
+          gracePeriodEndsAt: true,
         },
       });
       return this.computeBillingReadOnly(company);
@@ -168,6 +190,7 @@ export class EntitlementsService {
         stripeSubscriptionId: true,
         nextPaymentAttemptAt: true,
         paymentFailureCount: true,
+        gracePeriodEndsAt: true,
       },
     });
     const plan = this.resolvePlan(company);

@@ -297,6 +297,13 @@ model Company {
   /// the billing settings page can tell a customer exactly when the next
   /// charge attempt will happen, not just "your payment failed."
   nextPaymentAttemptAt     DateTime?          @map("next_payment_attempt_at")
+  /// End of the non-payment GRACE window. Set on the first failed payment of a
+  /// dunning cycle to `now + GRACE_PERIOD_BUSINESS_DAYS` business days (weekends
+  /// excluded; public holidays are NOT considered — see business-days.ts). The
+  /// account stays fully active until this instant; only once `now` passes it
+  /// does the billing read-only restriction apply. Cleared to null on recovery
+  /// (invoice.paid), so a later failure starts a fresh window.
+  gracePeriodEndsAt        DateTime?          @map("grace_period_ends_at")
   /// `created` timestamp of the most recent Stripe subscription-state webhook
   /// event applied to this company. Guards against out-of-order delivery
   /// (Stripe explicitly documents webhooks can arrive out of order): a
