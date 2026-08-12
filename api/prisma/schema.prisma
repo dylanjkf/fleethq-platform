@@ -2993,11 +2993,41 @@ model AdminUser {
   role              AdminRole               @relation(fields: [roleId], references: [id])
   sessions          AdminSession[]
   trustedDevices    AdminTrustedDevice[]
+  authTokens        AdminAuthToken[]
   auditLogEntries   AdminAuditLog[]
   organisationNotes AdminOrganisationNote[]
   announcements     Announcement[]
 
   @@map("admin_users")
+}
+
+/// The admin-platform counterpart of `AuthTokenType`. Only self-service
+/// password reset needs one today (the admin console has no email-verify or
+/// magic-link flow), but it is modelled as an enum so future admin link types
+/// slot in the same way the customer side did.
+enum AdminAuthTokenType {
+  PASSWORD_RESET
+}
+
+/// Single-use, expiring tokens behind the admin console's self-service
+/// password-reset link — the admin-scoped mirror of `AuthToken`. Only the
+/// SHA-256 *hash* of the token is stored, so a DB leak can't be replayed into
+/// an admin account takeover; the raw token exists only in the emailed link.
+/// Lives in the `admin_*` table space and is touched solely by the BYPASSRLS
+/// `fleetos_admin` role, exactly like the other admin auth tables.
+model AdminAuthToken {
+  id          String             @id @default(uuid()) @db.Uuid
+  adminUserId String             @map("admin_user_id") @db.Uuid
+  type        AdminAuthTokenType
+  tokenHash   String             @unique @map("token_hash")
+  expiresAt   DateTime           @map("expires_at")
+  usedAt      DateTime?          @map("used_at")
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, type])
+  @@map("admin_auth_tokens")
 }
 
 /// One row per active login (not per request) — the "device tracking" +
