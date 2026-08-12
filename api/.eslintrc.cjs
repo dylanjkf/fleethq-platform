@@ -17,7 +17,7 @@ module.exports = {
   },
   rules: {
     '@typescript-eslint/no-explicit-any': 'warn',
-    '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
 
     // FleetHQ Engineering Constitution — code-size / complexity limits.
     // Enforced here so the standards live in tooling, not just prose, and a
