@@ -345,12 +345,15 @@ export class ReportsService {
 
 function startOfDay(d: Date): Date {
   const c = new Date(d);
-  c.setHours(0, 0, 0, 0);
+  // UTC to match this codebase's convention (see dashboard-metrics) — local-time
+  // setHours would shift day boundaries by the server's offset and bucket rows
+  // into the wrong day for reporting.
+  c.setUTCHours(0, 0, 0, 0);
   return c;
 }
 function endOfDay(d: Date): Date {
   const c = new Date(d);
-  c.setHours(23, 59, 59, 999);
+  c.setUTCHours(23, 59, 59, 999);
   return c;
 }
 function addDays(d: Date, days: number): Date {

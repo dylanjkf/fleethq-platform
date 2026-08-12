@@ -213,8 +213,16 @@ export class GpsService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     if (Number.isNaN(recordedAt.getTime())) throw new BadRequestException({ code: 'BAD_TIMESTAMP', message: 'recordedAt is not a valid date.' });
 
+    // The device row holds the *live* position (drives the live map). A ping
+    // that arrives late (buffered on the device, then flushed) must not move the
+    // live marker backwards in time, so only advance the device's last-known
+    // position when this reading is newer than what's already stored. The ping
+    // itself is always recorded for history, ordered by recordedAt.
+    const isNewerFix = !device.lastLocationAt || recordedAt > device.lastLocationAt;
     await this.systemPrisma.$transaction([
-      this.systemPrisma.gpsDevice.update({ where: { id: device.id }, data: { lastLat: dto.lat, lastLng: dto.lng, lastLocationAt: recordedAt } }),
+      ...(isNewerFix
+        ? [this.systemPrisma.gpsDevice.update({ where: { id: device.id }, data: { lastLat: dto.lat, lastLng: dto.lng, lastLocationAt: recordedAt } })]
+        : []),
       this.systemPrisma.gpsPing.create({ data: { companyId: device.companyId, deviceId: device.id, lat: dto.lat, lng: dto.lng, recordedAt } }),
     ]);
     return { accepted: true };

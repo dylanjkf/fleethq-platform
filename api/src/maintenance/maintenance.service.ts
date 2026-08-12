@@ -227,10 +227,24 @@ export class MaintenanceService {
         });
       }
 
-      const updatedPart = await tx.part.update({
-        where: { id: part.id },
+      // Atomic guarded decrement: the `quantityOnHand >= quantity` predicate is
+      // evaluated by Postgres under the row lock the UPDATE takes, so two
+      // concurrent parts-usage submissions against the same part can't both pass
+      // and drive stock negative — the loser matches zero rows. The findUnique
+      // check above only produces the friendly "only N in stock" message in the
+      // common (uncontended) case; this is the authoritative guard.
+      const decremented = await tx.part.updateMany({
+        where: { id: part.id, companyId, quantityOnHand: { gte: dto.quantity } },
         data: { quantityOnHand: { decrement: dto.quantity } },
       });
+      if (decremented.count === 0) {
+        throw new ConflictException({
+          code: 'INSUFFICIENT_STOCK',
+          message: `Only ${part.quantityOnHand} of "${part.name}" in stock.`,
+        });
+      }
+      // Re-read within the same transaction to report the true remaining count.
+      const updatedPart = await tx.part.findUniqueOrThrow({ where: { id: part.id } });
 
       const usage = await tx.maintenanceJobPartUsage.create({
         data: {

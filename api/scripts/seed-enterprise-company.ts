@@ -22,6 +22,7 @@ import { randomUUID } from 'crypto';
 import { JobStatus, MessageSenderType, PrismaClient, StopOutcome } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { provisionCompany } from '../src/companies/provision-company';
+import { resolveBcryptCost } from '../src/common/security/bcrypt-cost';
 import { assertSafeToSeed } from './seed-guard';
 
 assertSafeToSeed('seed-enterprise-company');
@@ -185,7 +186,7 @@ async function main() {
 
   const landClass = await prisma.assetClass.findFirstOrThrow({ where: { companyId: null, key: 'LAND' } });
   const driverRole = await prisma.role.findFirstOrThrow({ where: { companyId, name: 'Driver' } });
-  const passwordHash = await bcrypt.hash(DEV_PASSWORD, 10); // hash once, reuse for every driver
+  const passwordHash = await bcrypt.hash(DEV_PASSWORD, resolveBcryptCost()); // hash once, reuse for every driver
 
   // ---- Assets (trucks) ----
   console.log(`Creating ${ASSET_COUNT} assets…`);

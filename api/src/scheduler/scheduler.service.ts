@@ -28,8 +28,10 @@ const SIGNUP_RECONCILE_TASK = 'signup_reconcile';
 /**
  * Dependency-free background scheduler. Deliberately not `@nestjs/schedule`
  * (which conflicts with this app's pinned NestJS versions) — a guarded
- * `setInterval` is the boring, proven equivalent for the one recurring job we
- * need today, with no new dependency.
+ * `setInterval` is the boring, proven equivalent for the handful of recurring
+ * jobs we run today (compliance-expiry sweep, integration dead-letter retry,
+ * signup pending-expiry and reconcile, and the other registered tasks), with no
+ * new dependency.
  *
  * OFF by default: it only runs when `SCHEDULER_ENABLED=true`, and never under
  * tests. In a multi-instance deployment, enable it on exactly one instance (or

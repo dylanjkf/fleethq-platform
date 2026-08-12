@@ -70,7 +70,7 @@ export class AdminAuthService {
 
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) {
-      const locked = await this.recordFailedLogin(user.id, user.failedLoginCount);
+      const locked = await this.recordFailedLogin(user.id);
       if (locked) {
         this.logger.warn({ event: 'admin_auth.account_locked', username, adminUserId: user.id }, 'Admin account locked after repeated failures');
         await this.audit.record({
@@ -349,16 +349,21 @@ export class AdminAuthService {
     }
   }
 
-  private async recordFailedLogin(adminUserId: string, currentCount: number): Promise<boolean> {
-    const next = currentCount + 1;
-    const locked = next >= AdminAuthService.MAX_FAILED_LOGINS;
-    await this.adminPrisma.adminUser.update({
+  private async recordFailedLogin(adminUserId: string): Promise<boolean> {
+    // Atomic increment so concurrent failed attempts can't lose updates and slip
+    // past MAX_FAILED_LOGINS (mirrors AuthService.recordFailedLogin).
+    const { failedLoginCount } = await this.adminPrisma.adminUser.update({
       where: { id: adminUserId },
-      data: {
-        failedLoginCount: locked ? 0 : next,
-        lockedUntil: locked ? new Date(Date.now() + AdminAuthService.LOCK_WINDOW_MS) : undefined,
-      },
+      data: { failedLoginCount: { increment: 1 } },
+      select: { failedLoginCount: true },
     });
+    const locked = failedLoginCount >= AdminAuthService.MAX_FAILED_LOGINS;
+    if (locked) {
+      await this.adminPrisma.adminUser.update({
+        where: { id: adminUserId },
+        data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + AdminAuthService.LOCK_WINDOW_MS) },
+      });
+    }
     return locked;
   }
 

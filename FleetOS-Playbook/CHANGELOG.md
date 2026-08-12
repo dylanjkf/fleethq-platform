@@ -2,6 +2,31 @@
 
 All notable decisions and revisions to the FleetOS Playbook are recorded here, newest first.
 
+## 2026-08-11 — Engineering-quality remediation, round 2 (platform)
+
+Continues the `eng-quality-remediation` branch. This entry records the **platform** items; frontend and DriverOS items ship in their own repos. Each states how it was verified, per the standing methodology.
+
+**Part 1 close-outs**
+- **H3 stray — bcrypt cost.** `scripts/seed-enterprise-company.ts` and `scripts/bootstrap-admin.ts` still hashed at a hardcoded cost 10; both now route through `resolveBcryptCost()` (env `BCRYPT_COST`, default 12). `create-company-admin.ts` already hashed via `provisionCompany()` (which uses the helper), so it needed no change. Verified: `grep` finds no remaining `bcrypt.hash(..., <int>)` in `scripts/` or `src/`.
+
+**Mediums**
+- **M1** — admin-billing `currentPeriodEnd` is guarded against an empty `items.data`, so a subscription with no line items no longer yields `NaN` → `RangeError` from `new Date(NaN).toISOString()`.
+- **M2** — GPS `ingest` only advances the device's live position when the reading's `recordedAt` is newer than what's stored; a late/buffered ping can no longer regress the live map. The ping is still recorded for history unconditionally.
+- **M3** — `reports.service` and `shifts.service` `startOfDay`/`endOfDay` use `setUTCHours` to match the codebase's UTC convention (was local-time `setHours`, bucketing rows into the wrong day under a non-UTC server).
+- **M4** — `common/ownership.ts` doc comment corrected: the helper consolidation is ongoing, not "finished"; an inline equivalent is still duplicated across services.
+- **M5** — scheduler doc comment corrected ("one recurring job" → the handful it actually runs).
+- **M6 + M15** — `Billing_And_Subscriptions.md` now reflects shipped per-asset billing and drops the no-longer-read `VITE_STRIPE_PRICE_ID`, documenting the server-side `STRIPE_PRICE_*` vars the plan picker reads.
+- **M10** — `GpsPing.recordedAt` indexed (schema + migration `20260811000000_gps_ping_recorded_at_index`) so the 540-day retention purge is a range scan, not a full-table scan.
+- **M16** — OAuth/SSO env vars (`GOOGLE_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_TENANT_ID`) documented in the deployment env table; the flow is OIDC ID-token verification, so no client secret / redirect URI is needed server-side.
+
+**Lows**
+- `recordFailedLogin` (customer + admin auth) now increments atomically (`{ increment: 1 }` + read-back) instead of read-then-write, closing a check-then-act race that could let concurrent guesses slip past `MAX_FAILED_LOGINS`.
+- Removed a dead `result` binding in `analytics.service.updateSettings`; deleted orphaned `scripts/seed-titan-maintenance.ts`; corrected the deployment doc's `STRIPE_PRICE_*` count (three → four).
+
+Verified across this batch: `prisma validate` OK, `tsc --noEmit` clean.
+
+**Deferred (tracked, not yet done in this pass):** M7/M8/M9 (auth/admin e2e permission-denial + token-revocation tests — need the Postgres e2e harness), M12/M13 (dead-feature wire-or-delete decisions), and the remaining Lows (bulk-import parallelism, monorepo-era doc paths).
+
 ## 2026-08-07 — Dedicated security-audit remediation (platform)
 
 A security-only audit (independent of the production-readiness series) scored the three repos 84/100 — no tenant-isolation gaps across ~70 services / 65 RLS tables, zero XSS surface, no hardcoded secrets. Two Highs + several Mediums held it below 90. This entry records the **platform** (`fleethq-platform`) items; the DriverOS (H2 outbox ownership, M3 Android backup, M4 PIN re-lock, FLAG_SECURE) and frontend (SW open-redirect) items ship in their own repos' PRs. Each item states *how it was proven*, per the standing methodology.

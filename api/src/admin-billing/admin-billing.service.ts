@@ -141,7 +141,13 @@ export class AdminBillingService {
         ? {
             status: subscription.status,
             cancelAtPeriodEnd: subscription.cancel_at_period_end,
-            currentPeriodEnd: new Date(subscription.items.data[0]?.current_period_end * 1000).toISOString(),
+            // A subscription with no line items has no period end — guard the
+            // `* 1000` so an empty `items.data` can't produce NaN and throw a
+            // RangeError out of `new Date(NaN).toISOString()`.
+            currentPeriodEnd:
+              subscription.items.data[0]?.current_period_end != null
+                ? new Date(subscription.items.data[0].current_period_end * 1000).toISOString()
+                : null,
             discounts: subscription.discounts,
           }
         : null,

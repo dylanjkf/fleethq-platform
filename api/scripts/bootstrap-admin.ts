@@ -28,6 +28,7 @@ import './load-env';
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { isStrongPassword } from '../src/common/validators/is-strong-password.validator';
+import { resolveBcryptCost } from '../src/common/security/bcrypt-cost';
 import { reconcileAdminPermissions, SUPER_ADMIN_ROLE_NAME } from '../prisma/reconcile-admin-permissions';
 
 const DEV_USERNAME = 'admin@fleethq.internal';
@@ -71,7 +72,7 @@ async function main() {
   await reconcileAdminPermissions(prisma);
 
   const superAdminRole = await prisma.adminRole.findUniqueOrThrow({ where: { name: SUPER_ADMIN_ROLE_NAME } });
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(password, resolveBcryptCost());
   const admin = await prisma.adminUser.create({
     data: { username, email, fullName, passwordHash, roleId: superAdminRole.id },
   });

@@ -9,6 +9,7 @@ import { AuthSessionsService } from '../auth/auth-sessions.service';
 import { AuthTokensService } from '../auth/auth-tokens.service';
 import { AuthMailService } from '../auth/auth-mail.service';
 import { provisionCompany } from '../companies/provision-company';
+import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { BillingService, mapStripeStatus } from '../billing/billing.service';
 import { SignupDto } from './dto/signup.dto';
 
@@ -108,7 +109,7 @@ export class SignupService {
     const pendingId = randomUUID();
     const stripe = this.billing.getStripeClient();
     // Hash before any persistence so plaintext never lands in the DB.
-    const hashedPassword = await bcrypt.hash(dto.adminPassword, 10);
+    const hashedPassword = await bcrypt.hash(dto.adminPassword, resolveBcryptCost());
 
     const session = await stripe.checkout.sessions.create(
       {
