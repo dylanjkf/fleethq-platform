@@ -54,6 +54,10 @@ export const ADMIN_AUDIT_ACTIONS = {
   ADMIN_USER_DEACTIVATED: 'admin_users.deactivated',
   ADMIN_USER_REACTIVATED: 'admin_users.reactivated',
   ADMIN_USER_PASSWORD_CHANGED: 'admin_auth.password_changed',
+  // Self-service password reset via the emailed forgot-password link — distinct
+  // from an authenticated change-password so an incident responder can tell the
+  // two flows apart in the audit trail.
+  ADMIN_USER_PASSWORD_RESET: 'admin_auth.password_reset',
   // Boot-time bootstrap provisioning — so an incident responder can see how the
   // platform's first privileged accounts were created (Round 3 Medium).
   ADMIN_USER_BOOTSTRAPPED: 'admin_users.bootstrapped',

@@ -8,10 +8,12 @@ import { AdminSetupExempt } from './decorators/admin-setup-exempt.decorator';
 import { CurrentAdmin } from './decorators/current-admin.decorator';
 import { AuthenticatedAdminRequestUser } from './admin-jwt-payload.interface';
 import { AdminAuthService } from './admin-auth.service';
+import { AdminAuthRecoveryService } from './admin-auth-recovery.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
 import { AdminLoginDto, AdminMfaVerifyDto } from './dto/admin-login.dto';
 import { AdminMfaCodeDto } from './dto/admin-mfa-code.dto';
 import { AdminChangePasswordDto } from './dto/admin-change-password.dto';
+import { AdminForgotPasswordDto, AdminResetPasswordDto } from './dto/admin-password-reset.dto';
 
 // Tighter than the app-wide default, matching the customer AuthController's
 // posture — these are the credential/code-checking endpoints a brute-force
@@ -38,6 +40,7 @@ const ADMIN_AUTH_THROTTLE = { default: { limit: process.env.NODE_ENV === 'test' 
 export class AdminAuthController {
   constructor(
     private readonly adminAuth: AdminAuthService,
+    private readonly recovery: AdminAuthRecoveryService,
     private readonly mfa: AdminMfaService,
   ) {}
 
@@ -59,6 +62,36 @@ export class AdminAuthController {
       ip,
       userAgent: req.get('user-agent') ?? null,
     });
+  }
+
+  /**
+   * Start a self-service password reset. Genuinely unauthenticated (like
+   * `login`/`mfa/verify`) — no admin guard. Always returns `{ ok: true }`
+   * regardless of whether the identifier resolves to a real admin: the endpoint
+   * must not reveal who has a FleetHQ staff account (non-enumerating, mirroring
+   * the customer forgot-password endpoint).
+   */
+  @Throttle(ADMIN_AUTH_THROTTLE)
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() dto: AdminForgotPasswordDto) {
+    await this.recovery.forgotPassword(dto.identifier);
+    return { ok: true };
+  }
+
+  /**
+   * Complete a self-service password reset with the emailed single-use token.
+   * Unauthenticated by design (the token is the proof of control of the
+   * mailbox). Setting the new password revokes all of the admin's existing
+   * sessions and invalidates the token. Returns `{ ok: true }` without leaking
+   * account state; an invalid/expired/used token is a 401.
+   */
+  @Throttle(ADMIN_AUTH_THROTTLE)
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() dto: AdminResetPasswordDto, @Ip() ip: string, @Req() req: Request) {
+    await this.recovery.resetPassword(dto.token, dto.newPassword, { ip, userAgent: req.get('user-agent') ?? null });
+    return { ok: true };
   }
 
   @AdminGuarded()

@@ -4,6 +4,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
+import { AdminAuthRecoveryService } from './admin-auth-recovery.service';
+import { AdminAuthTokensService } from './admin-auth-tokens.service';
 import { AdminAuthMailService } from './admin-auth-mail.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
 import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
@@ -38,7 +40,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     }),
   ],
   controllers: [AdminAuthController],
-  providers: [AdminAuthService, AdminAuthMailService, AdminMfaService, AdminJwtStrategy],
+  providers: [AdminAuthService, AdminAuthRecoveryService, AdminAuthTokensService, AdminAuthMailService, AdminMfaService, AdminJwtStrategy],
   exports: [AdminAuthService, AdminMfaService],
 })
 export class AdminAuthModule {}

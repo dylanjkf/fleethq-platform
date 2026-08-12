@@ -19,11 +19,21 @@ export class AdminAuthMailService {
     private readonly config: ConfigService,
   ) {}
 
+  private baseUrl(): string {
+    return this.config.get<string>('APP_BASE_URL', 'http://localhost:5173').replace(/\/$/, '');
+  }
+
   private sessionsUrl(): string {
-    const base = this.config.get<string>('APP_BASE_URL', 'http://localhost:5173').replace(/\/$/, '');
     // The admin SPA is served under `/admin/`; its active-sessions review +
     // revoke UI lives on the settings page (SettingsPage's SessionsCard).
-    return `${base}/admin/settings`;
+    return `${this.baseUrl()}/admin/settings`;
+  }
+
+  private resetUrl(token: string): string {
+    // The admin SPA's reset screen (built in the client pass) reads the raw
+    // token from the query string. The raw token is base64url, so it needs no
+    // extra encoding here.
+    return `${this.baseUrl()}/admin/reset-password?token=${token}`;
   }
 
   /**
@@ -53,6 +63,43 @@ export class AdminAuthMailService {
         `\n\nIf this was you, no action is needed. If you don't recognise this activity, review and revoke your active sessions here:\n\n` +
         `${this.sessionsUrl()}\n\n` +
         `and change your password immediately.`,
+    });
+  }
+
+  /**
+   * The self-service password-reset link — admin-side mirror of
+   * AuthMailService.sendPasswordReset. Carries the single-use, one-hour token
+   * to the admin console's own reset screen (`/admin/reset-password`). Only
+   * ever sent to an address already on file for a real admin (the
+   * forgot-password flow is silent/non-enumerating otherwise).
+   */
+  async sendPasswordReset(to: string, fullName: string, token: string): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: 'Reset your FleetHQ admin password',
+      body:
+        `Hi ${fullName},\n\n` +
+        `We received a request to reset the password for your FleetHQ admin console account.\n\n` +
+        `Reset your password using the link below (it expires in 1 hour and can be used once):\n\n` +
+        `${this.resetUrl(token)}\n\n` +
+        `If you didn't request this, you can safely ignore this email — your password won't change.`,
+    });
+  }
+
+  /**
+   * Confirmation that the password was changed — best-effort, sent after a
+   * completed reset so the owner notices an unexpected change. Mirrors
+   * AuthMailService.sendPasswordChanged.
+   */
+  async sendPasswordChanged(to: string, fullName: string): Promise<void> {
+    await this.channel.sendEmail({
+      to,
+      subject: 'Your FleetHQ admin password was changed',
+      body:
+        `Hi ${fullName},\n\n` +
+        `The password for your FleetHQ admin console account was just changed.\n\n` +
+        `If this was you, no action is needed. If you don't recognise this change, contact your FleetHQ administrator immediately — ` +
+        `all of your existing admin sessions have been signed out as a precaution.`,
     });
   }
 }

@@ -286,6 +286,21 @@ export class AdminAuthService {
     }));
   }
 
+  /**
+   * Revoke every live session for an admin at once — the mechanism a password
+   * reset uses to kill all existing devices (mirrors
+   * AuthSessionsService.revokeAllSessions on the customer side). tokenVersion
+   * is bumped separately by the caller to invalidate the JWTs immediately; this
+   * flips the session rows so listSessions stops showing devices that look
+   * "active" and aren't.
+   */
+  async revokeAllSessions(adminUserId: string): Promise<void> {
+    await this.adminPrisma.adminSession.updateMany({
+      where: { adminUserId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
   /** Self-service session revocation — an admin killing one of their own other devices. */
   async revokeOwnSession(adminUserId: string, sessionId: string, context: AdminAuthContext): Promise<void> {
     const session = await this.adminPrisma.adminSession.findFirst({ where: { id: sessionId, adminUserId } });
