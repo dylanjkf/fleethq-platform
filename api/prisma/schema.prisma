@@ -1301,6 +1301,14 @@ model Job {
   scheduledAt   DateTime? @map("scheduled_at")
   completedAt   DateTime? @map("completed_at")
   cancelledAt   DateTime? @map("cancelled_at")
+  /// Set when a driver has verified the vehicle's actual load against this run's
+  /// expected manifest (the aggregate of its stops' StopParcel rows) before
+  /// starting — either cleanly (everything scanned/confirmed) or by explicitly
+  /// overriding a discrepancy. Nullable: null means load verification hasn't
+  /// been done yet. The who/when/what-was-missing of an override lives in the
+  /// JOB timeline event (load_discrepancy_override), not here — this is just the
+  /// "done" flag the DriverOS client reads.
+  loadVerifiedAt DateTime? @map("load_verified_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

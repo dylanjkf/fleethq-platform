@@ -13,11 +13,12 @@ import { JobsSupportService } from './jobs.support';
 import { JobStopsService } from './job-stops.service';
 import { PodReceiptService } from './pod-receipt.service';
 import { ParcelsService } from './parcels.service';
+import { LoadVerificationService } from './load-verification.service';
 
 @Module({
   imports: [TimelineModule, AttachmentsModule, NotificationsModule, CustomersModule, DepotsModule, AssetsModule, OperatorsModule, ComplianceModule],
   controllers: [JobsController],
-  providers: [JobsSupportService, JobsService, JobStopsService, PodReceiptService, ParcelsService],
+  providers: [JobsSupportService, JobsService, JobStopsService, PodReceiptService, ParcelsService, LoadVerificationService],
   exports: [JobsService, JobStopsService],
 })
 export class DispatchModule {}
