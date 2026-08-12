@@ -8,6 +8,7 @@ import { AuthMailService } from '../auth/auth-mail.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { provisionCompany } from '../companies/provision-company';
+import { TRIAL_PERIOD_DAYS } from '../billing/plans';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
 import { CreateOrganisationDto } from './dto/create-organisation.dto';
 
@@ -66,6 +67,10 @@ export class AdminOrganisationsService {
           adminFullName: dto.adminFullName?.trim() || `${companyName} Administrator`,
           adminEmail: username,
           adminMustChangePassword: true,
+          // Grant the standard native no-card trial so a staff-provisioned org
+          // starts on the Trial tier (NONE subscription + trialEndsAt); staff can
+          // override with dto.trialDays, or pass 0 for an org going straight to paid.
+          trialDays: dto.trialDays ?? TRIAL_PERIOD_DAYS,
         }),
       );
     } catch (err) {

@@ -61,6 +61,18 @@ export const TRIAL_TIER: PlanTier = {
   limits: { maxOperators: 25, maxAssets: 25 },
 };
 
+/**
+ * Length of the native no-card free trial, in days. THE single source of truth
+ * for "how long is a trial" — `provisionCompany({ trialDays })` sets
+ * `trialEndsAt = now + TRIAL_PERIOD_DAYS`, and the staff org-provisioning path
+ * reads it from here rather than hard-coding a number, so the policy can't drift
+ * between the grant logic, the schema comment, and the trial-ending reminder job.
+ * Historically documented as 14 days in stale schema/migration comments that no
+ * live code path ever honoured (the trial is only granted where `trialDays` is
+ * passed, and nothing passed it) — the policy is now 7.
+ */
+export const TRIAL_PERIOD_DAYS = 7;
+
 /** The purchasable tiers, keyed by the config var holding their Stripe price id. */
 export const PAID_TIERS: Record<string, PlanTier> = {
   STRIPE_PRICE_STARTER: { key: 'starter', name: 'Starter', features: ['core', 'forms'], limits: { maxOperators: 10, maxAssets: 10 } },

@@ -304,10 +304,12 @@ model Company {
   /// stale event can't revert subscriptionStatus/planPriceId after a newer one
   /// already landed.
   lastStripeEventAt        DateTime?          @map("last_stripe_event_at")
-  /// Self-serve free-trial window. Set at signup (14 days) so a new company
-  /// experiences the full product before subscribing; entitlements grant the
-  /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
-  /// of Stripe's own TRIALING status — this is FleetOS's native, no-card trial.
+  /// Native no-card free-trial window. Granted on staff org provisioning for
+  /// TRIAL_PERIOD_DAYS (7) so a new company experiences the full product before
+  /// subscribing; entitlements grant the Trial tier while `now < trialEndsAt`,
+  /// then fall back to Free. Independent of Stripe's own TRIALING status — this
+  /// is FleetOS's native, no-card trial. (Payment-first self-serve signup pays
+  /// immediately and grants no native trial.)
   trialEndsAt              DateTime?          @map("trial_ends_at")
   /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
   /// slots this company currently pays for — the Stripe subscription item
