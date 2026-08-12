@@ -7,6 +7,7 @@ import { DashboardLayoutsModule } from '../dashboard-layouts/dashboard-layouts.m
 import { IntegrationsModule } from '../integrations/integrations.module';
 import { BillingModule } from '../billing/billing.module';
 import { SignupModule } from '../signup/signup.module';
+import { ReportsModule } from '../reports/reports.module';
 import { SchedulerService } from './scheduler.service';
 
 /**
@@ -14,7 +15,7 @@ import { SchedulerService } from './scheduler.service';
  * so SystemPrismaService is available without importing it here.
  */
 @Module({
-  imports: [NotificationsModule, ComplianceModule, MaintenanceSchedulesModule, RetentionModule, DashboardLayoutsModule, IntegrationsModule, BillingModule, SignupModule],
+  imports: [NotificationsModule, ComplianceModule, MaintenanceSchedulesModule, RetentionModule, DashboardLayoutsModule, IntegrationsModule, BillingModule, SignupModule, ReportsModule],
   providers: [SchedulerService],
 })
 export class SchedulerModule {}
