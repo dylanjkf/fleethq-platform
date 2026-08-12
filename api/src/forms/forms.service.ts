@@ -8,9 +8,10 @@ import { UpdateFormTemplateDto } from './dto/update-form-template.dto';
 import { ListFormTemplatesDto } from './dto/list-form-templates.dto';
 import { SubmitFormDto } from './dto/submit-form.dto';
 import { ListFormSubmissionsDto } from './dto/list-form-submissions.dto';
-import { FormFieldDto, FormFieldType, isAttachmentType, isSelectType } from './dto/form-field.dto';
+import { FormFieldDto, FormFieldType, isSelectType } from './dto/form-field.dto';
 import { FormAnswerDto } from './dto/form-answer.dto';
 import { assertOwnership, assertOwnedRecord } from '../common/ownership';
+import { parseAttachmentPayload } from './parse-attachment-payload';
 
 /** The normalized field shape persisted in `fields` / `template_snapshot` JSON. */
 interface NormalizedField {
@@ -566,7 +567,7 @@ export class FormsService {
         // legacy POD path uses (which enforces the size cap, allowed MIME types,
         // and magic-number sniffing), then persist ONLY the resulting Attachment
         // id — never the raw base64 in the submission JSON.
-        const payload = this.parseAttachmentPayload(field, value);
+        const payload = parseAttachmentPayload(field.label, value);
         const defaultName = field.type === 'signature' ? 'signature.png' : 'photo.jpg';
         const att = await this.attachments.createInTx(tx, companyId, actorUserId, {
           filename: payload.filename ?? defaultName,
@@ -579,32 +580,6 @@ export class FormsService {
   }
 
   /** Validate the `{ contentType, filename?, base64 }` shape of a photo/signature answer. */
-  private parseAttachmentPayload(
-    field: NormalizedField,
-    value: unknown,
-  ): { contentType: string; filename?: string; base64: string } {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new BadRequestException({
-        code: 'FORM_INVALID_VALUE',
-        message: `Field "${field.label}" must be a { contentType, base64 } file payload.`,
-      });
-    }
-    const v = value as Record<string, unknown>;
-    if (typeof v.contentType !== 'string' || typeof v.base64 !== 'string' || v.base64.length === 0) {
-      throw new BadRequestException({
-        code: 'FORM_INVALID_VALUE',
-        message: `Field "${field.label}" needs a contentType and non-empty base64 payload.`,
-      });
-    }
-    if (v.filename !== undefined && typeof v.filename !== 'string') {
-      throw new BadRequestException({
-        code: 'FORM_INVALID_VALUE',
-        message: `Field "${field.label}" filename must be a string.`,
-      });
-    }
-    return { contentType: v.contentType, filename: v.filename as string | undefined, base64: v.base64 };
-  }
-
   /**
    * Run a template write, translating the "one active DELIVERY template per
    * company" partial-unique-index violation into a clean 409 instead of a raw
