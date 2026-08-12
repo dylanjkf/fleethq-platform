@@ -21,14 +21,17 @@ export class BillingMailService {
     return `${this.config.get<string>('APP_BASE_URL', 'http://localhost:5173').replace(/\/$/, '')}/billing`;
   }
 
-  async sendPaymentFailed(to: string, fullName: string, companyName: string, nextAttempt: Date | null): Promise<void> {
+  async sendPaymentFailed(to: string, fullName: string, companyName: string, nextAttempt: Date | null, graceEndsAt: Date | null): Promise<void> {
     const retryLine = nextAttempt
       ? `Stripe will automatically retry the charge on ${nextAttempt.toLocaleDateString('en-AU')}.`
       : `Stripe was unable to schedule an automatic retry.`;
+    const graceLine = graceEndsAt
+      ? `Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} — a 5 business-day grace period. Update your payment method before then to avoid any restriction to your account.`
+      : `Update your payment method to avoid an interruption.`;
     await this.channel.sendEmail({
       to,
       subject: `Payment failed for ${companyName}'s FleetOS subscription`,
-      body: `Hi ${fullName},\n\nWe were unable to charge the payment method on file for ${companyName}'s FleetOS subscription.\n\n${retryLine} Update your payment method to avoid an interruption:\n\n${this.billingSettingsLink()}\n\nIf you believe this is an error, check your card details or contact your bank.`,
+      body: `Hi ${fullName},\n\nWe were unable to charge the payment method on file for ${companyName}'s FleetOS subscription.\n\n${retryLine} ${graceLine}\n\n${this.billingSettingsLink()}\n\nIf you believe this is an error, check your card details or contact your bank.`,
     });
   }
 

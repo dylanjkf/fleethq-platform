@@ -8,7 +8,7 @@ import request from 'supertest';
 import { ADMIN_PERMISSIONS } from '../src/common/permissions/admin-permission-catalog';
 import { buildTestApp } from './utils/build-test-app';
 import { TEST_PASSWORD, addUserToCompany, createTestTenant, disconnectFixtures, ensurePermissions } from './utils/fixtures';
-import { createTestAdmin, disconnectAdminFixtures, TEST_ADMIN_PASSWORD } from './utils/admin-fixtures';
+import { createTestAdmin, disconnectAdminFixtures, ensureAdminPermissions, TEST_ADMIN_PASSWORD } from './utils/admin-fixtures';
 
 describe('Admin Organisations', () => {
   let app: INestApplication;
@@ -16,9 +16,11 @@ describe('Admin Organisations', () => {
 
   beforeAll(async () => {
     await ensurePermissions();
+    await ensureAdminPermissions();
     app = await buildTestApp();
     const admin = await createTestAdmin([
       ADMIN_PERMISSIONS.ORGANISATIONS_VIEW,
+      ADMIN_PERMISSIONS.ORGANISATIONS_CREATE,
       ADMIN_PERMISSIONS.ORGANISATIONS_SUSPEND,
       ADMIN_PERMISSIONS.ORGANISATIONS_ARCHIVE,
       ADMIN_PERMISSIONS.ORGANISATIONS_EDIT,
@@ -204,5 +206,45 @@ describe('Admin Organisations', () => {
       .post('/v1/auth/login')
       .send({ username: `admin-created-${tenant.companyId}`, password: 'AdminCreated1!' })
       .expect(200);
+  });
+
+  // Item 6 (trial length): a staff-provisioned org starts on the native no-card
+  // trial for the canonical TRIAL_PERIOD_DAYS window (7 days) — proving the
+  // single-source-of-truth length is actually granted end-to-end, not just a
+  // constant. The window is ~7 days from now (allowing for request latency).
+  it('provisions a new organisation with the standard 7-day native trial', async () => {
+    const email = `neworg-${Date.now()}@example.com`;
+    const before = Date.now();
+    const createRes = await request(app.getHttpServer())
+      .post('/v1/admin/organisations')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ companyName: 'Trial Test Co', adminEmail: email })
+      .expect(201);
+    const companyId = createRes.body.companyId as string;
+
+    const detail = await request(app.getHttpServer())
+      .get(`/v1/admin/organisations/${companyId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(detail.body.trialEndsAt).toBeTruthy();
+    const daysOut = (new Date(detail.body.trialEndsAt).getTime() - before) / (24 * 60 * 60 * 1000);
+    expect(daysOut).toBeGreaterThan(6.9);
+    expect(daysOut).toBeLessThan(7.1);
+  });
+
+  // The override path: passing trialDays:0 provisions an org with no native
+  // trial (e.g. one going straight onto a paid plan).
+  it('provisions with no trial when trialDays is 0', async () => {
+    const email = `notrial-${Date.now()}@example.com`;
+    const createRes = await request(app.getHttpServer())
+      .post('/v1/admin/organisations')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ companyName: 'No Trial Co', adminEmail: email, trialDays: 0 })
+      .expect(201);
+    const detail = await request(app.getHttpServer())
+      .get(`/v1/admin/organisations/${createRes.body.companyId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(detail.body.trialEndsAt).toBeNull();
   });
 });

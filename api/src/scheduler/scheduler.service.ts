@@ -10,9 +10,11 @@ import { DashboardMetricsService } from '../dashboard-layouts/dashboard-metrics.
 import { IntegrationSyncEngine } from '../integrations/integration-sync-engine.service';
 import { BillingService } from '../billing/billing.service';
 import { SignupService } from '../signup/signup.service';
+import { WeeklyReportService } from '../reports/weekly-report.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const WEEK_MS = 7 * DAY_MS;
 const DIGEST_TASK = 'notification_digest';
 const COMPLIANCE_SWEEP_TASK = 'compliance_expiry_sweep';
 const MAINTENANCE_SWEEP_TASK = 'maintenance_due_sweep';
@@ -24,6 +26,7 @@ const INTEGRATION_SYNC_TASK = 'integration_scheduled_sync';
 const INTEGRATION_DEAD_LETTER_RETRY_TASK = 'integration_dead_letter_retry';
 const SIGNUP_EXPIRY_TASK = 'signup_pending_expiry';
 const SIGNUP_RECONCILE_TASK = 'signup_reconcile';
+const WEEKLY_REPORT_TASK = 'weekly_operations_report';
 
 /**
  * Dependency-free background scheduler. Deliberately not `@nestjs/schedule`
@@ -63,6 +66,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly integrationSyncEngine: IntegrationSyncEngine,
     private readonly billing: BillingService,
     private readonly signup: SignupService,
+    private readonly weeklyReports: WeeklyReportService,
   ) {}
 
   onModuleInit(): void {
@@ -97,6 +101,11 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     // a stuck paid signup is a live customer waiting to get in — but not so often
     // it hammers Stripe: every 15 minutes by default.
     const signupReconcileIntervalMs = Number(this.config.get<string>('SCHEDULER_SIGNUP_RECONCILE_INTERVAL_MS')) || 15 * 60_000;
+    // The scheduler only supports fixed intervals, so "weekly" is a 7-day
+    // interval anchored at boot (config-overridable). The report itself is
+    // idempotent per company per week, so an off-by-a-tick anchor never
+    // double-sends.
+    const weeklyReportIntervalMs = Number(this.config.get<string>('SCHEDULER_WEEKLY_REPORT_INTERVAL_MS')) || WEEK_MS;
     this.logger.log(
       `Scheduler enabled — notification digest every ${Math.round(digestIntervalMs / 60000)} min, ` +
         `compliance-expiry sweep every ${Math.round(complianceIntervalMs / 60000)} min, ` +
@@ -108,7 +117,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         `integration sync every ${Math.round(integrationSyncIntervalMs / 60000)} min, ` +
         `integration dead-letter retry every ${Math.round(integrationDeadLetterIntervalMs / 60000)} min, ` +
         `pending-signup expiry every ${Math.round(signupExpiryIntervalMs / 60000)} min, ` +
-        `signup reconciliation every ${Math.round(signupReconcileIntervalMs / 60000)} min (leader-elected).`,
+        `signup reconciliation every ${Math.round(signupReconcileIntervalMs / 60000)} min, ` +
+        `weekly operations report every ${Math.round(weeklyReportIntervalMs / 60000)} min (leader-elected).`,
     );
     this.timers.push(this.scheduleTask(DIGEST_TASK, digestIntervalMs, () => this.runNotificationDigests()));
     this.timers.push(this.scheduleTask(COMPLIANCE_SWEEP_TASK, complianceIntervalMs, () => this.runComplianceExpirySweeps()));
@@ -121,6 +131,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     this.timers.push(this.scheduleTask(INTEGRATION_DEAD_LETTER_RETRY_TASK, integrationDeadLetterIntervalMs, () => this.runIntegrationDeadLetterRetries()));
     this.timers.push(this.scheduleTask(SIGNUP_EXPIRY_TASK, signupExpiryIntervalMs, () => this.runPendingSignupExpiry()));
     this.timers.push(this.scheduleTask(SIGNUP_RECONCILE_TASK, signupReconcileIntervalMs, () => this.runSignupReconciliation()));
+    this.timers.push(this.scheduleTask(WEEKLY_REPORT_TASK, weeklyReportIntervalMs, () => this.runWeeklyReports()));
   }
 
   /**
@@ -203,6 +214,36 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     }
     this.logger.log(`Trial-ending reminder run complete: ${companyIds.length} companies, ${reminded} reminded, ${failures} failures.`);
     return { companies: companyIds.length, reminded, failures };
+  }
+
+  /**
+   * Deliver each company's weekly operations report (in-app notification + email
+   * to reports:view holders). Same cross-tenant shape as the other sweeps:
+   * enumerate companies via the privileged read-only client, then re-scope to
+   * each tenant through `WeeklyReportService.sendWeeklyReport`, which is
+   * idempotent (one report per company per 7-day window, guarded by its
+   * `reports.weekly_summary` marker) so a re-run in the same window is a no-op.
+   * One tenant's failure is logged and skipped so it can't stall the rest.
+   */
+  async runWeeklyReports(): Promise<{ companies: number; sent: number; recipients: number; failures: number }> {
+    const companyIds = await this.systemPrisma.listActiveCompanyIds();
+    let sent = 0;
+    let recipients = 0;
+    let failures = 0;
+    for (const companyId of companyIds) {
+      try {
+        const result = await this.weeklyReports.sendWeeklyReport(companyId);
+        if (result.sent) {
+          sent += 1;
+          recipients += result.recipients;
+        }
+      } catch (err) {
+        failures += 1;
+        this.logger.error(`Weekly report failed for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.logger.log(`Weekly report run complete: ${companyIds.length} companies, ${sent} sent, ${recipients} recipients, ${failures} failures.`);
+    return { companies: companyIds.length, sent, recipients, failures };
   }
 
   /**

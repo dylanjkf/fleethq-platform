@@ -13,6 +13,7 @@ import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { SignupService } from '../signup/signup.service';
 import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isSubscriptionActive, isTrialActive } from './plans';
+import { addBusinessDays, GRACE_PERIOD_BUSINESS_DAYS } from './business-days';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** How close to `trialEndsAt` the native (no-card) trial reminder fires. */
@@ -980,31 +981,35 @@ export class BillingService {
       this.logger.warn(`Received invoice.payment_failed with no fleetosCompanyId metadata (invoice ${invoice.id})`);
       return;
     }
+    const now = new Date();
     const nextAttempt = invoice.next_payment_attempt ? new Date(invoice.next_payment_attempt * 1000) : null;
 
-    const { companyName, holders } = await this.prisma.withTenant(companyId, async (tx) => {
+    const { companyName, holders, graceEndsAt } = await this.prisma.withTenant(companyId, async (tx) => {
+      const current = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true, gracePeriodEndsAt: true } });
+      // Start the 5-business-day grace window on the FIRST failure of a dunning
+      // cycle; a later retry failure in the same cycle keeps the original deadline
+      // (never silently extend the customer's grace on every Stripe retry). The
+      // window is cleared on recovery (invoice.paid), so a fresh failure re-starts it.
+      const graceEndsAt = current.gracePeriodEndsAt ?? addBusinessDays(now, GRACE_PERIOD_BUSINESS_DAYS);
       await tx.company.update({
         where: { id: companyId },
-        data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: new Date(), nextPaymentAttemptAt: nextAttempt },
+        data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: now, nextPaymentAttemptAt: nextAttempt, gracePeriodEndsAt: graceEndsAt },
       });
       await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
         type: 'billing.payment_failed',
         title: 'A subscription payment failed',
-        body: nextAttempt
-          ? `Stripe was unable to charge your payment method and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}. Update your payment method to avoid an interruption.`
-          : 'Stripe was unable to charge your payment method and will not retry automatically. Update your payment method to keep your subscription active.',
+        body: `Stripe was unable to charge your payment method${nextAttempt ? ` and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}` : ''}. Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} (a 5 business-day grace period) — update your payment method before then to avoid any restriction to your account.`,
         linkPath: '/billing',
       });
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
-      return { companyName: company.name, holders };
+      return { companyName: current.name, holders, graceEndsAt };
     });
 
     // Emails are sent after the transaction commits, best-effort — mirroring
     // AuthMailService.sendNewDeviceLogin's call site: a slow/failed email
     // provider must never roll back the state change that raised it.
     this.sendBillingEmails(holders, (email, fullName) =>
-      this.billingMail.sendPaymentFailed(email, fullName, companyName, nextAttempt),
+      this.billingMail.sendPaymentFailed(email, fullName, companyName, nextAttempt, graceEndsAt),
     );
   }
 
@@ -1021,7 +1026,10 @@ export class BillingService {
     const result = await this.prisma.withTenant(companyId, async (tx) => {
       const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true, name: true } });
       const wasRecovering = company.paymentFailureCount > 0;
-      await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null } });
+      // Recovery clears the whole dunning state, including the grace window — a
+      // future failure starts a fresh 5-business-day window rather than reusing a
+      // stale deadline.
+      await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null, gracePeriodEndsAt: null } });
       if (!wasRecovering) return null;
 
       await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {

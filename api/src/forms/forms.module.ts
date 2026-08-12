@@ -9,5 +9,8 @@ import { FormSubmissionsController } from './form-submissions.controller';
   imports: [TimelineModule, AttachmentsModule],
   controllers: [FormTemplatesController, FormSubmissionsController],
   providers: [FormsService],
+  // Exported so DispatchModule's completeStop can validate + record the
+  // configured POD evidence in its own transaction (Configurable POD).
+  exports: [FormsService],
 })
 export class FormsModule {}

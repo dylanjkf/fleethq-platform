@@ -6,6 +6,7 @@ import * as bcrypt from 'bcrypt';
 import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { AdminMfaService } from './mfa/admin-mfa.service';
+import { AdminAuthMailService } from './admin-auth-mail.service';
 import { AdminAuditService, ADMIN_AUDIT_ACTIONS, AdminAuditAction } from '../admin-audit/admin-audit.service';
 import { AdminJwtPayload, AdminMfaChallengePayload } from './admin-jwt-payload.interface';
 import { isStrongPassword } from '../common/validators/is-strong-password.validator';
@@ -46,6 +47,7 @@ export class AdminAuthService {
     private readonly jwt: JwtService,
     private readonly mfa: AdminMfaService,
     private readonly audit: AdminAuditService,
+    private readonly mail: AdminAuthMailService,
     @InjectPinoLogger(AdminAuthService.name) private readonly logger: PinoLogger,
   ) {}
 
@@ -143,6 +145,13 @@ export class AdminAuthService {
 
   private async completeLogin(adminUserId: string, context: AdminAuthContext): Promise<AdminLoginResult> {
     const user = await this.adminPrisma.adminUser.findUniqueOrThrow({ where: { id: adminUserId } });
+
+    // New-device / new-location sign-in alert (admin console equivalent of the
+    // customer-side AuthService new-device email). Decide *before* creating the
+    // session row, since creating it is exactly what records this ip+userAgent
+    // as "seen" — so the same device next time won't re-alert.
+    const isNewDeviceLogin = !(await this.hasKnownIpUserAgent(user.id, context.ip, context.userAgent));
+
     const session = await this.adminPrisma.adminSession.create({
       data: {
         adminUserId: user.id,
@@ -151,6 +160,15 @@ export class AdminAuthService {
         expiresAt: new Date(Date.now() + SESSION_EXPIRES_IN_MS),
       },
     });
+
+    // Best-effort, fire-and-forget: an unseen device gets the owner an email
+    // pointing at the session review/revoke page. Never block or roll back the
+    // login on a slow/failed send (mirrors the customer call site).
+    if (isNewDeviceLogin && user.email) {
+      void this.mail
+        .sendNewDeviceLogin(user.email, user.fullName, { ip: context.ip, userAgent: context.userAgent, when: session.createdAt })
+        .catch(() => undefined);
+    }
 
     const tokenPayload: AdminJwtPayload = { sub: user.id, sid: session.id, tv: user.tokenVersion };
     await this.audit.record({
@@ -268,6 +286,21 @@ export class AdminAuthService {
     }));
   }
 
+  /**
+   * Revoke every live session for an admin at once — the mechanism a password
+   * reset uses to kill all existing devices (mirrors
+   * AuthSessionsService.revokeAllSessions on the customer side). tokenVersion
+   * is bumped separately by the caller to invalidate the JWTs immediately; this
+   * flips the session rows so listSessions stops showing devices that look
+   * "active" and aren't.
+   */
+  async revokeAllSessions(adminUserId: string): Promise<void> {
+    await this.adminPrisma.adminSession.updateMany({
+      where: { adminUserId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
   /** Self-service session revocation — an admin killing one of their own other devices. */
   async revokeOwnSession(adminUserId: string, sessionId: string, context: AdminAuthContext): Promise<void> {
     const session = await this.adminPrisma.adminSession.findFirst({ where: { id: sessionId, adminUserId } });
@@ -293,6 +326,25 @@ export class AdminAuthService {
       ip: context.ip,
       userAgent: context.userAgent,
     });
+  }
+
+  /**
+   * "Have we seen this admin on this IP + user-agent before" — the new-device
+   * signal behind the sign-in alert email, mirroring
+   * AuthSessionsService.hasKnownIpUserAgent on the customer side. Reads the
+   * existing admin_sessions history (the same rows the session-review UI
+   * lists); deliberately independent of the trusted-device fingerprint, which
+   * only governs whether MFA is skipped, not whether the alert is worth
+   * sending. An unknown/missing IP is treated as "not seen" so the alert still
+   * fires rather than silently swallowing an odd-looking login.
+   */
+  async hasKnownIpUserAgent(adminUserId: string, ip: string | null | undefined, userAgent: string | null | undefined): Promise<boolean> {
+    if (!ip || ip === 'unknown') return false;
+    const existing = await this.adminPrisma.adminSession.findFirst({
+      where: { adminUserId, ipAddress: ip, userAgent: userAgent ?? null },
+      select: { id: true },
+    });
+    return !!existing;
   }
 
   private async isDeviceTrusted(adminUserId: string, deviceFingerprint: string): Promise<boolean> {

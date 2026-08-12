@@ -8,10 +8,23 @@ export const FORM_FIELD_TYPES = [
   'date',
   'asset_ref',
   'operator_ref',
+  // Configurable Proof-of-Delivery (docs/design/Configurable_POD.md): captured
+  // as a base64 payload on submit, stored via AttachmentsService, and persisted
+  // as the resulting Attachment id (never raw base64 in the submission JSON) —
+  // the same "answer is an id" shape asset_ref/operator_ref use.
+  'photo',
+  'signature',
 ] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];
 
 const SELECT_TYPES: FormFieldType[] = ['single_select', 'multi_select'];
+
+/** Field types whose submitted answer is a base64 file payload, stored as an Attachment. */
+export const ATTACHMENT_TYPES: FormFieldType[] = ['photo', 'signature'];
+
+export function isAttachmentType(type: FormFieldType): boolean {
+  return ATTACHMENT_TYPES.includes(type);
+}
 
 /**
  * One data-driven form field. A whole form definition is an array of these,

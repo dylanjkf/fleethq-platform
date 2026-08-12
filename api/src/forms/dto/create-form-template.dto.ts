@@ -13,7 +13,10 @@ import {
 } from 'class-validator';
 import { FormFieldDto } from './form-field.dto';
 
-export const FORM_TARGET_CONTEXTS = ['DRIVER', 'OFFICE', 'BOTH'] as const;
+// DELIVERY designates a template as the tenant's Proof-of-Delivery evidence set
+// (docs/design/Configurable_POD.md) — enforced at completeStop, at most one
+// active per company.
+export const FORM_TARGET_CONTEXTS = ['DRIVER', 'OFFICE', 'BOTH', 'DELIVERY'] as const;
 
 export class CreateFormTemplateDto {
   @IsString()

@@ -329,6 +329,33 @@ describe('Billing / subscriptions', () => {
     expect(types).toContain('billing.payment_recovered');
   });
 
+  // Item 7: the 5-business-day grace window lifecycle — opened on the first
+  // failure, held (not extended) across a retry, cleared on recovery.
+  it('opens a ~5-business-day grace window on first failure, holds it across a retry, and clears it on recovery', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
+    const stripeSubscriptionId = `sub_${tenant.companyId}`;
+    const before = Date.now();
+
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+    const afterFirst = await ownerPrisma.company.findUniqueOrThrow({ where: { id: tenant.companyId }, select: { gracePeriodEndsAt: true } });
+    expect(afterFirst.gracePeriodEndsAt).not.toBeNull();
+    const graceEnd = afterFirst.gracePeriodEndsAt as Date;
+    // 5 business days is between 5 and 7 calendar days (spans at most one weekend).
+    const daysOut = (graceEnd.getTime() - before) / (24 * 60 * 60 * 1000);
+    expect(daysOut).toBeGreaterThan(4.9);
+    expect(daysOut).toBeLessThan(7.1);
+
+    // A retry failure within the same cycle keeps the SAME deadline (no silent extension).
+    await signedWebhookRequest(app, invoiceEvent('invoice.payment_failed', stripeSubscriptionId, tenant.companyId)).expect(200);
+    const afterSecond = await ownerPrisma.company.findUniqueOrThrow({ where: { id: tenant.companyId }, select: { gracePeriodEndsAt: true } });
+    expect((afterSecond.gracePeriodEndsAt as Date).getTime()).toBe(graceEnd.getTime());
+
+    // Recovery clears the window so a future failure starts fresh.
+    await signedWebhookRequest(app, invoiceEvent('invoice.paid', stripeSubscriptionId, tenant.companyId)).expect(200);
+    const afterPaid = await ownerPrisma.company.findUniqueOrThrow({ where: { id: tenant.companyId }, select: { gracePeriodEndsAt: true } });
+    expect(afterPaid.gracePeriodEndsAt).toBeNull();
+  });
+
   it('does not send a recovery notification for a routine invoice.paid with no prior failure', async () => {
     const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);
     const token = await login(tenant.username);

@@ -10,7 +10,9 @@ import { JobsService } from './jobs.service';
 import { JobStopsService } from './job-stops.service';
 import { PodReceiptService } from './pod-receipt.service';
 import { ParcelsService } from './parcels.service';
+import { LoadVerificationService } from './load-verification.service';
 import { AddParcelsDto, ScanParcelDto } from './dto/parcels.dto';
+import { LoadVerificationDto } from './dto/load-verification.dto';
 import { CreateJobDto } from './dto/create-job.dto';
 import { UpdateJobDto } from './dto/update-job.dto';
 import { AssignJobDto } from './dto/assign-job.dto';
@@ -29,7 +31,26 @@ export class JobsController {
     private readonly jobStops: JobStopsService,
     private readonly podReceipt: PodReceiptService,
     private readonly parcels: ParcelsService,
+    private readonly loadVerification: LoadVerificationService,
   ) {}
+
+  /** Aggregated expected load for a run + its discrepancies (DriverOS "Confirm load"). */
+  @Get(':id/load-status')
+  @RequirePermission(PERMISSIONS.DISPATCH_VIEW)
+  loadStatus(@CurrentUser() user: AuthenticatedRequestUser, @Param('id', ParseUUIDPipe) id: string) {
+    return this.loadVerification.getLoadStatus(user.companyId, id);
+  }
+
+  /** Driver verifies the vehicle's load before starting a run — rejects a partial load unless overridden. */
+  @Post(':id/load-verification')
+  @RequirePermission(PERMISSIONS.DISPATCH_DELIVER)
+  verifyLoad(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LoadVerificationDto,
+  ) {
+    return this.loadVerification.verifyLoad(user.companyId, user.userId, id, dto);
+  }
 
   /** A stop's parcels + scanned/total (DriverOS parcel screen). */
   @Get(':id/stops/:stopId/parcels')

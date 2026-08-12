@@ -1,4 +1,38 @@
-import { IsIn, IsISO8601, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+  ValidateNested,
+} from 'class-validator';
+import { FormAnswerDto } from '../../forms/dto/form-answer.dto';
+
+/**
+ * Configurable POD evidence (docs/design/Configurable_POD.md): the answers to
+ * the tenant's DELIVERY form template, captured once and shared across the
+ * stop's parcels. `answers` follows the form engine's shape — a photo/signature
+ * answer's value is a `{ contentType, filename?, base64 }` payload; text/select
+ * answers are their plain value. Validated server-side against the DELIVERY
+ * template's CURRENT fields, so a required photo can't be omitted.
+ */
+export class PodEvidenceDto {
+  /** Optional client-generated submission id for idempotent offline replay. */
+  @IsOptional()
+  @IsUUID()
+  id?: string;
+
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => FormAnswerDto)
+  answers!: FormAnswerDto[];
+}
 
 export const STOP_COMPLETION_OUTCOMES = ['DELIVERED', 'FAILED'] as const;
 export type StopCompletionOutcome = (typeof STOP_COMPLETION_OUTCOMES)[number];
@@ -79,4 +113,27 @@ export class CompleteStopDto {
   @IsString()
   @MaxLength(255)
   signatureFilename?: string;
+
+  /**
+   * Multi-drop (docs/design/Configurable_POD.md): which of the stop's parcels
+   * this confirmation covers. Omitted → every parcel at the stop. Each covered
+   * parcel is individually marked delivered (its own `deliveredAt`) while
+   * sharing the one evidence capture below.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsUUID('4', { each: true })
+  parcelIds?: string[];
+
+  /**
+   * The configured Proof-of-Delivery evidence. Required on a DELIVERED outcome
+   * iff the tenant has an active DELIVERY form template; ignored on FAILED. When
+   * no DELIVERY template is configured, the legacy podPhotoBase64/signatureBase64
+   * fields above still apply (backward compatible).
+   */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PodEvidenceDto)
+  evidence?: PodEvidenceDto;
 }

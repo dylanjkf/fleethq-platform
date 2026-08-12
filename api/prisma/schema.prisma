@@ -297,6 +297,13 @@ model Company {
   /// the billing settings page can tell a customer exactly when the next
   /// charge attempt will happen, not just "your payment failed."
   nextPaymentAttemptAt     DateTime?          @map("next_payment_attempt_at")
+  /// End of the non-payment GRACE window. Set on the first failed payment of a
+  /// dunning cycle to `now + GRACE_PERIOD_BUSINESS_DAYS` business days (weekends
+  /// excluded; public holidays are NOT considered — see business-days.ts). The
+  /// account stays fully active until this instant; only once `now` passes it
+  /// does the billing read-only restriction apply. Cleared to null on recovery
+  /// (invoice.paid), so a later failure starts a fresh window.
+  gracePeriodEndsAt        DateTime?          @map("grace_period_ends_at")
   /// `created` timestamp of the most recent Stripe subscription-state webhook
   /// event applied to this company. Guards against out-of-order delivery
   /// (Stripe explicitly documents webhooks can arrive out of order): a
@@ -304,10 +311,12 @@ model Company {
   /// stale event can't revert subscriptionStatus/planPriceId after a newer one
   /// already landed.
   lastStripeEventAt        DateTime?          @map("last_stripe_event_at")
-  /// Self-serve free-trial window. Set at signup (14 days) so a new company
-  /// experiences the full product before subscribing; entitlements grant the
-  /// Trial tier while `now < trialEndsAt`, then fall back to Free. Independent
-  /// of Stripe's own TRIALING status — this is FleetOS's native, no-card trial.
+  /// Native no-card free-trial window. Granted on staff org provisioning for
+  /// TRIAL_PERIOD_DAYS (7) so a new company experiences the full product before
+  /// subscribing; entitlements grant the Trial tier while `now < trialEndsAt`,
+  /// then fall back to Free. Independent of Stripe's own TRIALING status — this
+  /// is FleetOS's native, no-card trial. (Payment-first self-serve signup pays
+  /// immediately and grants no native trial.)
   trialEndsAt              DateTime?          @map("trial_ends_at")
   /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
   /// slots this company currently pays for — the Stripe subscription item
@@ -1292,6 +1301,14 @@ model Job {
   scheduledAt   DateTime? @map("scheduled_at")
   completedAt   DateTime? @map("completed_at")
   cancelledAt   DateTime? @map("cancelled_at")
+  /// Set when a driver has verified the vehicle's actual load against this run's
+  /// expected manifest (the aggregate of its stops' StopParcel rows) before
+  /// starting — either cleanly (everything scanned/confirmed) or by explicitly
+  /// overriding a discrepancy. Nullable: null means load verification hasn't
+  /// been done yet. The who/when/what-was-missing of an override lives in the
+  /// JOB timeline event (load_discrepancy_override), not here — this is just the
+  /// "done" flag the DriverOS client reads.
+  loadVerifiedAt DateTime? @map("load_verified_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1482,6 +1499,13 @@ model JobStop {
   failureReason         StopFailureReason? @map("failure_reason")
   podAttachmentId       String?            @map("pod_attachment_id") @db.Uuid
   signatureAttachmentId String?            @map("signature_attachment_id") @db.Uuid
+  /// Configurable POD (docs/design/Configurable_POD.md): when this stop was
+  /// confirmed against a tenant's DELIVERY form template, the one FormSubmission
+  /// that captured the configured evidence. One capture per stop, shared across
+  /// the stop's parcels — each parcel also points at it via
+  /// StopParcel.podSubmissionId. Null for stops completed the legacy way (bare
+  /// podPhotoBase64/signatureBase64, no DELIVERY template configured).
+  podSubmissionId       String?            @map("pod_submission_id") @db.Uuid
   /// Set when this stop was created as a redelivery attempt of a FAILED stop
   /// (see JobsService.reattemptStop) — lets the office trace a delivery's
   /// full attempt history even across separate jobs.
@@ -1492,8 +1516,9 @@ model JobStop {
   company             Company      @relation(fields: [companyId], references: [id])
   job                 Job          @relation(fields: [jobId], references: [id])
   customer            Customer?    @relation(fields: [customerId], references: [id])
-  podAttachment       Attachment?  @relation("StopPod", fields: [podAttachmentId], references: [id])
-  signatureAttachment Attachment?  @relation("StopSignature", fields: [signatureAttachmentId], references: [id])
+  podAttachment       Attachment?     @relation("StopPod", fields: [podAttachmentId], references: [id])
+  signatureAttachment Attachment?     @relation("StopSignature", fields: [signatureAttachmentId], references: [id])
+  podSubmission       FormSubmission? @relation("StopPodSubmission", fields: [podSubmissionId], references: [id])
   reattemptOfStop     JobStop?     @relation("StopReattempt", fields: [reattemptOfStopId], references: [id])
   reattempts          JobStop[]    @relation("StopReattempt")
   parcels             StopParcel[]
@@ -1526,6 +1551,17 @@ model StopParcel {
   reference         String
   label             String?
   scannedAt         DateTime? @map("scanned_at")
+  /// Configurable POD / multi-drop (docs/design/Configurable_POD.md): stamped
+  /// when this individual parcel's drop is completed. A stop with several
+  /// parcels shares ONE evidence capture (podSubmissionId below), yet each
+  /// parcel records its own delivery time here, so per-parcel completion stays
+  /// individually tracked and reportable rather than all-or-nothing on the stop.
+  deliveredAt       DateTime? @map("delivered_at")
+  /// The shared FormSubmission that covered this parcel's drop (the one
+  /// signature/photo captured for the 1-3 parcels handed over together). Points
+  /// at the same submission as the stop's podSubmissionId and its sibling
+  /// parcels. Null for a parcel not yet delivered or delivered the legacy way.
+  podSubmissionId   String?   @map("pod_submission_id") @db.Uuid
   trackingNumber    String?   @map("tracking_number")
   consignmentNumber String?   @map("consignment_number")
   manifestNumber    String?   @map("manifest_number")
@@ -1543,9 +1579,10 @@ model StopParcel {
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  company    Company            @relation(fields: [companyId], references: [id])
-  stop       JobStop            @relation(fields: [stopId], references: [id])
-  scanEvents BarcodeScanEvent[]
+  company       Company            @relation(fields: [companyId], references: [id])
+  stop          JobStop            @relation(fields: [stopId], references: [id])
+  podSubmission FormSubmission?    @relation("ParcelPodSubmission", fields: [podSubmissionId], references: [id])
+  scanEvents    BarcodeScanEvent[]
 
   @@unique([stopId, reference])
   @@index([companyId, stopId])
@@ -2238,6 +2275,14 @@ enum FormTargetContext {
   DRIVER
   OFFICE
   BOTH
+  /// Configurable Proof-of-Delivery (docs/design/Configurable_POD.md): a
+  /// template with this context IS the tenant's delivery-confirmation evidence
+  /// set — the fields (signature/photo/recipient/notes, any combination) a
+  /// confirmed drop must satisfy. At most one active (non-archived) DELIVERY
+  /// template per company (partial unique index), so completeStop has a single
+  /// unambiguous evidence requirement to resolve. Admin-edited through the same
+  /// form-template CRUD as every other template — no separate config surface.
+  DELIVERY
 }
 
 /// The Universal Forms milestone's scoped slice of the full Universal_Forms.md
@@ -2298,6 +2343,11 @@ model FormSubmission {
   company         Company      @relation(fields: [companyId], references: [id])
   template        FormTemplate @relation(fields: [templateId], references: [id])
   submittedByUser User?        @relation("FormSubmittedByUser", fields: [submittedByUserId], references: [id])
+  // Configurable POD (docs/design/Configurable_POD.md): a DELIVERY-template
+  // submission is the shared evidence capture for a stop and each of its
+  // covered parcels.
+  coveredStops    JobStop[]    @relation("StopPodSubmission")
+  coveredParcels  StopParcel[] @relation("ParcelPodSubmission")
 
   @@index([companyId])
   @@map("form_submissions")
@@ -2943,11 +2993,41 @@ model AdminUser {
   role              AdminRole               @relation(fields: [roleId], references: [id])
   sessions          AdminSession[]
   trustedDevices    AdminTrustedDevice[]
+  authTokens        AdminAuthToken[]
   auditLogEntries   AdminAuditLog[]
   organisationNotes AdminOrganisationNote[]
   announcements     Announcement[]
 
   @@map("admin_users")
+}
+
+/// The admin-platform counterpart of `AuthTokenType`. Only self-service
+/// password reset needs one today (the admin console has no email-verify or
+/// magic-link flow), but it is modelled as an enum so future admin link types
+/// slot in the same way the customer side did.
+enum AdminAuthTokenType {
+  PASSWORD_RESET
+}
+
+/// Single-use, expiring tokens behind the admin console's self-service
+/// password-reset link — the admin-scoped mirror of `AuthToken`. Only the
+/// SHA-256 *hash* of the token is stored, so a DB leak can't be replayed into
+/// an admin account takeover; the raw token exists only in the emailed link.
+/// Lives in the `admin_*` table space and is touched solely by the BYPASSRLS
+/// `fleetos_admin` role, exactly like the other admin auth tables.
+model AdminAuthToken {
+  id          String             @id @default(uuid()) @db.Uuid
+  adminUserId String             @map("admin_user_id") @db.Uuid
+  type        AdminAuthTokenType
+  tokenHash   String             @unique @map("token_hash")
+  expiresAt   DateTime           @map("expires_at")
+  usedAt      DateTime?          @map("used_at")
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, type])
+  @@map("admin_auth_tokens")
 }
 
 /// One row per active login (not per request) — the "device tracking" +

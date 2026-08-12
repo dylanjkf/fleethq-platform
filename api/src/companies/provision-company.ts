@@ -62,9 +62,11 @@ export interface ProvisionCompanyInput {
    */
   adminMustChangePassword?: boolean;
   /**
-   * Length of the native free trial to grant (days). Self-serve signup passes
-   * this so a new company starts on the Trial tier; the seed/dev bootstrap
-   * omits it (no trial — dev runs unlimited via BILLING_ENFORCED=false anyway).
+   * Length of the native no-card free trial to grant (days). The staff
+   * org-provisioning path (AdminOrganisationsService) passes the canonical
+   * TRIAL_PERIOD_DAYS so a new company starts on the Trial tier; payment-first
+   * self-serve signup and the seed/dev bootstrap omit it (no native trial —
+   * signup pays immediately, and dev runs unlimited via BILLING_ENFORCED=false).
    */
   trialDays?: number;
   /** Auth/Billing Platform Phase 4 (registration depth) — org intake fields, all optional. */

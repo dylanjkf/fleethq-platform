@@ -1,4 +1,4 @@
-import { IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 
 /**
  * Issue a brand-new customer organisation + its first Administrator login.
@@ -24,4 +24,15 @@ export class CreateOrganisationDto {
   @IsString()
   @MaxLength(200)
   adminFullName?: string;
+
+  /**
+   * Length of the native no-card free trial to grant the new org, in days.
+   * Omit to use the standard TRIAL_PERIOD_DAYS window; pass `0` to provision with
+   * no trial (e.g. an org migrating straight onto a paid plan).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(365)
+  trialDays?: number;
 }

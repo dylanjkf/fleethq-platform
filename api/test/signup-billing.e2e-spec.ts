@@ -349,8 +349,10 @@ describe('Per-asset billing + self-serve signup', () => {
   });
 
   describe('payment-failure read-only enforcement', () => {
-    // A per-asset company whose dunning is exhausted (past due, no next attempt).
-    async function readOnlyCompany() {
+    // A per-asset company that is past due AND whose 5-business-day grace window
+    // has already elapsed (gracePeriodEndsAt in the past) — the point at which the
+    // read-only restriction actually applies (item 7).
+    async function readOnlyCompany(gracePeriodEndsAt: Date = new Date(Date.now() - 24 * 60 * 60 * 1000)) {
       const tenant = await createTestTenant([PERMISSIONS.ASSETS_CREATE, PERMISSIONS.ASSETS_VIEW, PERMISSIONS.BILLING_MANAGE]);
       await ownerPrisma.company.update({
         where: { id: tenant.companyId },
@@ -362,6 +364,7 @@ describe('Per-asset billing + self-serve signup', () => {
           stripeCustomerId: `cus_ro_${randomUUID()}`,
           paymentFailureCount: 4,
           nextPaymentAttemptAt: null,
+          gracePeriodEndsAt,
         },
       });
       return tenant;
@@ -398,6 +401,18 @@ describe('Per-asset billing + self-serve signup', () => {
       const tenant = await perAssetCompany(3);
       const token = await login(tenant.username);
       await postAsset(token, 'Healthy asset').expect(201);
+    });
+
+    // Item 7: DURING the grace window a past-due company is still fully writable —
+    // the restriction only bites once the window elapses (proven by the test above).
+    it('does NOT restrict a past-due company whose grace window is still open', async () => {
+      const tenant = await readOnlyCompany(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)); // grace ends in 3 days
+      const token = await login(tenant.username);
+
+      const ent = await request(app.getHttpServer()).get('/v1/billing/entitlements').set('Authorization', `Bearer ${token}`).expect(200);
+      expect(ent.body.billingReadOnly).toBe(false);
+
+      await postAsset(token, 'Allowed during grace').expect(201);
     });
   });
 });
