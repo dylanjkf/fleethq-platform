@@ -31,7 +31,10 @@ import { AdminPermissionGuard } from '../src/admin-auth/guards/admin-permission.
  * are actually present on every non-exempt route.
  */
 const EXEMPT: Record<string, string[]> = {
-  AdminAuthController: ['login', 'verifyMfa'],
+  // The genuinely unauthenticated admin routes — credential/token entry points
+  // that carry no classification on purpose (see AdminAuthController's
+  // docstring): login, MFA challenge, and the self-service password-reset pair.
+  AdminAuthController: ['login', 'verifyMfa', 'forgotPassword', 'resetPassword'],
 };
 
 describe('admin route permission coverage', () => {
