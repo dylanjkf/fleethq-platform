@@ -160,6 +160,22 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
         );
       }
     }
+
+    // APP_BASE_URL backs the customer-app links baked into signup Checkout
+    // success/cancel redirects (SignupService) and every billing/auth email.
+    // In dev/test the code falls back to http://localhost:5173, but in production
+    // an unset value has two silent, hard-to-diagnose failure modes we refuse to
+    // ship with: self-serve signup disables itself (SignupService.isEnabled gates
+    // on it) so the /signup page shows a dead "unavailable" state, and any email
+    // link points customers at localhost. Fail the boot loudly instead.
+    const appBaseUrl = typeof config.APP_BASE_URL === 'string' ? config.APP_BASE_URL.trim() : '';
+    if (appBaseUrl === '') {
+      errors.push(
+        'APP_BASE_URL is required in production — it backs signup Checkout redirect URLs and billing/auth email links. Unset, self-serve signup silently disables itself and email links point at localhost.',
+      );
+    } else if (!/^https?:\/\/.+/.test(appBaseUrl)) {
+      errors.push(`APP_BASE_URL must be an absolute http(s) URL in production (got "${appBaseUrl}").`);
+    }
   }
 
   if (errors.length > 0) {

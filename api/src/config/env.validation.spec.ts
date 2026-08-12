@@ -83,8 +83,31 @@ describe('validateEnv', () => {
         NODE_ENV: 'production',
         JWT_SECRET: 'a'.repeat(48),
         ADMIN_JWT_SECRET: 'b'.repeat(48),
+        APP_BASE_URL: 'https://app.fleetos.example',
       }),
     ).not.toThrow();
+  });
+
+  it('requires APP_BASE_URL in production (unset silently disables signup + points email links at localhost)', () => {
+    expect(() =>
+      validateEnv({ ...base, NODE_ENV: 'production', JWT_SECRET: 'a'.repeat(48), ADMIN_JWT_SECRET: 'b'.repeat(48) }),
+    ).toThrow(/APP_BASE_URL is required in production/);
+  });
+
+  it('rejects a non-URL APP_BASE_URL in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a'.repeat(48),
+        ADMIN_JWT_SECRET: 'b'.repeat(48),
+        APP_BASE_URL: 'app.fleetos.example',
+      }),
+    ).toThrow(/APP_BASE_URL must be an absolute http\(s\) URL/);
+  });
+
+  it('does not require APP_BASE_URL outside production (dev/test fall back to localhost)', () => {
+    expect(() => validateEnv({ ...base })).not.toThrow();
   });
 
   it('rejects a dev-only DB role password surviving into production', () => {

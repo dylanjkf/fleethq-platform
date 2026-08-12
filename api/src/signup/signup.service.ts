@@ -57,9 +57,24 @@ export class SignupService {
     return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
 
+  /**
+   * Which prerequisite (if any) is preventing self-serve signup. Null = enabled.
+   * Non-sensitive (config presence, not values), so it's safe to log and to hand
+   * the signup page a specific reason instead of a dead "unavailable" state — the
+   * exact silent-failure the broken-signup-link report was about. In production
+   * `no_app_base_url` can't happen (env.validation fails the boot), so a live
+   * disabled signup is almost always billing/price misconfiguration.
+   */
+  signupDisabledReason(): 'billing_not_configured' | 'no_per_asset_price' | 'no_app_base_url' | null {
+    if (!this.billing.isConfigured()) return 'billing_not_configured';
+    if (!this.perAssetPriceId()) return 'no_per_asset_price';
+    if (!this.config.get<string>('APP_BASE_URL')) return 'no_app_base_url';
+    return null;
+  }
+
   /** Whether self-serve signup can run on this deployment (Stripe + per-asset price + app base URL configured). */
   isEnabled(): boolean {
-    return this.billing.isConfigured() && !!this.perAssetPriceId() && !!this.config.get<string>('APP_BASE_URL');
+    return this.signupDisabledReason() === null;
   }
 
   /**
@@ -68,10 +83,17 @@ export class SignupService {
    * (price × quantity) at Checkout — but serving the authoritative per-asset
    * price from here keeps the preview honest (one source of truth: billing_settings).
    */
-  async getSignupConfig(): Promise<{ enabled: boolean; pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number }> {
+  async getSignupConfig(): Promise<{ enabled: boolean; disabledReason: string | null; pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number }> {
     const settings = await this.billing.getBillingSettings();
+    const disabledReason = this.signupDisabledReason();
+    if (disabledReason) {
+      // Loud, so a disabled signup page in a live environment is diagnosable from
+      // the logs rather than presenting as a silent dead link.
+      this.logger.warn(`Self-serve signup is DISABLED: ${disabledReason}. The /signup page will show its unavailable state until this is configured.`);
+    }
     return {
-      enabled: this.isEnabled(),
+      enabled: disabledReason === null,
+      disabledReason,
       pricePerAssetCents: settings.pricePerAssetCents,
       currency: settings.currency,
       billingInterval: settings.billingInterval,
@@ -92,7 +114,9 @@ export class SignupService {
     }
     const priceId = this.perAssetPriceId();
     const appBase = this.config.get<string>('APP_BASE_URL')?.replace(/\/$/, '');
-    if (!this.billing.isConfigured() || !priceId || !appBase) {
+    const disabledReason = this.signupDisabledReason();
+    if (disabledReason || !priceId || !appBase) {
+      this.logger.error(`Rejected a signup attempt because self-serve signup is not configured: ${disabledReason ?? 'unknown'}.`);
       throw new BadRequestException({ code: 'SIGNUP_NOT_CONFIGURED', message: 'Signup is temporarily unavailable. Please contact us.' });
     }
 
