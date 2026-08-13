@@ -59,6 +59,41 @@ describe('Asset specs + detail', () => {
     expect(updated.body.odometer).toBe(90000);
   });
 
+  it('rolls up trailing-12-month fuel + maintenance running cost on the detail aggregate', async () => {
+    const tenant = await createTestTenant([...FULL, PERMISSIONS.FUEL_LOG, PERMISSIONS.FUEL_VIEW, PERMISSIONS.MAINTENANCE_CLOSE]);
+    const auth = await login(tenant.username);
+
+    const asset = await request(app.getHttpServer()).post('/v1/assets').set(auth).send({ name: 'Cost Truck', registration: 'COST01' }).expect(201);
+    const assetId = asset.body.id as string;
+
+    // In-window fuel fill ($250.50) plus one 13 months ago that must be excluded.
+    await request(app.getHttpServer())
+      .post('/v1/fuel/entries')
+      .set(auth)
+      .send({ odometerReading: 1000, licencePlate: 'COST01', cardLast4: '4321', totalCost: 250.5, assetId })
+      .expect(201);
+    const thirteenMonthsAgo = new Date();
+    thirteenMonthsAgo.setMonth(thirteenMonthsAgo.getMonth() - 13);
+    await request(app.getHttpServer())
+      .post('/v1/fuel/entries')
+      .set(auth)
+      .send({ odometerReading: 900, licencePlate: 'COST01', cardLast4: '4321', totalCost: 999, assetId, filledAt: thirteenMonthsAgo.toISOString() })
+      .expect(201);
+
+    // One closed job ($120 parts + $80 labour = $200) plus one still-open job that must NOT count toward cost.
+    const job = await request(app.getHttpServer()).post('/v1/maintenance-jobs').set(auth).send({ assetId, title: 'Major service', description: 'Full' }).expect(201);
+    await request(app.getHttpServer()).post(`/v1/maintenance-jobs/${job.body.id as string}/close`).set(auth).send({ partsCost: 120, laborCost: 80 }).expect(201);
+    await request(app.getHttpServer()).post('/v1/maintenance-jobs').set(auth).send({ assetId, title: 'Still open', description: 'Pending' }).expect(201);
+
+    const detail = await request(app.getHttpServer()).get(`/v1/assets/${assetId}/detail`).set(auth).expect(200);
+    expect(detail.body.runningCost.fuelCost).toBe(250.5);
+    expect(detail.body.runningCost.maintenanceCost).toBe(200);
+    expect(detail.body.runningCost.totalCost).toBe(450.5);
+    expect(detail.body.runningCost.fuelEntryCount).toBe(1);
+    expect(detail.body.runningCost.maintenanceJobCount).toBe(1);
+    expect(detail.body.runningCost.coversFullYear).toBe(false);
+  });
+
   it('detail is tenant-isolated', async () => {
     const a = await createTestTenant(FULL);
     const b = await createTestTenant(FULL);
