@@ -100,6 +100,20 @@ jobs:
           npx prisma migrate resolve --rolled-back 20260713063137_row_level_security || true
           npx prisma migrate deploy
 
+      - name: Seed reference data (asset classes, permissions, system roles)
+        working-directory: api
+        # The database has the tables (migrations) but no reference data — the
+        # built-in asset classes (e.g. LAND) and the permission catalog were
+        # never seeded, so the Titan seed failed with "No AssetClass found".
+        # `prisma/seed.ts` bootstraps exactly that. With NODE_ENV=production it
+        # seeds ONLY reference data + system roles and returns before any demo
+        # company (no default-credential accounts) — it is the same reference-data
+        # bootstrap a production deploy is meant to run. Idempotent (upserts).
+        env:
+          DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
+          NODE_ENV: production
+        run: npm run seed
+
       - name: Seed Titan demo into the live database
         working-directory: api
         # Connects directly to the public Postgres proxy (reachable from the
