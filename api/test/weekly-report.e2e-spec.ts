@@ -127,4 +127,36 @@ describe('Weekly operations report', () => {
     });
     expect(bNotes).toBe(0);
   });
+
+  it('sends to the configured recipient list, and reverts to reports:view holders once it is emptied (Part 4)', async () => {
+    const tenant = await createTestTenant([PERMISSIONS.REPORTS_VIEW]);
+    await ownerPrisma.user.update({ where: { id: tenant.userId }, data: { email: 'holder@example.test' } });
+
+    // Add a configured recipient — the report email must now go to it, and NOT
+    // to the reports:view holder (the configured list takes over).
+    const added = await weekly.addRecipient(tenant.companyId, 'Custom-Contact@Example.test');
+    expect(added.recipients).toEqual(['custom-contact@example.test']); // normalised
+
+    const emailSpy = jest.spyOn(channel, 'sendEmail');
+    const first = await weekly.sendWeeklyReport(tenant.companyId, new Date());
+    expect(first.sent).toBe(true);
+    expect(emailSpy.mock.calls.find((c) => c[0].to === 'custom-contact@example.test')).toBeDefined();
+    expect(emailSpy.mock.calls.find((c) => c[0].to === 'holder@example.test')).toBeUndefined();
+    // The report email carries the PDF attachment.
+    const toCustom = emailSpy.mock.calls.find((c) => c[0].to === 'custom-contact@example.test');
+    expect(toCustom?.[0].attachments?.[0].filename).toMatch(/^weekly-report-.*\.pdf$/);
+
+    // Remove it → the list is empty again → next report reverts to the holder.
+    const removed = await weekly.removeRecipient(tenant.companyId, 'custom-contact@example.test');
+    expect(removed.recipients).toEqual([]);
+
+    emailSpy.mockClear();
+    // A week later (past the idempotency window) so a second report actually sends.
+    const later = new Date(Date.now() + 8 * 24 * 60 * 60 * 1000);
+    const second = await weekly.sendWeeklyReport(tenant.companyId, later);
+    expect(second.sent).toBe(true);
+    expect(emailSpy.mock.calls.find((c) => c[0].to === 'holder@example.test')).toBeDefined();
+    expect(emailSpy.mock.calls.find((c) => c[0].to === 'custom-contact@example.test')).toBeUndefined();
+    emailSpy.mockRestore();
+  });
 });

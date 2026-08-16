@@ -39,16 +39,23 @@ export class ReportsMailService {
     ];
   }
 
-  async sendWeeklyReport(to: string, fullName: string, companyName: string, report: OperationsReport): Promise<void> {
+  async sendWeeklyReport(
+    to: string,
+    fullName: string,
+    companyName: string,
+    report: OperationsReport,
+    pdf?: { data: Buffer; filename: string } | null,
+  ): Promise<void> {
     const from = report.range.from.toLocaleDateString('en-AU');
     const until = report.range.to.toLocaleDateString('en-AU');
     const lines = ReportsMailService.summaryLines(report);
     await this.channel.sendEmail({
       to,
       subject: `${companyName}'s FleetOS weekly report (${from} – ${until})`,
-      body: `Hi ${fullName},\n\nHere is ${companyName}'s FleetOS operations summary for ${from} – ${until}:\n\n${lines
-        .map((l) => `- ${l}`)
-        .join('\n')}\n\nSee the full report with per-operator and cost breakdowns:\n\n${this.reportsLink()}`,
+      body: `Hi ${fullName},\n\nHere is ${companyName}'s FleetOS operations summary for ${from} – ${until}${
+        pdf ? ' (a PDF copy is attached)' : ''
+      }:\n\n${lines.map((l) => `- ${l}`).join('\n')}\n\nSee the full report with per-operator and cost breakdowns:\n\n${this.reportsLink()}`,
+      attachments: pdf ? [{ filename: pdf.filename, content: pdf.data, contentType: 'application/pdf' }] : undefined,
     });
   }
 }

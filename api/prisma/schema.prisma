@@ -354,6 +354,13 @@ model Company {
   /// customer is a worse position than one with an unexposed escape hatch.
   contractReleasedAt       DateTime?          @map("contract_released_at")
   contractReleaseReason    String?            @map("contract_release_reason")
+  /// Weekly-report email recipient list (Part 4). Editable by company admins
+  /// (companies:edit). When EMPTY, the weekly report falls back to every
+  /// reports:view permission holder with an email (the prior behaviour), so the
+  /// company's main contacts are included by default; once populated, the report
+  /// email goes to exactly this list. Stored as a plain string[] on the company
+  /// (no new tenant table needed — it inherits companies' row-level security).
+  weeklyReportRecipients   String[]           @map("weekly_report_recipients")
   createdAt                DateTime           @default(now()) @map("created_at")
   updatedAt                DateTime           @updatedAt @map("updated_at")
   archivedAt               DateTime?          @map("archived_at")

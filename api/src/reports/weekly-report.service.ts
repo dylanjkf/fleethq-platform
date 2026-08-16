@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReportsService } from './reports.service';
 import { ReportsMailService } from './reports-mail.service';
+import { buildWeeklyReportPdf } from './weekly-report-pdf';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export const WEEKLY_REPORT_NOTIFICATION_TYPE = 'reports.weekly_summary';
@@ -54,7 +55,7 @@ export class WeeklyReportService {
       });
       if (already) return null;
 
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true, weeklyReportRecipients: true } });
 
       const d = report.deliveries;
       const summary = `${d.delivered} delivered, ${d.failed} failed${
@@ -67,22 +68,78 @@ export class WeeklyReportService {
         linkPath: '/reports',
       });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.REPORTS_VIEW);
-      return { companyName: company.name, holders };
+      return { companyName: company.name, holders, configured: company.weeklyReportRecipients };
     });
 
     if (!result) return { sent: false, recipients: 0 };
 
+    // Effective email targets (Part 4): if the company has configured a
+    // recipient list, the report email goes to exactly those addresses;
+    // otherwise it falls back to every reports:view holder with an email (the
+    // prior behaviour), so the main contacts are covered by default. The in-app
+    // notification above always goes to reports:view holders regardless.
+    const targets: { email: string; name: string }[] =
+      result.configured.length > 0
+        ? result.configured.map((email) => ({ email, name: result.companyName }))
+        : result.holders.filter((h) => h.email).map((h) => ({ email: h.email as string, name: h.fullName }));
+
+    // One PDF per run (Part 4) — the same attachment for every recipient. Built
+    // from the SAME computed report the email body summarises, so the attachment
+    // can never disagree with the numbers in the message.
+    let pdf: { data: Buffer; filename: string } | null = null;
+    try {
+      pdf = await buildWeeklyReportPdf(result.companyName, report, now);
+    } catch (err) {
+      this.logger.warn(`Could not render the weekly report PDF: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Sent after the transaction commits — a channel failure must never roll
-    // back the in-app notification that makes this idempotent. Holders without
-    // an email address still got the in-app notification.
+    // back the in-app notification that makes this idempotent.
     let recipients = 0;
-    for (const holder of result.holders) {
-      if (!holder.email) continue;
+    for (const target of targets) {
       recipients += 1;
       void this.reportsMail
-        .sendWeeklyReport(holder.email, holder.fullName, result.companyName, report)
+        .sendWeeklyReport(target.email, target.name, result.companyName, report, pdf)
         .catch((err) => this.logger.warn(`Failed to send a weekly report email: ${err instanceof Error ? err.message : String(err)}`));
     }
     return { sent: true, recipients };
+  }
+
+  /**
+   * The weekly-report recipient list for a company (Part 4). Returns the
+   * configured addresses plus whether the company is still on the default
+   * (empty list → reports:view holders receive it). Company-admin editable.
+   */
+  async getRecipients(companyId: string): Promise<{ recipients: string[]; usingDefault: boolean }> {
+    const company = await this.prisma.withTenant(companyId, (tx) =>
+      tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { weeklyReportRecipients: true } }),
+    );
+    return { recipients: company.weeklyReportRecipients, usingDefault: company.weeklyReportRecipients.length === 0 };
+  }
+
+  /** Add an email to the weekly-report recipient list (idempotent, case-normalised). */
+  async addRecipient(companyId: string, email: string): Promise<{ recipients: string[] }> {
+    const normalised = email.trim().toLowerCase();
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { weeklyReportRecipients: true } });
+      if (company.weeklyReportRecipients.includes(normalised)) return { recipients: company.weeklyReportRecipients };
+      if (company.weeklyReportRecipients.length >= 50) {
+        throw new BadRequestException({ code: 'TOO_MANY_RECIPIENTS', message: 'A company can have at most 50 weekly-report recipients.' });
+      }
+      const recipients = [...company.weeklyReportRecipients, normalised];
+      await tx.company.update({ where: { id: companyId }, data: { weeklyReportRecipients: recipients } });
+      return { recipients };
+    });
+  }
+
+  /** Remove an email from the weekly-report recipient list. */
+  async removeRecipient(companyId: string, email: string): Promise<{ recipients: string[] }> {
+    const normalised = email.trim().toLowerCase();
+    return this.prisma.withTenant(companyId, async (tx) => {
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { weeklyReportRecipients: true } });
+      const recipients = company.weeklyReportRecipients.filter((e) => e !== normalised);
+      await tx.company.update({ where: { id: companyId }, data: { weeklyReportRecipients: recipients } });
+      return { recipients };
+    });
   }
 }
