@@ -1,0 +1,72 @@
+name: Repro signup
+
+# Read-only reproduction of the reported broken-signup-link, run from a GitHub
+# runner (open internet). Checks three things and prints them:
+#   1. Product server-side signup: GET <api>/v1/signup/config -> enabled + reason
+#   2. Marketing site (fleethq.net.au): the actual href of the signup CTA and
+#      what the /signup page is.
+#   3. Whether Stripe + per-asset price are configured on the API service
+#      (presence only, via RAILWAY_TOKEN; values redacted).
+# Nothing is written.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SVC: ${{ vars.RAILWAY_SERVICE }}
+      API_BASE: https://fleethq-platform-production.up.railway.app
+    steps:
+      - name: Product signup config (server-side)
+        run: |
+          echo "GET $API_BASE/v1/signup/config"
+          curl -sS -m 20 -o /tmp/cfg.txt -w '  HTTP %{http_code}\n' "$API_BASE/v1/signup/config" || echo '  unreachable'
+          echo '  body:'; cat /tmp/cfg.txt; echo
+
+      - name: Marketing site signup CTA + /signup page
+        run: |
+          for base in https://fleethq.net.au https://www.fleethq.net.au; do
+            echo "=== $base ==="
+            code=$(curl -sSL -m 25 -o /tmp/home.html -w '%{http_code}' "$base/" || echo 000)
+            echo "  GET / -> HTTP $code"
+            [ "$code" = 000 ] && continue
+            echo '  --- signup/get-started hrefs found on homepage ---'
+            grep -oiE 'href="[^"]*(signup|get-?started|start|checkout)[^"]*"' /tmp/home.html | sort -u | sed 's/^/    /' | head
+            echo "  GET /signup:"
+            curl -sSL -m 25 -o /tmp/su.html -w '    HTTP %{http_code}\n' "$base/signup" || echo '    unreachable'
+            echo '    --- does /signup mention checkout/stripe/enquiry/create account? ---'
+            grep -oiE '(stripe|checkout|enquir|create account|create your|get your account|tell us about)' /tmp/su.html | sort | uniq -c | sed 's/^/    /' | head
+            echo '    --- title ---'; grep -oiE '<title>[^<]*</title>' /tmp/su.html | head -1 | sed 's/^/    /'
+          done
+
+      - name: Product /signup page (SPA) + its API wiring
+        run: |
+          echo 'GET https://fleethq.online/signup (SPA shell):'
+          curl -sSL -m 25 -o /tmp/psu.html -w '  HTTP %{http_code}\n' 'https://fleethq.online/signup' || echo '  unreachable'
+          asset=$(grep -oiE '/assets/index-[^"]+\.js' /tmp/psu.html | head -1)
+          echo "  main bundle: ${asset:-<none>}"
+          if [ -n "$asset" ]; then
+            curl -sS -m 25 -o /tmp/b.js "https://fleethq.online$asset" || true
+            echo '  --- API base URLs baked into bundle (empty => same-origin, signup config call fails) ---'
+            grep -oiE 'https?://[a-z0-9.-]+' /tmp/b.js | grep -iE 'railway|fleethq' | sort -u | sed 's/^/    /' || echo '    (none baked)'
+          fi
+
+      - name: Install Railway CLI + check signup-relevant config presence
+        run: |
+          npm install -g @railway/cli >/dev/null 2>&1 || npm install -g @railway/cli
+          railway variables --service "$SVC" --json > /tmp/v.json 2>/tmp/e || { echo "railway variables failed: $(cat /tmp/e)"; exit 0; }
+          echo '--- signup-relevant config (presence only) ---'
+          for k in APP_BASE_URL STRIPE_PRICE_PER_ASSET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET; do
+            v=$(jq -r --arg k "$k" '.[$k] // empty' /tmp/v.json)
+            if [ -n "$v" ]; then
+              case "$k" in
+                APP_BASE_URL|STRIPE_PRICE_PER_ASSET) echo "  $k = $v" ;;
+                *) echo "  $k = <set, redacted len ${#v}>" ;;
+              esac
+            else
+              echo "  $k = <UNSET>"
+            fi
+          done
