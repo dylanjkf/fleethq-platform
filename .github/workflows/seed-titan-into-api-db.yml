@@ -42,7 +42,11 @@ jobs:
             echo '::error::Confirmation phrase not matched — nothing was seeded.'
             exit 1
           fi
-          [ -z "$RAILWAY_TOKEN" ] && { echo '::error::RAILWAY_TOKEN not set'; exit 1; }
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo '::error::RAILWAY_TOKEN not set'
+            exit 1
+          fi
+          echo 'Confirmed.'
 
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,12 +62,12 @@ jobs:
         run: |
           set -euo pipefail
           API_DBURL=$(railway variables --service "$SVC" --json | jq -r '.DATABASE_URL')
-          [ -z "$API_DBURL" ] || [ "$API_DBURL" = null ] && { echo '::error::could not read API DATABASE_URL'; exit 1; }
+          if [ -z "$API_DBURL" ] || [ "$API_DBURL" = null ]; then
+            echo '::error::could not read API DATABASE_URL'; exit 1
+          fi
           APIHOST=$(printf '%s' "$API_DBURL" | sed -E 's#^[a-z]+://[^@]*@([^:/?]+).*#\1#')
           DBNAME=$(printf '%s' "$API_DBURL" | sed -E 's#.*/([^/?]+)(\?.*)?$#\1#')
           echo "API DB host = $APIHOST ; db = $DBNAME"
-          # Find the Postgres service whose private domain matches the API's DB host,
-          # and take its public proxy endpoint.
           PUBHOSTPORT=''
           for s in Postgres postgres fleetos db database Database; do
             J=$(railway variables --service "$s" --json 2>/dev/null || true)
@@ -82,11 +86,8 @@ jobs:
             echo '::error::Could not resolve a PUBLIC proxy host for the API database. The Postgres service that backs the API may not have Public Networking enabled.'
             exit 1
           fi
-          # Keep the API creds + db name; swap the internal host:port for the public one.
           TARGET=$(printf '%s' "$API_DBURL" | sed -E "s#@[^/?]+#@$PUBHOSTPORT#")
-          # Redacted echo only.
           echo "Resolved target = postgresql://<redacted>@$PUBHOSTPORT/$DBNAME"
-          # Stash for later steps without printing it.
           echo "::add-mask::$TARGET"
           echo "TARGET_DB_URL=$TARGET" >> "$GITHUB_ENV"
 
