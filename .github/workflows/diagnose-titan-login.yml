@@ -1,0 +1,67 @@
+name: Diagnose Titan login
+
+# Read-only investigation of why `admin@titan` can't log in. It does two
+# independent things and prints both results so we can compare them:
+#
+#   1. Calls the LIVE login endpoint (https://api.fleethq.online/v1/auth/login)
+#      with admin@titan + the given password — exactly what the browser does.
+#   2. Connects to SEED_DATABASE_URL (the DB the seed writes to) and checks,
+#      read-only, whether that database holds a matching credential.
+#
+# If (2) says the password matches but (1) returns 401, the live API is
+# authenticating against a DIFFERENT database than the one we've been seeding.
+# Neither step writes anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'Password to test for admin@titan'
+        required: true
+        default: 'TitanDemo2026!Fleet'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Probe the LIVE login endpoint
+        env:
+          PW: ${{ github.event.inputs.password }}
+        run: |
+          echo '--- GET /health/ready ---'
+          curl -sS -o /tmp/health.txt -w 'HTTP %{http_code}\n' https://api.fleethq.online/health/ready || echo 'health request failed'
+          cat /tmp/health.txt || true
+          echo; echo '--- GET /v1/auth/providers ---'
+          curl -sS -o /tmp/prov.txt -w 'HTTP %{http_code}\n' https://api.fleethq.online/v1/auth/providers || echo 'providers request failed'
+          cat /tmp/prov.txt || true
+          echo; echo '--- POST /v1/auth/login (admin@titan) ---'
+          BODY=$(jq -nc --arg u 'admin@titan' --arg p "$PW" '{username:$u,password:$p}')
+          code=$(curl -sS -o /tmp/login.txt -w '%{http_code}' -X POST \
+            https://api.fleethq.online/v1/auth/login \
+            -H 'content-type: application/json' \
+            --data "$BODY") || echo 'login request failed'
+          echo "HTTP $code"
+          echo 'response body:'
+          cat /tmp/login.txt || true
+          echo
+
+      - name: Install deps + generate Prisma client
+        working-directory: api
+        run: |
+          npm ci
+          npx prisma generate
+
+      - name: Check the seeded database (read-only)
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
+          TITAN_ADMIN_PASSWORD: ${{ github.event.inputs.password }}
+        run: npx ts-node --transpile-only scripts/diagnose-titan-login.ts
