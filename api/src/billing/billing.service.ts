@@ -20,6 +20,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const TRIAL_REMINDER_DAYS = 3;
 
 /**
+ * Subscription statuses that represent a company with a LIVE Stripe subscription
+ * (one that is billing or in dunning) — as opposed to NONE/CANCELED which have
+ * no active subscription to protect. Used to block an existing subscriber from
+ * re-running Checkout (which would bypass the guarded quantity-change path).
+ */
+const HAS_LIVE_SUBSCRIPTION: ReadonlySet<SubscriptionStatus> = new Set([
+  SubscriptionStatus.TRIALING,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAST_DUE,
+]);
+
+/**
  * FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing & subscription
  * management spec" — see 19-Billing/Billing_And_Subscriptions.md for the
  * full design. Stripe is the source of truth for plans/pricing/payment
@@ -314,7 +326,7 @@ export class BillingService {
     return ids;
   }
 
-  /** The Stripe Price id for the per-asset plan ($19 AUD/asset/month), if configured. */
+  /** The Stripe Price id for the per-asset plan ($9 AUD/asset/month), if configured. */
   private perAssetPriceId(): string | undefined {
     return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
@@ -328,7 +340,7 @@ export class BillingService {
   async getBillingSettings(): Promise<{ pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number; abn: string | null }> {
     const row = await this.prisma.billingSettings.findUnique({ where: { id: 1 } });
     return {
-      pricePerAssetCents: row?.pricePerAssetCents ?? 1900,
+      pricePerAssetCents: row?.pricePerAssetCents ?? 900,
       currency: row?.currency ?? 'AUD',
       billingInterval: row?.billingInterval ?? 'month',
       gstRate: row?.gstRate ?? 0.1,
@@ -370,9 +382,25 @@ export class BillingService {
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({
         where: { id: companyId },
-        select: { id: true, name: true, abn: true, stripeCustomerId: true },
+        select: { id: true, name: true, abn: true, stripeCustomerId: true, stripeSubscriptionId: true, subscriptionStatus: true },
       }),
     );
+
+    // Revenue-integrity guard (security review #… — the checkout-quantity bypass):
+    // an EXISTING subscriber must NOT be able to re-run Checkout to silently
+    // reset their paid quantity. A completed checkout.session.completed for an
+    // existing company routes to syncSubscription, which writes assetQuantity
+    // straight from the Stripe line item — skipping the QUANTITY_BELOW_USAGE
+    // downgrade guard that lives ONLY in changeAssetQuantity. So a company at 50
+    // live assets could re-checkout at quantity 1 and end up with a cap of 1.
+    // Force all post-subscription quantity changes through the guarded path.
+    if (company.stripeSubscriptionId && HAS_LIVE_SUBSCRIPTION.has(company.subscriptionStatus)) {
+      throw new BadRequestException({
+        code: 'ALREADY_SUBSCRIBED',
+        message:
+          'This company already has an active subscription. Change the number of paid asset slots from the billing page (which validates the change against current usage) rather than starting a new checkout.',
+      });
+    }
 
     const customerId = company.stripeCustomerId ?? (await this.createCustomer(stripe, company.id, company.name, company.abn));
 
@@ -1178,7 +1206,38 @@ export class BillingService {
       const priceId = item?.price.id ?? null;
       const perAssetPriceId = this.perAssetPriceId();
       const onPerAsset = !!perAssetPriceId && priceId === perAssetPriceId;
-      const assetQuantity = onPerAsset ? (item?.quantity ?? null) : null;
+      const incomingQuantity = onPerAsset ? (item?.quantity ?? null) : null;
+
+      // Fail-safe cap floor (defense in depth for the checkout-quantity bypass).
+      // syncSubscription is the ONLY place assetQuantity is written, so clamping
+      // here protects the cap against EVERY side door — a re-run checkout, the
+      // Stripe billing portal, or a manual edit in the Stripe dashboard — not
+      // just the one we block in createCheckoutSession. The guarded
+      // changeAssetQuantity path already refuses to go below live usage, so on
+      // that path this clamp is a no-op; it only bites when a lower quantity
+      // arrives from somewhere that skipped the guard. We never lower the cap
+      // below the number of live (non-archived) assets, and flag the divergence
+      // for staff via a CAP_BLOCKED billing-audit row.
+      let assetQuantity = incomingQuantity;
+      if (onPerAsset && incomingQuantity != null) {
+        const liveAssets = await tx.asset.count({ where: { archivedAt: null } });
+        if (incomingQuantity < liveAssets) {
+          assetQuantity = liveAssets;
+          this.logger.warn(
+            `Stripe reported quantity ${incomingQuantity} for company ${companyId} but ${liveAssets} assets are live; ` +
+              `holding the cap at ${liveAssets}. A quantity change reached Stripe outside the guarded changeAssetQuantity path.`,
+          );
+          await tx.billingAuditLog.create({
+            data: {
+              companyId,
+              eventType: 'CAP_BLOCKED',
+              actorUserId: null,
+              detail: { stripeQuantity: incomingQuantity, liveAssets, heldCapAt: liveAssets, reason: 'sync_below_usage' },
+            },
+          });
+        }
+      }
+
       await tx.company.update({
         where: { id: companyId },
         data: {

@@ -92,7 +92,7 @@ export class EntitlementsService {
     };
   }
 
-  /** The Stripe Price id for the per-asset plan ($19 AUD/asset/month), if configured. */
+  /** The Stripe Price id for the per-asset plan ($9 AUD/asset/month), if configured. */
   private perAssetPriceId(): string | undefined {
     return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }

@@ -49,7 +49,7 @@ model StripeWebhookEvent {
 }
 
 /// Per-asset billing config (19-Billing/Per_Asset_Billing.md), a deliberate
-/// single-row table so the $19 AUD/asset/month price is one source of truth
+/// single-row table so the $9 AUD/asset/month price is one source of truth
 /// read everywhere rather than a literal scattered through the code — and so
 /// making it admin-editable later is a small change, not a rewrite. NOT tenant
 /// data (global platform config): no RLS, seeded with one row (id = 1),
@@ -59,9 +59,9 @@ model BillingSettings {
   /// it that way, so `findUnique({ id: 1 })` always resolves the one config row.
   id                 Int      @id @default(1)
   /// Price per active asset, per billing interval, in the smallest currency
-  /// unit (cents). 1900 = $19.00 AUD. Integer cents throughout — never floats —
+  /// unit (cents). 900 = $9.00 AUD. Integer cents throughout — never floats —
   /// to avoid rounding error on money.
-  pricePerAssetCents Int      @default(1900) @map("price_per_asset_cents")
+  pricePerAssetCents Int      @default(900) @map("price_per_asset_cents")
   currency           String   @default("AUD")
   billingInterval    String   @default("month") @map("billing_interval")
   /// GST rate as a fraction (0.10 = 10%). Australian GST. Stripe Tax computes
@@ -320,7 +320,7 @@ model Company {
   trialEndsAt              DateTime?          @map("trial_ends_at")
   /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
   /// slots this company currently pays for — the Stripe subscription item
-  /// quantity on the per-asset price ($19 AUD/asset/month). This is the SOURCE
+  /// quantity on the per-asset price ($9 AUD/asset/month). This is the SOURCE
   /// OF TRUTH for the hard asset cap: live assets (archived_at IS NULL) may
   /// never exceed it. Kept in sync FROM Stripe by the subscription webhooks
   /// (Stripe remains authoritative); it only ever increases via an explicit
