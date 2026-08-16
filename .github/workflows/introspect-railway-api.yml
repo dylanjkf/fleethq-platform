@@ -1,0 +1,79 @@
+name: Introspect Railway API
+
+# Read-only. Uses the existing RAILWAY_TOKEN to find the API service's real
+# public URL, confirm which database it points at (credentials REDACTED before
+# printing — these logs are public), show its CORS config, and probe the live
+# login endpoint. It creates nothing and changes nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'Password to test for admin@titan'
+        required: true
+        default: 'TitanDemo2026!Fleet'
+
+jobs:
+  introspect:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SVC: ${{ vars.RAILWAY_SERVICE }}
+    steps:
+      - name: Preflight
+        run: |
+          [ -z "$RAILWAY_TOKEN" ] && { echo '::error::RAILWAY_TOKEN secret not set'; exit 1; }
+          echo "RAILWAY_SERVICE = ${SVC:-<unset>}"
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Show API service config (credentials redacted)
+        run: |
+          set +e
+          echo "railway whoami:"; railway whoami 2>&1 | sed 's/^/  /'
+          echo; echo "railway status:"; railway status 2>&1 | sed 's/^/  /'
+          echo; echo "Fetching variables for service '${SVC}populate'..."
+          railway variables --service "$SVC" --json > /tmp/vars.json 2>/tmp/verr
+          if [ ! -s /tmp/vars.json ]; then
+            echo "  --json failed ($(cat /tmp/verr)); trying --kv (redacting)"
+            railway variables --service "$SVC" --kv 2>/dev/null > /tmp/vars.kv || true
+            # Build JSON from KV so the rest works; redact happens below anyway.
+            jq -Rn '[inputs | select(contains("=")) | (index("=")) as $i | {(.[0:$i]): .[$i+1:]}] | add' /tmp/vars.kv > /tmp/vars.json 2>/dev/null || echo '{}' > /tmp/vars.json
+          fi
+          echo; echo '--- Non-secret vars ---'
+          for k in RAILWAY_PUBLIC_DOMAIN RAILWAY_PRIVATE_DOMAIN RAILWAY_STATIC_URL PORT NODE_ENV CORS_ALLOWED_ORIGINS API_HEALTH_URL RUN_MIGRATIONS_ON_BOOT; do
+            v=$(jq -r --arg k "$k" '.[$k] // empty' /tmp/vars.json)
+            echo "  $k = ${v:-<unset>}"
+          done
+          echo; echo '--- Database URLs (host only, credentials redacted) ---'
+          for k in DATABASE_URL AUTH_DATABASE_URL APP_DATABASE_URL ADMIN_DATABASE_URL; do
+            v=$(jq -r --arg k "$k" '.[$k] // empty' /tmp/vars.json)
+            if [ -n "$v" ]; then
+              red=$(printf '%s' "$v" | sed -E 's#://[^@]*@#://<redacted>@#; s#\?.*$##')
+              echo "  $k = $red"
+            else
+              echo "  $k = <unset>"
+            fi
+          done
+
+      - name: Probe the discovered API URL
+        env:
+          PW: ${{ github.event.inputs.password }}
+        run: |
+          DOMAIN=$(jq -r '.RAILWAY_PUBLIC_DOMAIN // empty' /tmp/vars.json)
+          if [ -z "$DOMAIN" ]; then
+            echo '::warning::API service has NO public domain (RAILWAY_PUBLIC_DOMAIN unset).'
+            echo 'The API is not reachable from the internet. A public domain must be enabled on the service.'
+            exit 0
+          fi
+          API="https://$DOMAIN"
+          echo "Discovered API public URL: $API"
+          echo; echo "GET $API/health/ready:"
+          curl -sS -m 20 -o /tmp/r.txt -w '  HTTP %{http_code}\n' "$API/health/ready" 2>/tmp/e || echo "  unreachable: $(cat /tmp/e)"
+          head -c 300 /tmp/r.txt 2>/dev/null | sed 's/^/  /'; echo
+          echo; echo "POST $API/v1/auth/login (admin@titan):"
+          BODY=$(jq -nc --arg u 'admin@titan' --arg p "$PW" '{username:$u,password:$p}')
+          code=$(curl -sS -m 20 -o /tmp/l.txt -w '%{http_code}' -X POST "$API/v1/auth/login" -H 'content-type: application/json' --data "$BODY" 2>/tmp/e2 || echo 000)
+          echo "  HTTP $code"
+          head -c 500 /tmp/l.txt 2>/dev/null | sed 's/^/  /'; echo
