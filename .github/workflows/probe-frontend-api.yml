@@ -1,0 +1,67 @@
+name: Probe frontend API wiring
+
+# Read-only network probe run from a GitHub runner (open internet). It answers:
+# what API URL is the DEPLOYED frontend actually built to call, is that API
+# reachable, and does it accept the Titan admin login? Nothing is written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'Password to test for admin@titan'
+        required: true
+        default: 'TitanDemo2026!Fleet'
+      frontend_hosts:
+        description: 'Space-separated frontend hosts to inspect'
+        required: true
+        default: 'fleethq.online app.fleethq.online fleet-hq-software.vercel.app'
+      api_hosts:
+        description: 'Space-separated candidate API hosts to probe directly'
+        required: true
+        default: 'api.fleethq.online'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discover the API URL baked into the deployed frontend
+        env:
+          FE_HOSTS: ${{ github.event.inputs.frontend_hosts }}
+        run: |
+          for h in $FE_HOSTS; do
+            echo "================================================================="
+            echo "FRONTEND: https://$h/"
+            code=$(curl -sS -m 25 -o /tmp/idx.html -w '%{http_code}' "https://$h/" 2>/tmp/err || true)
+            echo "  index.html -> HTTP ${code:-000} $(cat /tmp/err 2>/dev/null)"
+            [ "${code:-000}" = "000" ] && { echo '  (host did not respond)'; continue; }
+            # Pull every module/script the page loads and scan each for absolute
+            # URLs that look like an API base (the baked VITE_API_URL literal).
+            assets=$(grep -oiE 'src="[^"]+\.js"' /tmp/idx.html | sed -E 's/src="([^"]+)"/\1/' | head -6)
+            echo "  script assets: ${assets:-<none found>}"
+            for a in $assets; do
+              url="$a"; case "$a" in /*) url="https://$h$a";; http*) url="$a";; *) url="https://$h/$a";; esac
+              curl -sS -m 25 -o /tmp/bundle.js "$url" || continue
+              echo "    -- absolute URLs in $(basename "$a") mentioning api/railway/fleethq/vercel --"
+              grep -oiE 'https?://[a-z0-9.-]+(:[0-9]+)?' /tmp/bundle.js \
+                | grep -iE 'api|railway|fleethq|vercel|onrender|herokuapp' \
+                | sort -u | sed 's/^/       /' || echo '       (none)'
+            done
+          done
+
+      - name: Probe candidate API hosts directly
+        env:
+          API_HOSTS: ${{ github.event.inputs.api_hosts }}
+          PW: ${{ github.event.inputs.password }}
+        run: |
+          BODY=$(jq -nc --arg u 'admin@titan' --arg p "$PW" '{username:$u,password:$p}')
+          for h in $API_HOSTS; do
+            echo "================================================================="
+            echo "API: https://$h"
+            echo "  GET /health/ready:"
+            curl -sS -m 20 -o /tmp/r.txt -w '    HTTP %{http_code}\n' "https://$h/health/ready" 2>/tmp/e || echo "    unreachable: $(cat /tmp/e)"
+            head -c 300 /tmp/r.txt 2>/dev/null | sed 's/^/    /'; echo
+            echo "  POST /v1/auth/login (admin@titan):"
+            code=$(curl -sS -m 20 -o /tmp/l.txt -w '%{http_code}' -X POST "https://$h/v1/auth/login" -H 'content-type: application/json' --data "$BODY" 2>/tmp/e2 || echo 000)
+            echo "    HTTP $code $( [ "$code" = 000 ] && echo "unreachable: $(cat /tmp/e2)")"
+            head -c 400 /tmp/l.txt 2>/dev/null | sed 's/^/    /'; echo
+          done
