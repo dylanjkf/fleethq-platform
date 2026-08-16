@@ -34,6 +34,10 @@ on:
         description: 'Type "SEED TITAN DEMO" to confirm seeding the LIVE database'
         required: true
         default: ''
+      password:
+        description: 'Admin password for admin@titan (>= 12 chars). Leave blank to use the TITAN_ADMIN_PASSWORD secret, or a generated one printed in the log.'
+        required: false
+        default: ''
 
 concurrency:
   group: seed-titan-demo
@@ -118,10 +122,12 @@ jobs:
         working-directory: api
         # Connects directly to the public Postgres proxy (reachable from the
         # runner). TITAN_DEMO_CONFIRM is the script's own opt-in gate;
-        # TITAN_ADMIN_PASSWORD is the demo admin's password (the script generates
-        # and prints one if the secret is unset).
+        # TITAN_ADMIN_PASSWORD is the demo admin's password. Precedence: the
+        # workflow_dispatch `password` input (so an operator can set a known
+        # password at run time), then the TITAN_ADMIN_PASSWORD secret, then a
+        # generated value the script prints once.
         env:
           DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
           TITAN_DEMO_CONFIRM: SEED_TITAN_DEMO
-          TITAN_ADMIN_PASSWORD: ${{ secrets.TITAN_ADMIN_PASSWORD }}
+          TITAN_ADMIN_PASSWORD: ${{ github.event.inputs.password || secrets.TITAN_ADMIN_PASSWORD }}
         run: npm run seed:titan:demo
