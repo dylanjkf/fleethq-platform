@@ -329,7 +329,7 @@ describe('Billing / subscriptions', () => {
     expect(types).toContain('billing.payment_recovered');
   });
 
-  // Item 7: the 5-business-day grace window lifecycle — opened on the first
+  // Item 7: the 7-calendar-day grace window lifecycle — opened on the first
   // failure, held (not extended) across a retry, cleared on recovery.
   it('opens a 7-calendar-day grace window on first failure, surfaces it on /billing/status, holds it across a retry, and clears it on recovery', async () => {
     const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW, PERMISSIONS.BILLING_MANAGE]);

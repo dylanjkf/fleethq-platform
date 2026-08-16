@@ -33,7 +33,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Signup Test Co ${suffix}`,
         adminUsername: `signup-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Signup Admin',
         acceptedTerms: true,
       })
@@ -75,7 +75,7 @@ describe('Company signup', () => {
     const base = {
       companyName: `No Terms Co ${suffix}`,
       adminUsername: `no-terms-admin-${suffix}`,
-      adminPassword: 'a-strong-password',
+      adminPassword: 'A-Strong-Password1',
       adminFullName: 'No Terms Admin',
     };
 
@@ -93,7 +93,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Bad ABN Co ${suffix}`,
         adminUsername: `bad-abn-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Bad ABN Admin',
         acceptedTerms: true,
         abn: '53004085617', // one digit off a real, checksum-valid ABN
@@ -105,7 +105,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Good ABN Co ${suffix}`,
         adminUsername: `good-abn-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Good ABN Admin',
         acceptedTerms: true,
         abn: '53 004 085 616',
@@ -134,7 +134,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Update Depth Co ${suffix}`,
         adminUsername: `update-depth-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Update Depth Admin',
         acceptedTerms: true,
       })
@@ -159,7 +159,7 @@ describe('Company signup', () => {
       .send({
         companyName: `No Trial Co ${suffix}`,
         adminUsername: `no-trial-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'No Trial Admin',
         acceptedTerms: true,
       })
@@ -180,7 +180,7 @@ describe('Company signup', () => {
     const body = {
       companyName: `Dup Test Co ${suffix}`,
       adminUsername: `dup-admin-${suffix}`,
-      adminPassword: 'a-strong-password',
+      adminPassword: 'A-Strong-Password1',
       adminFullName: 'Dup Admin',
       acceptedTerms: true,
     };
@@ -200,7 +200,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Rename Test Co ${suffix}`,
         adminUsername: `rename-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Rename Admin',
         acceptedTerms: true,
       })
@@ -238,7 +238,7 @@ describe('Company signup', () => {
       .send({
         companyName: `Support Test Co ${suffix}`,
         adminUsername: `support-admin-${suffix}`,
-        adminPassword: 'a-strong-password',
+        adminPassword: 'A-Strong-Password1',
         adminFullName: 'Support Admin',
         acceptedTerms: true,
       })

@@ -55,7 +55,7 @@ describe('User management', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         username: `dispatcher-${roleAId}`,
-        password: 'a-strong-password',
+        password: 'A-Strong-Password1',
         fullName: 'Dana Dispatcher',
         roleId: roleAId,
       })
@@ -94,7 +94,7 @@ describe('User management', () => {
     const roleId = await createRole(token, 'Role A', []);
     const body = {
       username: `dup-user-${roleId}`,
-      password: 'a-strong-password',
+      password: 'A-Strong-Password1',
       fullName: 'Dup',
       roleId,
     };
@@ -124,7 +124,7 @@ describe('User management', () => {
     const userB = await request(app.getHttpServer())
       .post('/v1/users')
       .set('Authorization', `Bearer ${tokenB}`)
-      .send({ username: `userb-${roleBId}`, password: 'a-strong-password', fullName: 'User B', roleId: roleBId })
+      .send({ username: `userb-${roleBId}`, password: 'A-Strong-Password1', fullName: 'User B', roleId: roleBId })
       .expect(201);
 
     await request(app.getHttpServer())
@@ -155,7 +155,7 @@ describe('User management', () => {
         .send({
           username: contractorUsername,
           email: contractorEmail,
-          password: 'a-strong-password',
+          password: 'A-Strong-Password1',
           fullName: 'Contractor Chris',
           roleId: roleAId,
         })
@@ -174,7 +174,7 @@ describe('User management', () => {
       // The same login now has access to both companies with different roles.
       const login = await request(app.getHttpServer())
         .post('/v1/auth/login')
-        .send({ username: contractorUsername, password: 'a-strong-password' })
+        .send({ username: contractorUsername, password: 'A-Strong-Password1' })
         .expect(200);
       expect(login.body.status).toBe('choose_company');
       expect(login.body.companies).toHaveLength(2);
@@ -199,7 +199,7 @@ describe('User management', () => {
       await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenA}`)
-        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Enum Guard', roleId: roleAId })
+        .send({ username, email: `${username}@example.com`, password: 'A-Strong-Password1', fullName: 'Enum Guard', roleId: roleAId })
         .expect(201);
 
       const roleBId = await createRole(tokenB, 'Enum Guard Role B', []);
@@ -220,7 +220,7 @@ describe('User management', () => {
       await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Already Member', roleId: roleBId })
+        .send({ username, email: `${username}@example.com`, password: 'A-Strong-Password1', fullName: 'Already Member', roleId: roleBId })
         .expect(201);
 
       const res = await request(app.getHttpServer())
@@ -240,7 +240,7 @@ describe('User management', () => {
       const created = await request(app.getHttpServer())
         .post('/v1/users')
         .set('Authorization', `Bearer ${tokenB}`)
-        .send({ username, email: `${username}@example.com`, password: 'a-strong-password', fullName: 'Reactivate Me', roleId: roleB1Id })
+        .send({ username, email: `${username}@example.com`, password: 'A-Strong-Password1', fullName: 'Reactivate Me', roleId: roleB1Id })
         .expect(201);
 
       await request(app.getHttpServer())
