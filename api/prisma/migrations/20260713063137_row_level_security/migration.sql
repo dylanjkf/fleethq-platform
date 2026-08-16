@@ -30,7 +30,15 @@ BEGIN
 END
 $$;
 
-GRANT CONNECT ON DATABASE fleetos TO fleetos_app;
+-- Grant CONNECT on whichever database this migration runs against. Hardcoding
+-- the name ("fleetos") failed on hosts where the database has a different name
+-- (e.g. Railway names it "railway"), which aborted this migration and blocked
+-- every migration after it. current_database() makes it portable.
+DO $$
+BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO fleetos_app', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO fleetos_app;
 
 -- Global reference catalogs: read-only for the app, no RLS (not tenant data).
