@@ -336,6 +336,24 @@ model Company {
   stripeSubscriptionItemId String?            @map("stripe_subscription_item_id")
   currentPeriodStart       DateTime?          @map("current_period_start")
   currentPeriodEnd         DateTime?          @map("current_period_end")
+  /// Minimum-term contract (Part 2, 19-Billing). `subscriptionStartedAt` is set
+  /// once, when the subscription first becomes live (trialing or active);
+  /// `contractEndsAt` = that instant + 12 months and is the date before which
+  /// the customer cannot self-cancel. LEGAL: this 12-month no-self-serve-cancel
+  /// term needs legal sign-off before enforcement is switched on in production
+  /// (Australian Consumer Law unfair-contract-term risk) — enforcement is gated
+  /// by env BILLING_CONTRACT_ENFORCED, off by default.
+  subscriptionStartedAt    DateTime?          @map("subscription_started_at")
+  contractEndsAt           DateTime?          @map("contract_ends_at")
+  /// `cancel_for_cause` escape hatch (staff-only, audited, NOT customer-facing):
+  /// when a staff member releases a company from the lock-in early (e.g. the
+  /// company is shutting down, a dispute, or a regulator order), this records
+  /// WHEN and WHY. A non-null value lifts the minimum-term block for that
+  /// company even before contractEndsAt. Deliberately built even though no UI
+  /// exposes it yet — a lock-in with zero technical ability to ever release a
+  /// customer is a worse position than one with an unexposed escape hatch.
+  contractReleasedAt       DateTime?          @map("contract_released_at")
+  contractReleaseReason    String?            @map("contract_release_reason")
   createdAt                DateTime           @default(now()) @map("created_at")
   updatedAt                DateTime           @updatedAt @map("updated_at")
   archivedAt               DateTime?          @map("archived_at")

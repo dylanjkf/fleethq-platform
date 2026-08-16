@@ -16,6 +16,7 @@ import { ManualInvoiceDto } from './dto/manual-invoice.dto';
 import { CreditNoteDto } from './dto/credit-note.dto';
 import { RetryPaymentDto } from './dto/retry-payment.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
+import { ReleaseContractDto } from './dto/release-contract.dto';
 import { Throttle } from '@nestjs/throttler';
 import { ADMIN_SENSITIVE_ACTION_THROTTLE } from '../common/throttles';
 
@@ -151,6 +152,26 @@ export class AdminBillingController {
     @Req() req: Request,
   ) {
     return this.billing.cancelSubscription(companyId, dto, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
+  }
+
+  /**
+   * `cancel_for_cause` (Part 2): staff release of a company from the 12-month
+   * minimum term. Audited, throttled, gated on BILLING_MANAGE. Not exposed in
+   * the customer UI.
+   */
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
+  @Post('release-contract')
+  @HttpCode(HttpStatus.OK)
+  releaseFromContract(
+    @Param('companyId', ParseUUIDPipe) companyId: string,
+    @Body() dto: ReleaseContractDto,
+    @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
+    @Ip() ip: string,
+    @Req() req: Request,
+  ) {
+    return this.billing.releaseFromContract(companyId, dto, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
   }
 
   @AdminGuarded()

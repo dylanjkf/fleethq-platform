@@ -27,6 +27,39 @@ const TRIAL_REMINDER_DAYS = 3;
 const GRACE_PERIOD_DAYS = 7;
 
 /**
+ * Minimum-term length, in months (Part 2). The contract runs for this many
+ * months from when the subscription first goes live. LEGAL: the no-self-serve-
+ * cancel term this backs needs legal sign-off before enforcement is switched on
+ * (env BILLING_CONTRACT_ENFORCED, off by default).
+ */
+const CONTRACT_TERM_MONTHS = 12;
+
+/** A date `months` calendar months after `from` (clamps day-of-month naturally). */
+function addMonths(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+/**
+ * Whether a company is still inside its 12-month minimum term (Part 2) — i.e. it
+ * has a contract end in the future AND has not been released early via the
+ * staff-only `cancel_for_cause` escape hatch (contractReleasedAt). Pure function
+ * so the boundary logic is directly unit-testable against fixed clocks.
+ * Enforcement of the resulting block is additionally gated by
+ * BILLING_CONTRACT_ENFORCED (see cancelSubscription), so this can report
+ * "locked" without any customer being blocked until the term is legally signed
+ * off and the flag is turned on.
+ */
+export function isWithinMinimumTerm(
+  company: { contractEndsAt: Date | null; contractReleasedAt: Date | null },
+  now: Date = new Date(),
+): boolean {
+  if (company.contractReleasedAt) return false;
+  return company.contractEndsAt != null && now < company.contractEndsAt;
+}
+
+/**
  * Subscription statuses that represent a company with a LIVE Stripe subscription
  * (one that is billing or in dunning) — as opposed to NONE/CANCELED which have
  * no active subscription to protect. Used to block an existing subscriber from
@@ -631,7 +664,12 @@ export class BillingService {
           customer_update: { enabled: true, allowed_updates: ['email', 'address', 'phone', 'tax_id'] },
           invoice_history: { enabled: true },
           payment_method_update: { enabled: true },
-          subscription_cancel: { enabled: true, mode: 'at_period_end' },
+          // Self-serve cancellation is DISABLED in the Stripe portal (Part 2): a
+          // 12-month minimum-term lock-in that a customer could bypass by
+          // cancelling directly in Stripe's portal would not be a lock-in.
+          // Cancellation must go through the app's own gated endpoint
+          // (cancelSubscription), which enforces the term.
+          subscription_cancel: { enabled: false },
           subscription_update:
             products.length > 0
               ? { enabled: true, default_allowed_updates: ['price'], products, proration_behavior: 'create_prorations' }
@@ -650,7 +688,12 @@ export class BillingService {
 
   /** A stable fingerprint of the sold price ids, order-independent, so a portal configuration can be matched/reused for a given allowlist. */
   private portalAllowlistFingerprint(priceIds: string[]): string {
-    return [...priceIds].sort().join(',') || 'none';
+    // The `v2-nocancel` marker is part of the fingerprint so that flipping the
+    // portal's cancellation feature (Part 2 — self-serve cancel is now DISABLED
+    // in the portal; cancellation must go through the app's gated endpoint)
+    // yields a NEW configuration instead of silently reusing an older cached one
+    // that still allowed cancelling.
+    return 'v2-nocancel:' + ([...priceIds].sort().join(',') || 'none');
   }
 
   /**
@@ -1211,11 +1254,24 @@ export class BillingService {
       // a retried, older `customer.subscription.updated` must not clobber a
       // newer state that already landed. Skip anything not strictly newer than
       // the last applied event, and always advance the watermark.
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { lastStripeEventAt: true } });
+      const company = await tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: { lastStripeEventAt: true, subscriptionStartedAt: true },
+      });
       if (company.lastStripeEventAt && eventCreatedAt <= company.lastStripeEventAt) {
         this.logger.log(`Skipping out-of-order subscription event for company ${companyId} (event ${eventCreatedAt.toISOString()} <= last ${company.lastStripeEventAt.toISOString()})`);
         return;
       }
+      // Minimum-term contract (Part 2): the first time a subscription goes live
+      // (trialing/active), stamp the start and the 12-month contract end. Set
+      // once and never moved — a later status change (past_due, etc.) must not
+      // reset the term. The trial counts toward the term (it starts at signup).
+      const newStatus = mapStripeStatus(subscription.status);
+      const startsContract =
+        company.subscriptionStartedAt == null && HAS_LIVE_SUBSCRIPTION.has(newStatus);
+      const contractFields = startsContract
+        ? { subscriptionStartedAt: eventCreatedAt, contractEndsAt: addMonths(eventCreatedAt, CONTRACT_TERM_MONTHS) }
+        : {};
       // Per-asset billing: the purchased quantity (subscription item quantity)
       // is the company's hard asset cap. Capture it whenever the subscription is
       // on the per-asset price; clear it (→ null) when it isn't, so switching off
@@ -1262,11 +1318,68 @@ export class BillingService {
         data: {
           stripeCustomerId,
           stripeSubscriptionId: subscription.id,
-          subscriptionStatus: mapStripeStatus(subscription.status),
+          subscriptionStatus: newStatus,
           planPriceId: priceId,
           assetQuantity,
           lastStripeEventAt: eventCreatedAt,
+          ...contractFields,
         },
+      });
+    });
+  }
+
+  /** Whether minimum-term enforcement is switched on for this deployment (default off — needs legal sign-off). */
+  private contractEnforced(): boolean {
+    return this.config.get<string>('BILLING_CONTRACT_ENFORCED') === 'true';
+  }
+
+  /**
+   * Customer-initiated cancellation, routed through the app so the 12-month
+   * minimum term can gate it (Part 2). Blocked with CONTRACT_LOCKED while the
+   * company is within its term AND enforcement is enabled; otherwise cancels the
+   * Stripe subscription at period end. This is the ONLY self-serve cancel path —
+   * the Stripe billing portal has cancellation disabled (see createPortalSession)
+   * so a customer cannot bypass this by cancelling directly in Stripe.
+   */
+  async cancelSubscription(companyId: string): Promise<{ status: 'cancelling_at_period_end' } | never> {
+    // Load + guard BEFORE touching Stripe, so the CONTRACT_LOCKED rejection
+    // doesn't depend on Stripe being reachable/configured.
+    const company = await this.prisma.withTenant(companyId, (tx) =>
+      tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: { stripeSubscriptionId: true, subscriptionStatus: true, contractEndsAt: true, contractReleasedAt: true },
+      }),
+    );
+    if (!company.stripeSubscriptionId || !HAS_LIVE_SUBSCRIPTION.has(company.subscriptionStatus)) {
+      throw new BadRequestException({ code: 'NO_ACTIVE_SUBSCRIPTION', message: 'There is no active subscription to cancel.' });
+    }
+    if (this.contractEnforced() && isWithinMinimumTerm(company)) {
+      throw new BadRequestException({
+        code: 'CONTRACT_LOCKED',
+        message: `This subscription is within its 12-month minimum term (until ${company.contractEndsAt?.toLocaleDateString('en-AU')}) and cannot be cancelled online. Contact FleetHQ support.`,
+      });
+    }
+    const stripe = this.getStripe();
+    await stripe.subscriptions.update(company.stripeSubscriptionId, { cancel_at_period_end: true });
+    await this.prisma.withTenant(companyId, (tx) =>
+      tx.billingAuditLog.create({ data: { companyId, eventType: 'SUBSCRIPTION_CANCELED', actorUserId: null, detail: { via: 'customer_self_serve', atPeriodEnd: true } } }),
+    );
+    return { status: 'cancelling_at_period_end' };
+  }
+
+  /**
+   * `cancel_for_cause` (Part 2) — staff-only override that releases a company
+   * from the minimum-term lock-in early (company shutting down, dispute,
+   * regulator order). Records when + why on the company, and leaves an audited
+   * trail. Does NOT itself cancel Stripe (staff use the admin cancel path for
+   * that); it removes the contractual block so cancellation is permitted. NOT
+   * exposed to customers.
+   */
+  async releaseFromContract(companyId: string, reason: string, actorUserId: string | null): Promise<void> {
+    await this.prisma.withTenant(companyId, async (tx) => {
+      await tx.company.update({ where: { id: companyId }, data: { contractReleasedAt: new Date(), contractReleaseReason: reason } });
+      await tx.billingAuditLog.create({
+        data: { companyId, eventType: 'MANUAL_OVERRIDE', actorUserId, detail: { action: 'cancel_for_cause', reason } },
       });
     });
   }

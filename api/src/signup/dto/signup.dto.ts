@@ -4,8 +4,9 @@ import { IsStrongPassword } from '../../common/validators/is-strong-password.val
 /**
  * Public self-serve signup body (POST /v1/signup). Everything financial
  * (quantity, price) is re-validated/-computed server-side — the client is never
- * trusted for the charge amount. No free trial: this only starts a Stripe
- * Checkout; the account is provisioned by the webhook once payment succeeds.
+ * trusted for the charge amount. Starts a Stripe Checkout that opens a 7-day
+ * free trial (TRIAL_PERIOD_DAYS); the account is provisioned by the webhook once
+ * the checkout completes, and billing begins after the trial.
  */
 export class SignupDto {
   @IsString()
