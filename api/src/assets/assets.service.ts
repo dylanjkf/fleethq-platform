@@ -224,7 +224,7 @@ export class AssetsService {
         throw new NotFoundException({ code: 'ASSET_NOT_FOUND', message: 'Asset not found.' });
       }
 
-      const [maintenance, compliance, checklists, openMaintenanceCount] = await Promise.all([
+      const [maintenance, compliance, checklists, openMaintenanceCount, runningCost] = await Promise.all([
         tx.maintenanceJob.findMany({
           where: { assetId: id },
           orderBy: { createdAt: 'desc' },
@@ -244,6 +244,7 @@ export class AssetsService {
           select: { id: true, hasFailures: true, createdAt: true, template: { select: { name: true } } },
         }),
         tx.maintenanceJob.count({ where: { assetId: id, status: { not: 'COMPLETE' } } }),
+        this.computeRunningCost(tx, id, asset.createdAt),
       ]);
 
       return {
@@ -251,6 +252,7 @@ export class AssetsService {
         maintenance,
         compliance,
         checklists,
+        runningCost,
         summary: {
           openMaintenanceCount,
           complianceCount: compliance.length,
@@ -258,6 +260,51 @@ export class AssetsService {
         },
       };
     });
+  }
+
+  /**
+   * What an asset has actually cost to run over the trailing 12 months: fuel
+   * spend plus completed-maintenance spend (parts + labour, mirroring the
+   * reports module). We report the *real* spend inside the window rather than
+   * extrapolating from partial data, so a recently-added asset shows only the
+   * months it has truly existed (`monthsCovered` / `coversFullYear`) instead of
+   * a projected annual figure that would overstate its cost.
+   */
+  private async computeRunningCost(tx: Prisma.TransactionClient, assetId: string, createdAt: Date) {
+    const windowEnd = new Date();
+    const windowStart = new Date(windowEnd);
+    windowStart.setFullYear(windowStart.getFullYear() - 1);
+
+    const [fuelAgg, maintenanceAgg] = await Promise.all([
+      // `totalCost` is a Prisma Decimal, coerced to a number below.
+      tx.fuelEntry.aggregate({
+        where: { assetId, filledAt: { gte: windowStart, lte: windowEnd } },
+        _sum: { totalCost: true },
+        _count: true,
+      }),
+      tx.maintenanceJob.aggregate({
+        where: { assetId, status: 'COMPLETE', completedAt: { gte: windowStart, lte: windowEnd } },
+        _sum: { partsCost: true, laborCost: true },
+        _count: true,
+      }),
+    ]);
+
+    const round2 = (value: number) => Math.round(value * 100) / 100;
+    const fuelCost = round2(fuelAgg._sum.totalCost ? Number(fuelAgg._sum.totalCost) : 0);
+    const maintenanceCost = round2((maintenanceAgg._sum.partsCost ?? 0) + (maintenanceAgg._sum.laborCost ?? 0));
+    const ageMonths = (windowEnd.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * (365.25 / 12));
+
+    return {
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      monthsCovered: Math.min(12, Math.max(1, Math.round(ageMonths))),
+      coversFullYear: ageMonths >= 12,
+      fuelCost,
+      maintenanceCost,
+      totalCost: round2(fuelCost + maintenanceCost),
+      fuelEntryCount: fuelAgg._count,
+      maintenanceJobCount: maintenanceAgg._count,
+    };
   }
 
   /**
