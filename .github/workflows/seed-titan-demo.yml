@@ -75,6 +75,19 @@ jobs:
           npm ci
           npx prisma generate
 
+      - name: Apply pending database migrations
+        working-directory: api
+        # The database must match the schema the seed (and the deployed API)
+        # expect. Production's migrations are NOT applied on deploy — the Docker
+        # entrypoint only migrates when RUN_MIGRATIONS_ON_BOOT is set, and the
+        # deploy workflow just runs `railway up` — so the DB was behind (e.g.
+        # missing companies.abn), which made the seed fail with P2022. This
+        # applies any pending migrations first. `prisma migrate deploy` is
+        # forward-only and safe to re-run: on an already-current DB it's a no-op.
+        env:
+          DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
+        run: npx prisma migrate deploy
+
       - name: Seed Titan demo into the live database
         working-directory: api
         # Connects directly to the public Postgres proxy (reachable from the
