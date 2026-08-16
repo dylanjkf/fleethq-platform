@@ -20,6 +20,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "seed": "ts-node prisma/seed.ts",
     "seed:enterprise": "ts-node scripts/seed-enterprise-company.ts",
+    "seed:titan:demo": "ts-node scripts/seed-titan-demo.ts",
     "seed:demo": "ts-node scripts/seed-demo-company.ts",
     "permissions:sync": "ts-node prisma/reconcile-permissions.ts",
     "admin:permissions:sync": "ts-node prisma/reconcile-admin-permissions.ts",

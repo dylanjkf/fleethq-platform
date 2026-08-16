@@ -1,0 +1,88 @@
+name: Seed Titan demo
+
+# Manually-triggered, one-click seed of the production-safe Titan demo tenant
+# (scripts/seed-titan-demo.ts) into the LIVE database, so you can click around a
+# realistic fleet in the real product. This is safe by construction — it creates
+# ONE admin login (strong password, never a default) and login-less driver
+# operators, all in a single tenant isolated by row-level security. See the
+# script header for the full safety rationale.
+#
+# There is no push/schedule trigger: it only ever runs when a human clicks
+# "Run workflow" and types the confirmation phrase, so it can't fire by accident.
+#
+# One-time setup (repo Settings):
+#   - Secret   RAILWAY_TOKEN         — already set for deploy-api (reused here).
+#   - Variable RAILWAY_SERVICE       — already set for deploy-api (reused here).
+#   - Secret   TITAN_ADMIN_PASSWORD  — optional. The demo admin's password. If
+#                                      unset, the script generates a strong one
+#                                      and prints it in the run log (visible to
+#                                      anyone with Actions read access) — set the
+#                                      secret if you'd rather it stay out of logs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "SEED TITAN DEMO" to confirm seeding the LIVE database'
+        required: true
+        default: ''
+
+concurrency:
+  group: seed-titan-demo
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm intent
+        # Refuse unless the operator typed the exact phrase. A mistyped/empty box
+        # stops here before anything touches the database.
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "SEED TITAN DEMO" ]; then
+            echo "::error::Confirmation phrase not matched — nothing was seeded. Re-run and type exactly: SEED TITAN DEMO"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Preflight — required config present
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+        run: |
+          missing=""
+          [ -n "$RAILWAY_TOKEN" ]   || missing="$missing RAILWAY_TOKEN(secret)"
+          [ -n "$RAILWAY_SERVICE" ] || missing="$missing RAILWAY_SERVICE(variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required config:$missing — set them in repo Settings (see workflow header)."
+            exit 1
+          fi
+
+      - name: Install deps + generate Prisma client
+        working-directory: api
+        run: |
+          npm ci
+          npx prisma generate
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Seed Titan demo into the live database
+        working-directory: api
+        # `railway run` injects the service's environment (incl. DATABASE_URL) into
+        # the seed process, so it writes to production Postgres. TITAN_DEMO_CONFIRM
+        # is the script's own opt-in gate; TITAN_ADMIN_PASSWORD is the demo admin's
+        # password (the script generates + prints one if the secret is unset).
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          TITAN_DEMO_CONFIRM: SEED_TITAN_DEMO
+          TITAN_ADMIN_PASSWORD: ${{ secrets.TITAN_ADMIN_PASSWORD }}
+        run: railway run --service "$RAILWAY_SERVICE" -- npm run seed:titan:demo
