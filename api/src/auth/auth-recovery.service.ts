@@ -48,6 +48,12 @@ export class AuthRecoveryService {
   async forgotPassword(identifier: string): Promise<void> {
     const user = await this.findUserByIdentifier(identifier);
     if (!user || user.archivedAt || !user.email) return;
+    // Supersede any previously-issued, still-unused reset token before minting a
+    // new one, so only ONE reset link is ever live for a user at a time. This
+    // matters especially for the staff-initiated reset (admin-customer-users
+    // "send password reset"): a support agent re-sending a link must not leave
+    // an earlier link simultaneously valid.
+    await this.authTokens.invalidateAll(user.id, 'PASSWORD_RESET');
     const token = await this.authTokens.issue(user.id, 'PASSWORD_RESET');
     await this.mail.sendPasswordReset(user.email, user.fullName, token);
   }

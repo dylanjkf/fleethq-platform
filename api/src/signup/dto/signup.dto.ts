@@ -1,4 +1,5 @@
 import { Equals, IsBoolean, IsEmail, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsStrongPassword } from '../../common/validators/is-strong-password.validator';
 
 /**
  * Public self-serve signup body (POST /v1/signup). Everything financial
@@ -22,8 +23,14 @@ export class SignupDto {
   @MaxLength(200)
   adminEmail!: string;
 
-  /** Hashed at intake so plaintext never persists in the pending_signups row. */
+  /**
+   * Hashed at intake so plaintext never persists in the pending_signups row.
+   * Enforces the shared password policy (8+ chars, all four character classes)
+   * — previously this intake only checked length, unlike every other
+   * password-set flow. MaxLength 72 is the bcrypt input ceiling.
+   */
   @IsString()
+  @IsStrongPassword()
   @MinLength(8)
   @MaxLength(72)
   adminPassword!: string;

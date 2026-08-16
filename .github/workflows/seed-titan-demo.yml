@@ -80,13 +80,39 @@ jobs:
         # The database must match the schema the seed (and the deployed API)
         # expect. Production's migrations are NOT applied on deploy — the Docker
         # entrypoint only migrates when RUN_MIGRATIONS_ON_BOOT is set, and the
-        # deploy workflow just runs `railway up` — so the DB was behind (e.g.
-        # missing companies.abn), which made the seed fail with P2022. This
-        # applies any pending migrations first. `prisma migrate deploy` is
-        # forward-only and safe to re-run: on an already-current DB it's a no-op.
+        # deploy workflow just runs `railway up` — so the DB was behind.
+        #
+        # The 20260713063137_row_level_security migration failed on Railway back
+        # on 2026-07-30 (it hardcoded `GRANT CONNECT ON DATABASE fleetos`, but
+        # Railway's DB is named `railway`), which left it half-applied and made
+        # `migrate deploy` refuse everything since with P3009. That GRANT is now
+        # fixed to use current_database(); this step marks the failed migration
+        # rolled back so `migrate deploy` re-applies the corrected version and
+        # then all the migrations queued behind it.
+        #
+        # `migrate resolve --rolled-back` only touches a migration that is in a
+        # FAILED state — once it has been re-applied successfully, this command
+        # errors (hence `|| true`) and the deploy below is a clean no-op, so the
+        # step stays safe to re-run.
         env:
           DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
-        run: npx prisma migrate deploy
+        run: |
+          npx prisma migrate resolve --rolled-back 20260713063137_row_level_security || true
+          npx prisma migrate deploy
+
+      - name: Seed reference data (asset classes, permissions, system roles)
+        working-directory: api
+        # The database has the tables (migrations) but no reference data — the
+        # built-in asset classes (e.g. LAND) and the permission catalog were
+        # never seeded, so the Titan seed failed with "No AssetClass found".
+        # `prisma/seed.ts` bootstraps exactly that. With NODE_ENV=production it
+        # seeds ONLY reference data + system roles and returns before any demo
+        # company (no default-credential accounts) — it is the same reference-data
+        # bootstrap a production deploy is meant to run. Idempotent (upserts).
+        env:
+          DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
+          NODE_ENV: production
+        run: npm run seed
 
       - name: Seed Titan demo into the live database
         working-directory: api

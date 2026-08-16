@@ -29,7 +29,9 @@
 import './load-env';
 import { randomUUID, randomBytes } from 'crypto';
 import { JobStatus, MaintenanceJobStatus, MessageSenderType, Prisma, PrismaClient, StopOutcome } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 import { provisionCompany } from '../src/companies/provision-company';
+import { resolveBcryptCost } from '../src/common/security/bcrypt-cost';
 
 const prisma = new PrismaClient();
 
@@ -135,7 +137,7 @@ const PRESTART_ITEMS = [
 ];
 const MAINT_TITLES = ['A-service', 'B-service', 'Brake overhaul', 'Tyre replacement', 'Clutch repair', 'Cooling system', 'Suspension work', 'DPF clean'];
 
-async function refreshExisting(companyId: string): Promise<void> {
+async function refreshExisting(companyId: string, adminPassword: string, generated: boolean): Promise<void> {
   // Live-map positions age out after 12h; a re-run re-stamps every operator's
   // position to now so the whole demo fleet lights up again, without touching
   // any historical data.
@@ -148,8 +150,23 @@ async function refreshExisting(companyId: string): Promise<void> {
       data: { lastLat: pos.lat, lastLng: pos.lng, lastLocationAt: new Date(stampNow - randInt(0, 45) * 60 * 1000) },
     });
   }
-  console.log(`"${COMPANY_NAME}" already exists — refreshed ${ops.length} operator positions to now. Nothing else changed.`);
-  console.log(`Log in as ${ADMIN_USERNAME} (password unchanged from when it was first seeded).`);
+
+  // Reset the demo admin's password to the one for THIS run, so a re-run is how
+  // you (re)take control of the login — otherwise the password is frozen at
+  // whatever the very first seed generated, which is confusing.
+  const admin = await prisma.user.findFirst({ where: { username: ADMIN_USERNAME } });
+  if (admin) {
+    await prisma.user.update({ where: { id: admin.id }, data: { passwordHash: await bcrypt.hash(adminPassword, resolveBcryptCost()) } });
+  }
+
+  console.log(`"${COMPANY_NAME}" already exists — refreshed ${ops.length} operator positions and reset the admin password.`);
+  console.log(`\n   Username: ${ADMIN_USERNAME}`);
+  if (generated) {
+    console.log(`   Password: ${adminPassword}`);
+    console.log('   ^ Generated for you — copy it now; it is not stored anywhere and will not be shown again.');
+  } else {
+    console.log('   Password: (the TITAN_ADMIN_PASSWORD you supplied)');
+  }
 }
 
 async function main() {
@@ -158,7 +175,7 @@ async function main() {
 
   const existing = await prisma.company.findFirst({ where: { name: COMPANY_NAME } });
   if (existing) {
-    await refreshExisting(existing.id);
+    await refreshExisting(existing.id, adminPassword, generated);
     return;
   }
 
