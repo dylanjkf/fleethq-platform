@@ -13,11 +13,18 @@ import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { SignupService } from '../signup/signup.service';
 import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isSubscriptionActive, isTrialActive } from './plans';
-import { addBusinessDays, GRACE_PERIOD_BUSINESS_DAYS } from './business-days';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** How close to `trialEndsAt` the native (no-card) trial reminder fires. */
 const TRIAL_REMINDER_DAYS = 3;
+
+/**
+ * Non-payment grace window length, in CALENDAR days. When a payment fails the
+ * account stays fully active until `now + GRACE_PERIOD_DAYS`; only after that
+ * instant does the billing read-only restriction apply. Calendar days (not
+ * business days) — a single, simple countdown the in-app banner mirrors exactly.
+ */
+const GRACE_PERIOD_DAYS = 7;
 
 /**
  * Subscription statuses that represent a company with a LIVE Stripe subscription
@@ -191,11 +198,18 @@ export class BillingService {
           paymentFailureCount: true,
           lastPaymentFailedAt: true,
           nextPaymentAttemptAt: true,
+          gracePeriodEndsAt: true,
         },
       }),
     );
     const perAssetPriceId = this.perAssetPriceId();
     const onPerAsset = !!perAssetPriceId && company.planPriceId === perAssetPriceId;
+    // The non-payment banner counts down to this server-stored deadline (the
+    // single source of truth), so a page refresh can't reset the count. Present
+    // whenever a payment has failed and not yet recovered; null once recovered.
+    const graceEndsAt = company.gracePeriodEndsAt;
+    const graceDaysRemaining =
+      graceEndsAt != null ? Math.max(0, Math.ceil((graceEndsAt.getTime() - Date.now()) / DAY_MS)) : null;
     return {
       subscriptionStatus: company.subscriptionStatus,
       planPriceId: company.planPriceId,
@@ -206,6 +220,11 @@ export class BillingService {
       paymentFailureCount: company.paymentFailureCount,
       lastPaymentFailedAt: company.lastPaymentFailedAt ? company.lastPaymentFailedAt.toISOString() : null,
       nextPaymentAttemptAt: company.nextPaymentAttemptAt ? company.nextPaymentAttemptAt.toISOString() : null,
+      // Non-payment grace window (Part 3): the server-side deadline and the whole
+      // days remaining until access goes read-only. Both null when no payment
+      // failure is outstanding.
+      gracePeriodEndsAt: graceEndsAt ? graceEndsAt.toISOString() : null,
+      graceDaysRemaining,
       // Per-asset billing: whether the company is on the per-asset plan and how
       // many asset slots it currently pays for (the hard cap). Null quantity when
       // not on the per-asset plan.
@@ -1014,11 +1033,11 @@ export class BillingService {
 
     const { companyName, holders, graceEndsAt } = await this.prisma.withTenant(companyId, async (tx) => {
       const current = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true, gracePeriodEndsAt: true } });
-      // Start the 5-business-day grace window on the FIRST failure of a dunning
+      // Start the 7-calendar-day grace window on the FIRST failure of a dunning
       // cycle; a later retry failure in the same cycle keeps the original deadline
       // (never silently extend the customer's grace on every Stripe retry). The
       // window is cleared on recovery (invoice.paid), so a fresh failure re-starts it.
-      const graceEndsAt = current.gracePeriodEndsAt ?? addBusinessDays(now, GRACE_PERIOD_BUSINESS_DAYS);
+      const graceEndsAt = current.gracePeriodEndsAt ?? new Date(now.getTime() + GRACE_PERIOD_DAYS * DAY_MS);
       await tx.company.update({
         where: { id: companyId },
         data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: now, nextPaymentAttemptAt: nextAttempt, gracePeriodEndsAt: graceEndsAt },
@@ -1026,7 +1045,7 @@ export class BillingService {
       await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
         type: 'billing.payment_failed',
         title: 'A subscription payment failed',
-        body: `Stripe was unable to charge your payment method${nextAttempt ? ` and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}` : ''}. Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} (a 5 business-day grace period) — update your payment method before then to avoid any restriction to your account.`,
+        body: `Stripe was unable to charge your payment method${nextAttempt ? ` and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}` : ''}. Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} (a 7-day grace period) — update your payment method before then to avoid any restriction to your account.`,
         linkPath: '/billing',
       });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
@@ -1055,7 +1074,7 @@ export class BillingService {
       const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true, name: true } });
       const wasRecovering = company.paymentFailureCount > 0;
       // Recovery clears the whole dunning state, including the grace window — a
-      // future failure starts a fresh 5-business-day window rather than reusing a
+      // future failure starts a fresh 7-day window rather than reusing a
       // stale deadline.
       await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null, gracePeriodEndsAt: null } });
       if (!wasRecovering) return null;
