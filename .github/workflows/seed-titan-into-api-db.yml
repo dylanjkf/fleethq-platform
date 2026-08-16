@@ -1,0 +1,145 @@
+name: Seed Titan into API database
+
+# The deployed API authenticates against the `fleetos` database
+# (postgres.railway.internal/fleetos). Earlier seed runs wrote to a DIFFERENT
+# database (`railway`) on the public proxy, so the admin login existed in the
+# wrong place and the live login returned 401. This workflow:
+#   1. Resolves the PUBLIC connection URL to the API's OWN database, straight
+#      from Railway (API service DATABASE_URL creds + db name, spliced onto the
+#      Postgres service's public proxy host) — never the hand-set SEED secret.
+#   2. Confirms the target read-only, then applies migrations + reference data
+#      + the Titan demo tenant to it (all idempotent / additive).
+#   3. Re-probes the LIVE login endpoint and FAILS unless it succeeds — so a
+#      green run IS proof the login works, not a claim.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "SEED TITAN DEMO" to confirm seeding the LIVE database'
+        required: true
+        default: ''
+      password:
+        description: 'Admin password for admin@titan (>= 12 chars)'
+        required: true
+        default: 'TitanDemo2026!Fleet'
+
+concurrency:
+  group: seed-titan-demo
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SVC: ${{ vars.RAILWAY_SERVICE }}
+      API_BASE: https://fleethq-platform-production.up.railway.app
+    steps:
+      - name: Confirm intent
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "SEED TITAN DEMO" ]; then
+            echo '::error::Confirmation phrase not matched — nothing was seeded.'
+            exit 1
+          fi
+          [ -z "$RAILWAY_TOKEN" ] && { echo '::error::RAILWAY_TOKEN not set'; exit 1; }
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Resolve the PUBLIC URL of the API's own database
+        run: |
+          set -euo pipefail
+          API_DBURL=$(railway variables --service "$SVC" --json | jq -r '.DATABASE_URL')
+          [ -z "$API_DBURL" ] || [ "$API_DBURL" = null ] && { echo '::error::could not read API DATABASE_URL'; exit 1; }
+          APIHOST=$(printf '%s' "$API_DBURL" | sed -E 's#^[a-z]+://[^@]*@([^:/?]+).*#\1#')
+          DBNAME=$(printf '%s' "$API_DBURL" | sed -E 's#.*/([^/?]+)(\?.*)?$#\1#')
+          echo "API DB host = $APIHOST ; db = $DBNAME"
+          # Find the Postgres service whose private domain matches the API's DB host,
+          # and take its public proxy endpoint.
+          PUBHOSTPORT=''
+          for s in Postgres postgres fleetos db database Database; do
+            J=$(railway variables --service "$s" --json 2>/dev/null || true)
+            [ -z "$J" ] && continue
+            PRIV=$(printf '%s' "$J" | jq -r '.RAILWAY_PRIVATE_DOMAIN // empty')
+            if [ "$PRIV" = "$APIHOST" ]; then
+              PUB=$(printf '%s' "$J" | jq -r '.DATABASE_PUBLIC_URL // empty')
+              if [ -n "$PUB" ]; then
+                PUBHOSTPORT=$(printf '%s' "$PUB" | sed -E 's#^[a-z]+://[^@]*@([^/?]+).*#\1#')
+                echo "Matched Postgres service '$s'; public endpoint found."
+              fi
+              break
+            fi
+          done
+          if [ -z "$PUBHOSTPORT" ]; then
+            echo '::error::Could not resolve a PUBLIC proxy host for the API database. The Postgres service that backs the API may not have Public Networking enabled.'
+            exit 1
+          fi
+          # Keep the API creds + db name; swap the internal host:port for the public one.
+          TARGET=$(printf '%s' "$API_DBURL" | sed -E "s#@[^/?]+#@$PUBHOSTPORT#")
+          # Redacted echo only.
+          echo "Resolved target = postgresql://<redacted>@$PUBHOSTPORT/$DBNAME"
+          # Stash for later steps without printing it.
+          echo "::add-mask::$TARGET"
+          echo "TARGET_DB_URL=$TARGET" >> "$GITHUB_ENV"
+
+      - name: Install deps + generate Prisma client
+        working-directory: api
+        run: npm ci && npx prisma generate
+
+      - name: Inspect target database (read-only, before seeding)
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.TARGET_DB_URL }}
+          TITAN_ADMIN_PASSWORD: ${{ github.event.inputs.password }}
+        run: npx ts-node --transpile-only scripts/diagnose-titan-login.ts || true
+
+      - name: Apply migrations to the API database (idempotent)
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.TARGET_DB_URL }}
+        run: |
+          npx prisma migrate resolve --rolled-back 20260713063137_row_level_security || true
+          npx prisma migrate deploy
+
+      - name: Seed reference data (idempotent)
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.TARGET_DB_URL }}
+          NODE_ENV: production
+        run: npm run seed
+
+      - name: Seed the Titan demo tenant into the API database
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ env.TARGET_DB_URL }}
+          TITAN_DEMO_CONFIRM: SEED_TITAN_DEMO
+          TITAN_ADMIN_PASSWORD: ${{ github.event.inputs.password }}
+        run: npm run seed:titan:demo
+
+      - name: Verify the LIVE login now works
+        env:
+          PW: ${{ github.event.inputs.password }}
+        run: |
+          echo "POST $API_BASE/v1/auth/login (admin@titan):"
+          BODY=$(jq -nc --arg u 'admin@titan' --arg p "$PW" '{username:$u,password:$p}')
+          code=$(curl -sS -m 25 -o /tmp/l.txt -w '%{http_code}' -X POST "$API_BASE/v1/auth/login" -H 'content-type: application/json' --data "$BODY" || echo 000)
+          echo "  HTTP $code"
+          head -c 600 /tmp/l.txt | sed 's/^/  /'; echo
+          case "$code" in
+            200|201)
+              if grep -qiE '\"(accessToken|status|preAuthToken)\"' /tmp/l.txt; then
+                echo '✅ LIVE login succeeded against the deployed API.'
+              else
+                echo '::error::Got 2xx but no auth payload — unexpected.'; exit 1
+              fi ;;
+            *)
+              echo '::error::LIVE login did not succeed. See body above.'; exit 1 ;;
+          esac
