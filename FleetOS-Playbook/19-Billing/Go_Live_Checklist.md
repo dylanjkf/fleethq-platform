@@ -21,7 +21,7 @@ is configuring your Stripe account correctly — the app just mirrors it.
         never handles card data.
 - [ ] **🔴 Create the Product + Price** (Dashboard → Product catalog → Add product):
       - Product name: **FleetHQ Asset Subscription**
-      - Price: **A$19.00**, **Recurring**, **Monthly**, **usage type = Licensed**
+      - Price: **A$9.00**, **Recurring**, **Monthly**, **usage type = Licensed**
         (quantity-based — *not* metered/usage-based).
       - Copy the resulting **Price ID** (`price_live_…`) → env `STRIPE_PRICE_PER_ASSET`.
       - I'll also store it (and the Product id) into the `billing_settings` row so
@@ -78,7 +78,7 @@ On the **API** (fleethq-platform) production environment:
 |---|---|---|
 | `STRIPE_SECRET_KEY` | `sk_live_…` | 🔴 never commit/log |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | 🔴 from the webhook endpoint above |
-| `STRIPE_PRICE_PER_ASSET` | `price_live_…` | 🔴 the $19/asset price |
+| `STRIPE_PRICE_PER_ASSET` | `price_live_…` | 🔴 the $9/asset price |
 | `STRIPE_TAX_ENABLED` | `true` | **only after** GST registration (§1) |
 | `BILLING_ENFORCED` | `true` | **flips the hard cap + read-only ON.** Leave unset until you've tested — see §7 |
 | `APP_BASE_URL` | `https://app.fleethq…` | used for Checkout success/cancel + redirect allowlist |
@@ -140,7 +140,9 @@ On the **website** (FleetHQWebsite) production environment:
 ## 9. Legal
 
 - [ ] Confirm the **Terms of Service / cancellation policy** wording shown on the
-      signup page ("$19 AUD per asset per month, billed monthly, cancel anytime").
+      signup page ("$9 AUD per asset per month, billed monthly, after a 7-day
+      free trial, with a 12-month minimum term" — see Part 2; the old "cancel
+      anytime" phrasing no longer applies).
       Point me at the ToS/Privacy URLs if they should link out.
 
 ---

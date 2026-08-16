@@ -26,7 +26,7 @@ export class BillingMailService {
       ? `Stripe will automatically retry the charge on ${nextAttempt.toLocaleDateString('en-AU')}.`
       : `Stripe was unable to schedule an automatic retry.`;
     const graceLine = graceEndsAt
-      ? `Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} — a 5 business-day grace period. Update your payment method before then to avoid any restriction to your account.`
+      ? `Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} — a 7-day grace period. Update your payment method before then to avoid any restriction to your account.`
       : `Update your payment method to avoid an interruption.`;
     await this.channel.sendEmail({
       to,

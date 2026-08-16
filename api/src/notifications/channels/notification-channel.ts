@@ -1,7 +1,17 @@
+export interface EmailAttachment {
+  filename: string;
+  /** Raw file bytes. */
+  content: Buffer;
+  /** MIME type, e.g. 'application/pdf'. */
+  contentType: string;
+}
+
 export interface EmailMessage {
   to: string;
   subject: string;
   body: string;
+  /** Optional file attachments (e.g. the weekly-report PDF). */
+  attachments?: EmailAttachment[];
 }
 
 export interface SmsMessage {

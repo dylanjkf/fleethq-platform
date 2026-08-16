@@ -16,7 +16,7 @@ import { PERMISSION_CATALOG, PermissionKey } from '../../src/common/permissions/
 
 const ownerPrisma = new PrismaClient();
 
-export const TEST_PASSWORD = 'test-password-123';
+export const TEST_PASSWORD = 'Test-Password-123';
 
 /** The shared built-in categories (company_id = null), used by every test tenant. */
 export async function ensureAssetClasses(): Promise<void> {

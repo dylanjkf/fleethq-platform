@@ -74,6 +74,19 @@ export class BillingController {
   }
 
   /**
+   * Customer-initiated cancellation (Part 2). The ONLY self-serve cancel path —
+   * the Stripe portal's own cancellation is disabled — so the 12-month minimum
+   * term can gate it here. Returns CONTRACT_LOCKED (400) while within the term
+   * when enforcement is enabled; otherwise cancels at period end.
+   */
+  @Post('cancel')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission(PERMISSIONS.BILLING_MANAGE)
+  cancelSubscription(@CurrentUser() user: AuthenticatedRequestUser) {
+    return this.billingService.cancelSubscription(user.companyId);
+  }
+
+  /**
    * Called by Stripe directly, never by a FleetOS client — @Public() because
    * there's no user session to authenticate here, but never trusted blindly:
    * BillingService.handleWebhookEvent verifies the Stripe-Signature header

@@ -56,7 +56,7 @@ describe('Operator decommissioning revokes a linked DriverOS login', () => {
     await request(app.getHttpServer())
       .post(`/v1/operators/${operator.body.id}/link-user`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: driverUsername, password: 'driver-password-123', roleId: role.body.id })
+      .send({ username: driverUsername, password: 'Driver-Password-123', roleId: role.body.id })
       .expect(201);
 
     await request(app.getHttpServer())

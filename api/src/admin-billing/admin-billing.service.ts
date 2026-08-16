@@ -10,6 +10,7 @@ import { ManualInvoiceDto } from './dto/manual-invoice.dto';
 import { CreditNoteDto } from './dto/credit-note.dto';
 import { RetryPaymentDto } from './dto/retry-payment.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
+import { ReleaseContractDto } from './dto/release-contract.dto';
 import { ListInvoicesQueryDto } from './dto/list-invoices-query.dto';
 import { ChangeQuantityDto } from './dto/change-quantity.dto';
 import { AuditTrailQueryDto } from './dto/audit-trail-query.dto';
@@ -426,6 +427,34 @@ export class AdminBillingService {
     });
 
     return { subscriptionId: subscription.id, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end };
+  }
+
+  /**
+   * `cancel_for_cause` (Part 2): release a company from the 12-month minimum
+   * term early. Staff-only, audited. Records when + why on the Company row and
+   * lifts the contractual cancellation block (a subsequent cancel — customer- or
+   * staff-initiated — is then permitted). This is the deliberate escape hatch so
+   * a lock-in is never a position with zero technical ability to release a
+   * customer (shutdown, dispute, regulator order). Not customer-facing.
+   */
+  async releaseFromContract(companyId: string, dto: ReleaseContractDto, context: AdminActionContext) {
+    const company = await this.requireCompany(companyId);
+    const releasedAt = new Date();
+    await this.adminPrisma.company.update({
+      where: { id: company.id },
+      data: { contractReleasedAt: releasedAt, contractReleaseReason: dto.reason },
+    });
+    await this.audit.record({
+      adminUserId: context.adminUserId,
+      action: ADMIN_AUDIT_ACTIONS.BILLING_CONTRACT_RELEASED,
+      entityType: 'company',
+      entityId: company.id,
+      organisationId: companyId,
+      ip: context.ip,
+      userAgent: context.userAgent,
+      afterValue: { contractReleasedAt: releasedAt.toISOString(), reason: dto.reason },
+    });
+    return { companyId: company.id, contractReleasedAt: releasedAt.toISOString() };
   }
 
   /**

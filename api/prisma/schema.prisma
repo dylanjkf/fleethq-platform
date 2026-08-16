@@ -49,7 +49,7 @@ model StripeWebhookEvent {
 }
 
 /// Per-asset billing config (19-Billing/Per_Asset_Billing.md), a deliberate
-/// single-row table so the $19 AUD/asset/month price is one source of truth
+/// single-row table so the $9 AUD/asset/month price is one source of truth
 /// read everywhere rather than a literal scattered through the code — and so
 /// making it admin-editable later is a small change, not a rewrite. NOT tenant
 /// data (global platform config): no RLS, seeded with one row (id = 1),
@@ -59,9 +59,9 @@ model BillingSettings {
   /// it that way, so `findUnique({ id: 1 })` always resolves the one config row.
   id                 Int      @id @default(1)
   /// Price per active asset, per billing interval, in the smallest currency
-  /// unit (cents). 1900 = $19.00 AUD. Integer cents throughout — never floats —
+  /// unit (cents). 900 = $9.00 AUD. Integer cents throughout — never floats —
   /// to avoid rounding error on money.
-  pricePerAssetCents Int      @default(1900) @map("price_per_asset_cents")
+  pricePerAssetCents Int      @default(900) @map("price_per_asset_cents")
   currency           String   @default("AUD")
   billingInterval    String   @default("month") @map("billing_interval")
   /// GST rate as a fraction (0.10 = 10%). Australian GST. Stripe Tax computes
@@ -320,7 +320,7 @@ model Company {
   trialEndsAt              DateTime?          @map("trial_ends_at")
   /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
   /// slots this company currently pays for — the Stripe subscription item
-  /// quantity on the per-asset price ($19 AUD/asset/month). This is the SOURCE
+  /// quantity on the per-asset price ($9 AUD/asset/month). This is the SOURCE
   /// OF TRUTH for the hard asset cap: live assets (archived_at IS NULL) may
   /// never exceed it. Kept in sync FROM Stripe by the subscription webhooks
   /// (Stripe remains authoritative); it only ever increases via an explicit
@@ -336,6 +336,31 @@ model Company {
   stripeSubscriptionItemId String?            @map("stripe_subscription_item_id")
   currentPeriodStart       DateTime?          @map("current_period_start")
   currentPeriodEnd         DateTime?          @map("current_period_end")
+  /// Minimum-term contract (Part 2, 19-Billing). `subscriptionStartedAt` is set
+  /// once, when the subscription first becomes live (trialing or active);
+  /// `contractEndsAt` = that instant + 12 months and is the date before which
+  /// the customer cannot self-cancel. LEGAL: this 12-month no-self-serve-cancel
+  /// term needs legal sign-off before enforcement is switched on in production
+  /// (Australian Consumer Law unfair-contract-term risk) — enforcement is gated
+  /// by env BILLING_CONTRACT_ENFORCED, off by default.
+  subscriptionStartedAt    DateTime?          @map("subscription_started_at")
+  contractEndsAt           DateTime?          @map("contract_ends_at")
+  /// `cancel_for_cause` escape hatch (staff-only, audited, NOT customer-facing):
+  /// when a staff member releases a company from the lock-in early (e.g. the
+  /// company is shutting down, a dispute, or a regulator order), this records
+  /// WHEN and WHY. A non-null value lifts the minimum-term block for that
+  /// company even before contractEndsAt. Deliberately built even though no UI
+  /// exposes it yet — a lock-in with zero technical ability to ever release a
+  /// customer is a worse position than one with an unexposed escape hatch.
+  contractReleasedAt       DateTime?          @map("contract_released_at")
+  contractReleaseReason    String?            @map("contract_release_reason")
+  /// Weekly-report email recipient list (Part 4). Editable by company admins
+  /// (companies:edit). When EMPTY, the weekly report falls back to every
+  /// reports:view permission holder with an email (the prior behaviour), so the
+  /// company's main contacts are included by default; once populated, the report
+  /// email goes to exactly this list. Stored as a plain string[] on the company
+  /// (no new tenant table needed — it inherits companies' row-level security).
+  weeklyReportRecipients   String[]           @map("weekly_report_recipients")
   createdAt                DateTime           @default(now()) @map("created_at")
   updatedAt                DateTime           @updatedAt @map("updated_at")
   archivedAt               DateTime?          @map("archived_at")

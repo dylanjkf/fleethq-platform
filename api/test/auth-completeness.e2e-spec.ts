@@ -35,7 +35,7 @@ describe('Auth completeness (verify, reset, lockout)', () => {
     const username = `owner-${Date.now()}-${suffix}`;
     const res = await request(app.getHttpServer())
       .post('/v1/companies')
-      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Ada Owner', adminEmail: email, acceptedTerms: true })
+      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'Test-Password-123', adminFullName: 'Ada Owner', adminEmail: email, acceptedTerms: true })
       .expect(201);
     expect(res.body.status).toBe('authenticated');
     const user = await ownerPrisma.user.findUniqueOrThrow({ where: { username } });
@@ -71,24 +71,24 @@ describe('Auth completeness (verify, reset, lockout)', () => {
     expect(created).not.toBeNull();
 
     const token = await tokens.issue(userId, 'PASSWORD_RESET');
-    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'brandNewPass1' }).expect(200);
+    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'BrandNewPass1!' }).expect(200);
 
-    await login(username, 'brandNewPass1').expect(200);
-    await login(username, 'test-password-123').expect(401); // old password no longer works
+    await login(username, 'BrandNewPass1!').expect(200);
+    await login(username, 'Test-Password-123').expect(401); // old password no longer works
 
     // The reset token is single-use.
-    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'again12345' }).expect(401);
+    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'Again12345!' }).expect(401);
   });
 
   it('rejects an invalid reset token', async () => {
-    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token: 'not-a-real-token', newPassword: 'whatever12' }).expect(401);
+    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token: 'not-a-real-token', newPassword: 'Whatever12!' }).expect(401);
   });
 
   it('revokes existing sessions when the password is reset (tokenVersion)', async () => {
     const username = `revoke-${Date.now()}`;
     const signupRes = await request(app.getHttpServer())
       .post('/v1/companies')
-      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'test-password-123', adminFullName: 'Rev Oke', adminEmail: 'revoke@example.com', acceptedTerms: true })
+      .send({ companyName: `Co ${username}`, adminUsername: username, adminPassword: 'Test-Password-123', adminFullName: 'Rev Oke', adminEmail: 'revoke@example.com', acceptedTerms: true })
       .expect(201);
     const oldToken = signupRes.body.accessToken as string;
     const userId = (await ownerPrisma.user.findUniqueOrThrow({ where: { username } })).id;
@@ -98,13 +98,13 @@ describe('Auth completeness (verify, reset, lockout)', () => {
 
     // Reset the password → tokenVersion bumps → the old session is revoked.
     const token = await tokens.issue(userId, 'PASSWORD_RESET');
-    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'brandNewPass1' }).expect(200);
+    await request(app.getHttpServer()).post('/v1/auth/reset-password').send({ token, newPassword: 'BrandNewPass1!' }).expect(200);
 
     const revoked = await request(app.getHttpServer()).get('/v1/auth/me').set('Authorization', `Bearer ${oldToken}`).expect(401);
     expect(revoked.body.error.code).toBe('TOKEN_REVOKED');
 
     // A fresh login mints a token that carries the new version and works again.
-    const relog = await login(username, 'brandNewPass1').expect(200);
+    const relog = await login(username, 'BrandNewPass1!').expect(200);
     await request(app.getHttpServer()).get('/v1/auth/me').set('Authorization', `Bearer ${relog.body.accessToken as string}`).expect(200);
   });
 
@@ -117,6 +117,6 @@ describe('Auth completeness (verify, reset, lockout)', () => {
     expect(locked.lockedUntil).not.toBeNull();
 
     // Even the correct password is refused while locked.
-    await login(username, 'test-password-123').expect(401);
+    await login(username, 'Test-Password-123').expect(401);
   });
 });

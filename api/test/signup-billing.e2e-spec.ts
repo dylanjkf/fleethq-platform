@@ -198,7 +198,7 @@ describe('Per-asset billing + self-serve signup', () => {
           companyName: 'Spammer Pty',
           adminName: 'Bot',
           adminEmail: `bot-${randomUUID()}@example.com`,
-          adminPassword: 'password123',
+          adminPassword: 'Password-123!',
           quantity: 1,
           acceptedTerms: true,
           website: 'http://spam.example', // honeypot — real users never fill this
@@ -349,7 +349,7 @@ describe('Per-asset billing + self-serve signup', () => {
   });
 
   describe('payment-failure read-only enforcement', () => {
-    // A per-asset company that is past due AND whose 5-business-day grace window
+    // A per-asset company that is past due AND whose 7-day grace window
     // has already elapsed (gracePeriodEndsAt in the past) — the point at which the
     // read-only restriction actually applies (item 7).
     async function readOnlyCompany(gracePeriodEndsAt: Date = new Date(Date.now() - 24 * 60 * 60 * 1000)) {

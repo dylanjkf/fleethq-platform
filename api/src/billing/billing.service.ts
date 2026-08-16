@@ -13,11 +13,63 @@ import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { SignupService } from '../signup/signup.service';
 import { BillingMailService } from './billing-mail.service';
 import { PAID_TIERS, isSubscriptionActive, isTrialActive } from './plans';
-import { addBusinessDays, GRACE_PERIOD_BUSINESS_DAYS } from './business-days';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** How close to `trialEndsAt` the native (no-card) trial reminder fires. */
 const TRIAL_REMINDER_DAYS = 3;
+
+/**
+ * Non-payment grace window length, in CALENDAR days. When a payment fails the
+ * account stays fully active until `now + GRACE_PERIOD_DAYS`; only after that
+ * instant does the billing read-only restriction apply. Calendar days (not
+ * business days) — a single, simple countdown the in-app banner mirrors exactly.
+ */
+const GRACE_PERIOD_DAYS = 7;
+
+/**
+ * Minimum-term length, in months (Part 2). The contract runs for this many
+ * months from when the subscription first goes live. LEGAL: the no-self-serve-
+ * cancel term this backs needs legal sign-off before enforcement is switched on
+ * (env BILLING_CONTRACT_ENFORCED, off by default).
+ */
+const CONTRACT_TERM_MONTHS = 12;
+
+/** A date `months` calendar months after `from` (clamps day-of-month naturally). */
+function addMonths(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+/**
+ * Whether a company is still inside its 12-month minimum term (Part 2) — i.e. it
+ * has a contract end in the future AND has not been released early via the
+ * staff-only `cancel_for_cause` escape hatch (contractReleasedAt). Pure function
+ * so the boundary logic is directly unit-testable against fixed clocks.
+ * Enforcement of the resulting block is additionally gated by
+ * BILLING_CONTRACT_ENFORCED (see cancelSubscription), so this can report
+ * "locked" without any customer being blocked until the term is legally signed
+ * off and the flag is turned on.
+ */
+export function isWithinMinimumTerm(
+  company: { contractEndsAt: Date | null; contractReleasedAt: Date | null },
+  now: Date = new Date(),
+): boolean {
+  if (company.contractReleasedAt) return false;
+  return company.contractEndsAt != null && now < company.contractEndsAt;
+}
+
+/**
+ * Subscription statuses that represent a company with a LIVE Stripe subscription
+ * (one that is billing or in dunning) — as opposed to NONE/CANCELED which have
+ * no active subscription to protect. Used to block an existing subscriber from
+ * re-running Checkout (which would bypass the guarded quantity-change path).
+ */
+const HAS_LIVE_SUBSCRIPTION: ReadonlySet<SubscriptionStatus> = new Set([
+  SubscriptionStatus.TRIALING,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAST_DUE,
+]);
 
 /**
  * FOUNDER_NOTES.md gap #4 / PRODUCT_ROADMAP.md's "Billing & subscription
@@ -179,11 +231,18 @@ export class BillingService {
           paymentFailureCount: true,
           lastPaymentFailedAt: true,
           nextPaymentAttemptAt: true,
+          gracePeriodEndsAt: true,
         },
       }),
     );
     const perAssetPriceId = this.perAssetPriceId();
     const onPerAsset = !!perAssetPriceId && company.planPriceId === perAssetPriceId;
+    // The non-payment banner counts down to this server-stored deadline (the
+    // single source of truth), so a page refresh can't reset the count. Present
+    // whenever a payment has failed and not yet recovered; null once recovered.
+    const graceEndsAt = company.gracePeriodEndsAt;
+    const graceDaysRemaining =
+      graceEndsAt != null ? Math.max(0, Math.ceil((graceEndsAt.getTime() - Date.now()) / DAY_MS)) : null;
     return {
       subscriptionStatus: company.subscriptionStatus,
       planPriceId: company.planPriceId,
@@ -194,6 +253,11 @@ export class BillingService {
       paymentFailureCount: company.paymentFailureCount,
       lastPaymentFailedAt: company.lastPaymentFailedAt ? company.lastPaymentFailedAt.toISOString() : null,
       nextPaymentAttemptAt: company.nextPaymentAttemptAt ? company.nextPaymentAttemptAt.toISOString() : null,
+      // Non-payment grace window (Part 3): the server-side deadline and the whole
+      // days remaining until access goes read-only. Both null when no payment
+      // failure is outstanding.
+      gracePeriodEndsAt: graceEndsAt ? graceEndsAt.toISOString() : null,
+      graceDaysRemaining,
       // Per-asset billing: whether the company is on the per-asset plan and how
       // many asset slots it currently pays for (the hard cap). Null quantity when
       // not on the per-asset plan.
@@ -314,7 +378,7 @@ export class BillingService {
     return ids;
   }
 
-  /** The Stripe Price id for the per-asset plan ($19 AUD/asset/month), if configured. */
+  /** The Stripe Price id for the per-asset plan ($9 AUD/asset/month), if configured. */
   private perAssetPriceId(): string | undefined {
     return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
@@ -328,7 +392,7 @@ export class BillingService {
   async getBillingSettings(): Promise<{ pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number; abn: string | null }> {
     const row = await this.prisma.billingSettings.findUnique({ where: { id: 1 } });
     return {
-      pricePerAssetCents: row?.pricePerAssetCents ?? 1900,
+      pricePerAssetCents: row?.pricePerAssetCents ?? 900,
       currency: row?.currency ?? 'AUD',
       billingInterval: row?.billingInterval ?? 'month',
       gstRate: row?.gstRate ?? 0.1,
@@ -370,9 +434,25 @@ export class BillingService {
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({
         where: { id: companyId },
-        select: { id: true, name: true, abn: true, stripeCustomerId: true },
+        select: { id: true, name: true, abn: true, stripeCustomerId: true, stripeSubscriptionId: true, subscriptionStatus: true },
       }),
     );
+
+    // Revenue-integrity guard (security review #… — the checkout-quantity bypass):
+    // an EXISTING subscriber must NOT be able to re-run Checkout to silently
+    // reset their paid quantity. A completed checkout.session.completed for an
+    // existing company routes to syncSubscription, which writes assetQuantity
+    // straight from the Stripe line item — skipping the QUANTITY_BELOW_USAGE
+    // downgrade guard that lives ONLY in changeAssetQuantity. So a company at 50
+    // live assets could re-checkout at quantity 1 and end up with a cap of 1.
+    // Force all post-subscription quantity changes through the guarded path.
+    if (company.stripeSubscriptionId && HAS_LIVE_SUBSCRIPTION.has(company.subscriptionStatus)) {
+      throw new BadRequestException({
+        code: 'ALREADY_SUBSCRIBED',
+        message:
+          'This company already has an active subscription. Change the number of paid asset slots from the billing page (which validates the change against current usage) rather than starting a new checkout.',
+      });
+    }
 
     const customerId = company.stripeCustomerId ?? (await this.createCustomer(stripe, company.id, company.name, company.abn));
 
@@ -584,7 +664,12 @@ export class BillingService {
           customer_update: { enabled: true, allowed_updates: ['email', 'address', 'phone', 'tax_id'] },
           invoice_history: { enabled: true },
           payment_method_update: { enabled: true },
-          subscription_cancel: { enabled: true, mode: 'at_period_end' },
+          // Self-serve cancellation is DISABLED in the Stripe portal (Part 2): a
+          // 12-month minimum-term lock-in that a customer could bypass by
+          // cancelling directly in Stripe's portal would not be a lock-in.
+          // Cancellation must go through the app's own gated endpoint
+          // (cancelSubscription), which enforces the term.
+          subscription_cancel: { enabled: false },
           subscription_update:
             products.length > 0
               ? { enabled: true, default_allowed_updates: ['price'], products, proration_behavior: 'create_prorations' }
@@ -603,7 +688,12 @@ export class BillingService {
 
   /** A stable fingerprint of the sold price ids, order-independent, so a portal configuration can be matched/reused for a given allowlist. */
   private portalAllowlistFingerprint(priceIds: string[]): string {
-    return [...priceIds].sort().join(',') || 'none';
+    // The `v2-nocancel` marker is part of the fingerprint so that flipping the
+    // portal's cancellation feature (Part 2 — self-serve cancel is now DISABLED
+    // in the portal; cancellation must go through the app's gated endpoint)
+    // yields a NEW configuration instead of silently reusing an older cached one
+    // that still allowed cancelling.
+    return 'v2-nocancel:' + ([...priceIds].sort().join(',') || 'none');
   }
 
   /**
@@ -986,11 +1076,11 @@ export class BillingService {
 
     const { companyName, holders, graceEndsAt } = await this.prisma.withTenant(companyId, async (tx) => {
       const current = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true, gracePeriodEndsAt: true } });
-      // Start the 5-business-day grace window on the FIRST failure of a dunning
+      // Start the 7-calendar-day grace window on the FIRST failure of a dunning
       // cycle; a later retry failure in the same cycle keeps the original deadline
       // (never silently extend the customer's grace on every Stripe retry). The
       // window is cleared on recovery (invoice.paid), so a fresh failure re-starts it.
-      const graceEndsAt = current.gracePeriodEndsAt ?? addBusinessDays(now, GRACE_PERIOD_BUSINESS_DAYS);
+      const graceEndsAt = current.gracePeriodEndsAt ?? new Date(now.getTime() + GRACE_PERIOD_DAYS * DAY_MS);
       await tx.company.update({
         where: { id: companyId },
         data: { paymentFailureCount: { increment: 1 }, lastPaymentFailedAt: now, nextPaymentAttemptAt: nextAttempt, gracePeriodEndsAt: graceEndsAt },
@@ -998,7 +1088,7 @@ export class BillingService {
       await this.notifications.notifyPermissionInTx(tx, companyId, PERMISSIONS.BILLING_MANAGE, {
         type: 'billing.payment_failed',
         title: 'A subscription payment failed',
-        body: `Stripe was unable to charge your payment method${nextAttempt ? ` and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}` : ''}. Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} (a 5 business-day grace period) — update your payment method before then to avoid any restriction to your account.`,
+        body: `Stripe was unable to charge your payment method${nextAttempt ? ` and will automatically retry on ${nextAttempt.toLocaleDateString('en-AU')}` : ''}. Your account stays fully active until ${graceEndsAt.toLocaleDateString('en-AU')} (a 7-day grace period) — update your payment method before then to avoid any restriction to your account.`,
         linkPath: '/billing',
       });
       const holders = await this.notifications.getPermissionHolders(tx, PERMISSIONS.BILLING_MANAGE);
@@ -1027,7 +1117,7 @@ export class BillingService {
       const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { paymentFailureCount: true, name: true } });
       const wasRecovering = company.paymentFailureCount > 0;
       // Recovery clears the whole dunning state, including the grace window — a
-      // future failure starts a fresh 5-business-day window rather than reusing a
+      // future failure starts a fresh 7-day window rather than reusing a
       // stale deadline.
       await tx.company.update({ where: { id: companyId }, data: { paymentFailureCount: 0, nextPaymentAttemptAt: null, gracePeriodEndsAt: null } });
       if (!wasRecovering) return null;
@@ -1164,11 +1254,24 @@ export class BillingService {
       // a retried, older `customer.subscription.updated` must not clobber a
       // newer state that already landed. Skip anything not strictly newer than
       // the last applied event, and always advance the watermark.
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { lastStripeEventAt: true } });
+      const company = await tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: { lastStripeEventAt: true, subscriptionStartedAt: true },
+      });
       if (company.lastStripeEventAt && eventCreatedAt <= company.lastStripeEventAt) {
         this.logger.log(`Skipping out-of-order subscription event for company ${companyId} (event ${eventCreatedAt.toISOString()} <= last ${company.lastStripeEventAt.toISOString()})`);
         return;
       }
+      // Minimum-term contract (Part 2): the first time a subscription goes live
+      // (trialing/active), stamp the start and the 12-month contract end. Set
+      // once and never moved — a later status change (past_due, etc.) must not
+      // reset the term. The trial counts toward the term (it starts at signup).
+      const newStatus = mapStripeStatus(subscription.status);
+      const startsContract =
+        company.subscriptionStartedAt == null && HAS_LIVE_SUBSCRIPTION.has(newStatus);
+      const contractFields = startsContract
+        ? { subscriptionStartedAt: eventCreatedAt, contractEndsAt: addMonths(eventCreatedAt, CONTRACT_TERM_MONTHS) }
+        : {};
       // Per-asset billing: the purchased quantity (subscription item quantity)
       // is the company's hard asset cap. Capture it whenever the subscription is
       // on the per-asset price; clear it (→ null) when it isn't, so switching off
@@ -1178,17 +1281,105 @@ export class BillingService {
       const priceId = item?.price.id ?? null;
       const perAssetPriceId = this.perAssetPriceId();
       const onPerAsset = !!perAssetPriceId && priceId === perAssetPriceId;
-      const assetQuantity = onPerAsset ? (item?.quantity ?? null) : null;
+      const incomingQuantity = onPerAsset ? (item?.quantity ?? null) : null;
+
+      // Fail-safe cap floor (defense in depth for the checkout-quantity bypass).
+      // syncSubscription is the ONLY place assetQuantity is written, so clamping
+      // here protects the cap against EVERY side door — a re-run checkout, the
+      // Stripe billing portal, or a manual edit in the Stripe dashboard — not
+      // just the one we block in createCheckoutSession. The guarded
+      // changeAssetQuantity path already refuses to go below live usage, so on
+      // that path this clamp is a no-op; it only bites when a lower quantity
+      // arrives from somewhere that skipped the guard. We never lower the cap
+      // below the number of live (non-archived) assets, and flag the divergence
+      // for staff via a CAP_BLOCKED billing-audit row.
+      let assetQuantity = incomingQuantity;
+      if (onPerAsset && incomingQuantity != null) {
+        const liveAssets = await tx.asset.count({ where: { archivedAt: null } });
+        if (incomingQuantity < liveAssets) {
+          assetQuantity = liveAssets;
+          this.logger.warn(
+            `Stripe reported quantity ${incomingQuantity} for company ${companyId} but ${liveAssets} assets are live; ` +
+              `holding the cap at ${liveAssets}. A quantity change reached Stripe outside the guarded changeAssetQuantity path.`,
+          );
+          await tx.billingAuditLog.create({
+            data: {
+              companyId,
+              eventType: 'CAP_BLOCKED',
+              actorUserId: null,
+              detail: { stripeQuantity: incomingQuantity, liveAssets, heldCapAt: liveAssets, reason: 'sync_below_usage' },
+            },
+          });
+        }
+      }
+
       await tx.company.update({
         where: { id: companyId },
         data: {
           stripeCustomerId,
           stripeSubscriptionId: subscription.id,
-          subscriptionStatus: mapStripeStatus(subscription.status),
+          subscriptionStatus: newStatus,
           planPriceId: priceId,
           assetQuantity,
           lastStripeEventAt: eventCreatedAt,
+          ...contractFields,
         },
+      });
+    });
+  }
+
+  /** Whether minimum-term enforcement is switched on for this deployment (default off — needs legal sign-off). */
+  private contractEnforced(): boolean {
+    return this.config.get<string>('BILLING_CONTRACT_ENFORCED') === 'true';
+  }
+
+  /**
+   * Customer-initiated cancellation, routed through the app so the 12-month
+   * minimum term can gate it (Part 2). Blocked with CONTRACT_LOCKED while the
+   * company is within its term AND enforcement is enabled; otherwise cancels the
+   * Stripe subscription at period end. This is the ONLY self-serve cancel path —
+   * the Stripe billing portal has cancellation disabled (see createPortalSession)
+   * so a customer cannot bypass this by cancelling directly in Stripe.
+   */
+  async cancelSubscription(companyId: string): Promise<{ status: 'cancelling_at_period_end' } | never> {
+    // Load + guard BEFORE touching Stripe, so the CONTRACT_LOCKED rejection
+    // doesn't depend on Stripe being reachable/configured.
+    const company = await this.prisma.withTenant(companyId, (tx) =>
+      tx.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: { stripeSubscriptionId: true, subscriptionStatus: true, contractEndsAt: true, contractReleasedAt: true },
+      }),
+    );
+    if (!company.stripeSubscriptionId || !HAS_LIVE_SUBSCRIPTION.has(company.subscriptionStatus)) {
+      throw new BadRequestException({ code: 'NO_ACTIVE_SUBSCRIPTION', message: 'There is no active subscription to cancel.' });
+    }
+    if (this.contractEnforced() && isWithinMinimumTerm(company)) {
+      throw new BadRequestException({
+        code: 'CONTRACT_LOCKED',
+        message: `This subscription is within its 12-month minimum term (until ${company.contractEndsAt?.toLocaleDateString('en-AU')}) and cannot be cancelled online. Contact FleetHQ support.`,
+      });
+    }
+    const stripe = this.getStripe();
+    await stripe.subscriptions.update(company.stripeSubscriptionId, { cancel_at_period_end: true });
+    await this.prisma.withTenant(companyId, (tx) =>
+      tx.billingAuditLog.create({ data: { companyId, eventType: 'SUBSCRIPTION_CANCELED', actorUserId: null, detail: { via: 'customer_self_serve', atPeriodEnd: true } } }),
+    );
+    return { status: 'cancelling_at_period_end' };
+  }
+
+  /**
+   * `cancel_for_cause` (Part 2) — staff-only override that releases a company
+   * from the minimum-term lock-in early (company shutting down, dispute,
+   * regulator order). Records when + why on the company, and leaves an audited
+   * trail. Does NOT itself cancel Stripe (staff use the admin cancel path for
+   * that); it removes the contractual block so cancellation is permitted. NOT
+   * exposed to customers.
+   */
+  async releaseFromContract(companyId: string, reason: string, actorUserId: string | null): Promise<void> {
+    await this.prisma.withTenant(companyId, async (tx) => {
+      await tx.company.update({ where: { id: companyId }, data: { contractReleasedAt: new Date(), contractReleaseReason: reason } });
+      await tx.billingAuditLog.create({
+        data: { companyId, eventType: 'MANUAL_OVERRIDE', actorUserId, detail: { action: 'cancel_for_cause', reason } },
       });
     });
   }

@@ -11,6 +11,7 @@ import { AuthMailService } from '../auth/auth-mail.service';
 import { provisionCompany } from '../companies/provision-company';
 import { resolveBcryptCost } from '../common/security/bcrypt-cost';
 import { BillingService, mapStripeStatus } from '../billing/billing.service';
+import { TRIAL_PERIOD_DAYS } from '../billing/plans';
 import { SignupDto } from './dto/signup.dto';
 
 const SIGNUP_TTL_MS = 24 * 60 * 60 * 1000;
@@ -148,7 +149,11 @@ export class SignupService {
         // fleetosSignupId marks this as a signup. fleetosCompanyId is attached to
         // the subscription only after provisioning (no company exists yet).
         metadata: { fleetosSignupId: pendingId },
-        subscription_data: { metadata: { fleetosSignupId: pendingId } },
+        // 7-day free trial (Part 2), driven by the SAME single-source constant
+        // (TRIAL_PERIOD_DAYS) as the rest of the app rather than a separately
+        // hardcoded number — so Stripe's own trial and FleetOS's tracking can
+        // never drift apart. The card is collected now; billing starts after.
+        subscription_data: { metadata: { fleetosSignupId: pendingId }, trial_period_days: TRIAL_PERIOD_DAYS },
         ...(this.billing.isTaxEnabled() ? { automatic_tax: { enabled: true }, tax_id_collection: { enabled: true } } : {}),
       },
       { idempotencyKey: `signup:${pendingId}` },

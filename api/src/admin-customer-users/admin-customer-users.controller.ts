@@ -76,6 +76,7 @@ export class AdminCustomerUsersController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.CUSTOMER_USERS_MANAGE)
+  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
   @Post(':userId/send-password-reset')
   @HttpCode(HttpStatus.OK)
   sendPasswordReset(@Param('userId', ParseUUIDPipe) userId: string, @CurrentAdmin() admin: AuthenticatedAdminRequestUser, @Ip() ip: string, @Req() req: Request) {

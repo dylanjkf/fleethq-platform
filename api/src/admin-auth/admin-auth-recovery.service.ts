@@ -67,7 +67,7 @@ export class AdminAuthRecoveryService {
     if (!isStrongPassword(newPassword)) {
       throw new BadRequestException({
         code: 'WEAK_PASSWORD',
-        message: 'Password must be at least 8 characters and mix at least two of lowercase, uppercase, number, and symbol.',
+        message: 'Password must be at least 8 characters and include all four of: lowercase, uppercase, a number, and a symbol.',
       });
     }
     if (await bcrypt.compare(newPassword, admin.passwordHash)) {

@@ -13,7 +13,15 @@ export class LoggingNotificationChannel implements NotificationChannel {
   private readonly logger = new Logger('NotificationChannel');
 
   async sendEmail(message: EmailMessage): Promise<void> {
-    this.logger.log({ channel: 'email', to: message.to, subject: message.subject }, 'Simulated email (no provider configured)');
+    this.logger.log(
+      {
+        channel: 'email',
+        to: message.to,
+        subject: message.subject,
+        attachments: message.attachments?.map((a) => ({ filename: a.filename, bytes: a.content.length })),
+      },
+      'Simulated email (no provider configured)',
+    );
   }
 
   async sendSms(message: SmsMessage): Promise<void> {

@@ -82,7 +82,7 @@ describe('Role management', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         username: `assigned-${role.body.id}`,
-        password: 'a-strong-password',
+        password: 'A-Strong-Password1',
         fullName: 'Assigned User',
         roleId: role.body.id,
       })

@@ -77,7 +77,7 @@ describe('DriverOS v0 (Operator login link)', () => {
     const linked = await request(app.getHttpServer())
       .post(`/v1/operators/${operator.body.id}/link-user`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: driverUsername, password: 'driver-password-123', roleId })
+      .send({ username: driverUsername, password: 'Driver-Password-123', roleId })
       .expect(201);
     expect(linked.body.userId).toEqual(expect.any(String));
 
@@ -85,7 +85,7 @@ describe('DriverOS v0 (Operator login link)', () => {
     // re-typed (dto had no fullName field at all).
     const driverLogin = await request(app.getHttpServer())
       .post('/v1/auth/login')
-      .send({ username: driverUsername, password: 'driver-password-123' })
+      .send({ username: driverUsername, password: 'Driver-Password-123' })
       .expect(200);
     expect(driverLogin.body.status).toBe('authenticated');
 
@@ -122,13 +122,13 @@ describe('DriverOS v0 (Operator login link)', () => {
     await request(app.getHttpServer())
       .post(`/v1/operators/${operator.body.id}/link-user`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: `first-${Date.now()}`, password: 'driver-password-123', roleId })
+      .send({ username: `first-${Date.now()}`, password: 'Driver-Password-123', roleId })
       .expect(201);
 
     const second = await request(app.getHttpServer())
       .post(`/v1/operators/${operator.body.id}/link-user`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ username: `second-${Date.now()}`, password: 'driver-password-123', roleId })
+      .send({ username: `second-${Date.now()}`, password: 'Driver-Password-123', roleId })
       .expect(409);
     expect(second.body.error.code).toBe('OPERATOR_ALREADY_LINKED');
   });
@@ -147,7 +147,7 @@ describe('DriverOS v0 (Operator login link)', () => {
     const res = await request(app.getHttpServer())
       .post(`/v1/operators/${operator.body.id}/link-user`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ username: `noperm-${Date.now()}`, password: 'driver-password-123', roleId })
+      .send({ username: `noperm-${Date.now()}`, password: 'Driver-Password-123', roleId })
       .expect(403);
     expect(res.body.error.requiredPermission).toBe(PERMISSIONS.USERS_CREATE);
   });
