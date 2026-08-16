@@ -10,14 +10,22 @@ name: Seed Titan demo
 # There is no push/schedule trigger: it only ever runs when a human clicks
 # "Run workflow" and types the confirmation phrase, so it can't fire by accident.
 #
-# One-time setup (repo Settings):
-#   - Secret   RAILWAY_TOKEN         — already set for deploy-api (reused here).
-#   - Variable RAILWAY_SERVICE       — already set for deploy-api (reused here).
-#   - Secret   TITAN_ADMIN_PASSWORD  — optional. The demo admin's password. If
-#                                      unset, the script generates a strong one
-#                                      and prints it in the run log (visible to
-#                                      anyone with Actions read access) — set the
-#                                      secret if you'd rather it stay out of logs.
+# The seed runs on a GitHub-hosted runner, which is OUTSIDE Railway's private
+# network — so it connects to Postgres over its PUBLIC proxy URL, not the
+# internal `postgres.railway.internal` host (which only resolves inside Railway
+# and gave a "Can't reach database server" error when we went through
+# `railway run`).
+#
+# One-time setup (repo Settings → Secrets and variables → Actions → Secrets):
+#   - Secret  SEED_DATABASE_URL     — REQUIRED. The Postgres PUBLIC connection
+#       string. In Railway: open the Postgres service → Variables → copy
+#       DATABASE_PUBLIC_URL (if there is no public URL, enable "Public
+#       Networking" on that service first). It looks like:
+#         postgresql://postgres:<pw>@<host>.proxy.rlwy.net:<port>/railway
+#   - Secret  TITAN_ADMIN_PASSWORD  — optional. The demo admin's password (>= 12
+#       chars). If unset, the script generates a strong one and prints it once in
+#       the run log (visible to anyone with Actions read access) — set the secret
+#       if you'd rather it stay out of the logs.
 
 on:
   workflow_dispatch:
@@ -52,16 +60,12 @@ jobs:
           cache: npm
           cache-dependency-path: api/package-lock.json
 
-      - name: Preflight — required config present
+      - name: Preflight — public DB URL present
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          SEED_DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
         run: |
-          missing=""
-          [ -n "$RAILWAY_TOKEN" ]   || missing="$missing RAILWAY_TOKEN(secret)"
-          [ -n "$RAILWAY_SERVICE" ] || missing="$missing RAILWAY_SERVICE(variable)"
-          if [ -n "$missing" ]; then
-            echo "::error::Missing required config:$missing — set them in repo Settings (see workflow header)."
+          if [ -z "$SEED_DATABASE_URL" ]; then
+            echo "::error::Secret SEED_DATABASE_URL is not set. Add it in repo Settings → Secrets and variables → Actions: the Postgres PUBLIC connection string (Railway → Postgres service → Variables → DATABASE_PUBLIC_URL)."
             exit 1
           fi
 
@@ -71,18 +75,14 @@ jobs:
           npm ci
           npx prisma generate
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
       - name: Seed Titan demo into the live database
         working-directory: api
-        # `railway run` injects the service's environment (incl. DATABASE_URL) into
-        # the seed process, so it writes to production Postgres. TITAN_DEMO_CONFIRM
-        # is the script's own opt-in gate; TITAN_ADMIN_PASSWORD is the demo admin's
-        # password (the script generates + prints one if the secret is unset).
+        # Connects directly to the public Postgres proxy (reachable from the
+        # runner). TITAN_DEMO_CONFIRM is the script's own opt-in gate;
+        # TITAN_ADMIN_PASSWORD is the demo admin's password (the script generates
+        # and prints one if the secret is unset).
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          DATABASE_URL: ${{ secrets.SEED_DATABASE_URL }}
           TITAN_DEMO_CONFIRM: SEED_TITAN_DEMO
           TITAN_ADMIN_PASSWORD: ${{ secrets.TITAN_ADMIN_PASSWORD }}
-        run: railway run --service "$RAILWAY_SERVICE" -- npm run seed:titan:demo
+        run: npm run seed:titan:demo
