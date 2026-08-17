@@ -68,6 +68,9 @@ interface LoginExtra {
   rememberMe?: boolean;
   isNewDeviceLogin?: boolean;
   loginMethod?: LoginMethod;
+  /** The client's device fingerprint, stored on the session so a later login
+   *  from the same device isn't flagged as new (A3 — shared-tablet alert noise). */
+  deviceFingerprint?: string;
 }
 
 /** What finishLoginForMembership needs to know about the destination company. */
@@ -338,8 +341,17 @@ export class AuthService {
     // IP + user-agent for this user before" from actual session history —
     // deliberately independent of deviceTrusted/MFA-skip, this only decides
     // whether the alert email is worth sending.
+    // New-device alert decision (A3). With a fingerprint present, alert only on
+    // a GENUINELY new account-device pairing: a device is "known" if it was
+    // explicitly trusted (remember-me) OR simply seen before for this user (a
+    // prior session carried the same fingerprint). This deliberately does NOT use
+    // the trusted-device path to skip MFA — a seen-but-untrusted device is still
+    // challenged, which keeps shared tablets safe (the next driver still MFAs).
+    // It fixes the shared-tablet noise: DriverOS sends a stable fingerprint, so a
+    // driver alerts once on first use of a tablet, then goes quiet — instead of
+    // the IP/User-Agent fallback firing on rotating cellular IPs every shift.
     const isNewDeviceLogin = deviceFingerprint
-      ? !deviceTrusted
+      ? !(deviceTrusted || (await this.sessions.hasSeenDeviceFingerprint(user.id, deviceFingerprint)))
       : !(await this.sessions.hasKnownIpUserAgent(user.id, context.ip, context.userAgent));
 
     // Second factor. If MFA is active and the device isn't trusted, no session
@@ -350,7 +362,7 @@ export class AuthService {
       return { status: 'mfa_required', mfaToken: this.jwt.sign(mfaPayload, { expiresIn: MFA_CHALLENGE_EXPIRES_IN }) };
     }
 
-    return this.completeLogin(user, context, { rememberMe, isNewDeviceLogin, loginMethod });
+    return this.completeLogin(user, context, { rememberMe, isNewDeviceLogin, loginMethod, deviceFingerprint });
   }
 
   /**
@@ -419,6 +431,7 @@ export class AuthService {
       rememberMe: payload.rememberMe,
       isNewDeviceLogin: payload.isNewDeviceLogin,
       loginMethod: payload.loginMethod,
+      deviceFingerprint: payload.deviceFingerprint,
     });
   }
 
@@ -550,6 +563,7 @@ export class AuthService {
       ip: context.ip,
       userAgent: context.userAgent,
       rememberMe: extra.rememberMe,
+      deviceFingerprint: extra.deviceFingerprint,
     });
     void this.audit.recordSystem({
       companyId: membership.companyId,

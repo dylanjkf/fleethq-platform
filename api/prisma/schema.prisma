@@ -744,6 +744,10 @@ model UserSession {
   ipAddress    String    @map("ip_address")
   userAgent    String?   @map("user_agent")
   deviceLabel  String?   @map("device_label")
+  // Hashed client device fingerprint (A3). Nullable — clients that don't send
+  // one still work. Used only to decide the new-device-login alert (a seen
+  // fingerprint isn't "new"); NOT a trusted-device / MFA-skip signal.
+  deviceFingerprint String? @map("device_fingerprint")
   createdAt    DateTime  @default(now()) @map("created_at")
   lastSeenAt   DateTime  @default(now()) @map("last_seen_at")
   expiresAt    DateTime  @map("expires_at")
@@ -752,6 +756,7 @@ model UserSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([userId, deviceFingerprint])
   @@map("user_sessions")
 }
 
