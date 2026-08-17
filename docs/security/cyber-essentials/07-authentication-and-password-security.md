@@ -17,9 +17,10 @@ promptly when a credential is suspected compromised.
   `apps/api/src/companies/provision-company.ts`. Cost 10 is the accepted
   OWASP-baseline minimum.
 - **Password strength policy.** A shared `@IsStrongPassword()` validator
-  (≥ 8 characters, at least 2 of 4 character classes, and not on a common-password
-  denylist) guards every password-setting DTO, replacing a bare minimum-length
-  check. `apps/api/src/common/validators/is-strong-password.validator.ts`
+  (≥ 8 characters AND all four character classes — lowercase, uppercase, a
+  number, and a symbol — and not on a common-password denylist) guards every
+  password-setting DTO, replacing a bare minimum-length check.
+  `apps/api/src/common/validators/is-strong-password.validator.ts`
   (unit-tested in the adjacent `.spec.ts`).
 - **Brute-force lockout.** `AuthService` counts consecutive failed logins per
   user and locks the account for a fixed window after `MAX_FAILED_LOGINS = 5`;

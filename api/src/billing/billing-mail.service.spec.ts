@@ -29,7 +29,7 @@ describe('BillingMailService', () => {
     expect(message.subject).toContain('Acme Couriers');
     expect(message.body).toContain('Ada Owner');
     expect(message.body).toContain(nextAttempt.toLocaleDateString('en-AU'));
-    // The 5 business-day grace deadline is surfaced so the customer knows how long they have.
+    // The 7 calendar-day grace deadline is surfaced so the customer knows how long they have.
     expect(message.body).toContain(graceEndsAt.toLocaleDateString('en-AU'));
     expect(message.body).toMatch(/grace period/i);
   });
