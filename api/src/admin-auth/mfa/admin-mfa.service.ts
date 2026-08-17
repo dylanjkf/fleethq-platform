@@ -10,6 +10,11 @@ import type { AdminAuthContext } from '../admin-auth.service';
 const BACKUP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const BACKUP_CODE_COUNT = 10;
 
+/** Drop spaces from a submitted TOTP so a grouped "123 456" entry still verifies. */
+function stripSpaces(code: string): string {
+  return code.replace(/\s+/g, '');
+}
+
 interface AdminMfaUser {
   id: string;
   username: string;
@@ -59,8 +64,13 @@ export class AdminMfaService {
     if (!user.mfaSecret) {
       throw new BadRequestException({ code: 'MFA_NOT_STARTED', message: 'Start MFA setup before confirming a code.' });
     }
-    if (!verifyTotp(user.mfaSecret, code)) {
-      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect. Check your authenticator and try again.' });
+    if (!verifyTotp(user.mfaSecret, stripSpaces(code))) {
+      // 400, NOT 401: this admin is already authenticated (they hold a valid
+      // session token to reach this endpoint) — a wrong 6-digit code is bad
+      // *input*, not a dead session. Returning 401 made the SPA's axios
+      // interceptor treat it as "session expired", wipe the token and bounce
+      // the admin all the way back to the username/password login mid-enrolment.
+      throw new BadRequestException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect. Check your authenticator and try again.' });
     }
     const backupCodes = this.generateBackupCodes();
     const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), resolveBcryptCost())));
@@ -84,7 +94,9 @@ export class AdminMfaService {
     if (!user.mfaEnabledAt) return;
     const result = await this.verifyChallenge(user, code);
     if (!result.ok) {
-      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+      // 400, not 401 — see confirmEnrollment: an authenticated admin submitting
+      // a wrong disable code is bad input, not a revoked session.
+      throw new BadRequestException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
     }
     if (result.usedBackupCode) {
       await this.audit.record({
@@ -123,7 +135,8 @@ export class AdminMfaService {
     }
     const result = await this.verifyChallenge(user, code);
     if (!result.ok) {
-      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
+      // 400, not 401 — see confirmEnrollment.
+      throw new BadRequestException({ code: 'MFA_CODE_INVALID', message: 'That code is incorrect.' });
     }
     const backupCodes = this.generateBackupCodes();
     const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(this.normalise(c), resolveBcryptCost())));
@@ -141,7 +154,10 @@ export class AdminMfaService {
 
   async verifyChallenge(user: AdminMfaUser, code: string): Promise<{ ok: boolean; usedBackupCode: boolean }> {
     if (!user.mfaSecret || !user.mfaEnabledAt) return { ok: false, usedBackupCode: false };
-    if (verifyTotp(user.mfaSecret, code)) return { ok: true, usedBackupCode: false };
+    // Authenticator apps display the 6 digits grouped ("123 456"); tolerate a
+    // pasted/typed space so a genuinely-correct code isn't rejected. Backup
+    // codes are whitespace/case-normalised separately by `normalise` below.
+    if (verifyTotp(user.mfaSecret, stripSpaces(code))) return { ok: true, usedBackupCode: false };
 
     const normalised = this.normalise(code);
     for (const hash of user.mfaBackupCodes) {
