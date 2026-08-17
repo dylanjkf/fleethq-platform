@@ -23,6 +23,10 @@ function encodeHeaderWord(value: string): string {
  * silently reopen this hole.
  */
 export function sanitizeMimeHeaderValue(value: string): string {
+  // Matching control characters is the entire point here — CR/LF and other
+  // C0/C1 controls are exactly the header-injection vectors being stripped — so
+  // no-control-regex is deliberately disabled for this one expression.
+  // eslint-disable-next-line no-control-regex
   return value.replace(/[\x00-\x1f\x7f-\x9f"]/g, '');
 }
 
