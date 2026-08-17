@@ -13,7 +13,7 @@ import { PrismaClient } from '@prisma/client';
 import request from 'supertest';
 import { PERMISSIONS } from '../src/common/permissions/permission-catalog';
 import { buildTestApp } from './utils/build-test-app';
-import { TEST_PASSWORD, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
+import { TEST_PASSWORD, addUserToCompany, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
 
 const FULL = [PERMISSIONS.DISPATCH_VIEW, PERMISSIONS.DISPATCH_CREATE, PERMISSIONS.DISPATCH_EDIT, PERMISSIONS.DISPATCH_DELIVER];
 
@@ -51,6 +51,10 @@ describe('Dispatch concurrency guards (A2)', () => {
   it('completeStop: two concurrent FAILED completions record the completion exactly once (no duplicate events or notifications)', async () => {
     const tenant = await createTestTenant(FULL);
     const token = await login(tenant.username);
+    // A second DISPATCH_VIEW holder who is NOT the actor — the failed-delivery
+    // notification goes to them (the actor is excluded from their own action's
+    // notification), so they're how we observe it firing exactly once.
+    const watcher = await addUserToCompany(tenant.companyId, [PERMISSIONS.DISPATCH_VIEW]);
     const { jobId, stopId } = await seedStop(token);
 
     const fire = () =>
@@ -66,10 +70,12 @@ describe('Dispatch concurrency guards (A2)', () => {
     expect([r1.body.replayed, r2.body.replayed].sort()).toEqual([false, true]);
 
     // Exactly ONE stop_completed timeline event and ONE delivery_failed
-    // notification — no duplicate from the race.
+    // notification to the watcher — no duplicate from the race.
     const events = await prisma.timelineEvent.findMany({ where: { entityId: jobId, eventType: 'stop_completed' } });
     expect(events).toHaveLength(1);
-    const notes = await prisma.notification.findMany({ where: { companyId: tenant.companyId, type: 'delivery_failed' } });
+    const notes = await prisma.notification.findMany({
+      where: { companyId: tenant.companyId, recipientUserId: watcher.userId, type: 'delivery_failed' },
+    });
     expect(notes).toHaveLength(1);
   });
 
