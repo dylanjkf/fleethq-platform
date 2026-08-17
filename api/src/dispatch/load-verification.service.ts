@@ -53,7 +53,15 @@ export class LoadVerificationService {
    * rather than recording a second event.
    */
   async verifyLoad(companyId: string, actorUserId: string, jobId: string, dto: LoadVerificationDto) {
-    return this.prisma.withTenant(companyId, async (tx) => {
+    // SERIALIZABLE: this is a check-then-write on job.loadVerifiedAt. Two
+    // concurrent confirmations on the same run (a driver double-tapping, or an
+    // offline outbox replay racing a live tap) could both read loadVerifiedAt as
+    // null under READ COMMITTED and each stamp the timeline — a double-recorded
+    // verify/override. Under SERIALIZABLE, Postgres' SSI aborts one and
+    // withTenantSerializable re-runs it, where the idempotency guard now sees
+    // loadVerifiedAt set and returns the replayed no-op. Retry is bounded inside
+    // withTenantSerializable (SQLSTATE 40001 → P2034), same as the other callers.
+    return this.prisma.withTenantSerializable(companyId, async (tx) => {
       const job = await this.support.requireJob(tx, companyId, jobId);
       const stops = await tx.jobStop.findMany({
         where: { jobId },
