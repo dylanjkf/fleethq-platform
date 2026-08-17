@@ -14,6 +14,19 @@ function encodeHeaderWord(value: string): string {
 }
 
 /**
+ * Strip MIME header-injection vectors from a value interpolated into a raw
+ * header. Removes CR, LF and every other C0/C1 control character (so no extra
+ * header line or MIME boundary can be smuggled in) and the double-quote that
+ * delimits a quoted parameter (`name="…"`, `filename="…"`). Applied to the
+ * attachment filename and content-type regardless of the current caller's
+ * safety, so a future feature that lets a filename come from user input can't
+ * silently reopen this hole.
+ */
+export function sanitizeMimeHeaderValue(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f-\x9f"]/g, '');
+}
+
+/**
  * Real email delivery via AWS SES. Selected over LoggingNotificationChannel
  * only when `EMAIL_PROVIDER=ses` and `EMAIL_FROM_ADDRESS` are set (see
  * NotificationsModule) — so local dev and this codebase's own e2e/CI runs,
@@ -79,11 +92,15 @@ export class SesNotificationChannel implements NotificationChannel {
       wrap76(Buffer.from(message.body, 'utf8').toString('base64')),
     ];
     for (const att of message.attachments ?? []) {
+      // Sanitize before interpolation: CR/LF or a stray quote in either value
+      // would otherwise let a caller inject arbitrary headers or MIME parts.
+      const filename = sanitizeMimeHeaderValue(att.filename);
+      const contentType = sanitizeMimeHeaderValue(att.contentType);
       parts.push(
         `--${boundary}`,
-        `Content-Type: ${att.contentType}; name="${att.filename}"`,
+        `Content-Type: ${contentType}; name="${filename}"`,
         'Content-Transfer-Encoding: base64',
-        `Content-Disposition: attachment; filename="${att.filename}"`,
+        `Content-Disposition: attachment; filename="${filename}"`,
         '',
         wrap76(att.content.toString('base64')),
       );
