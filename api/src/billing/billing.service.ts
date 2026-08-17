@@ -2,7 +2,7 @@
 // Pre-existing oversized service (predates this security port; not modified by
 // it). Grandfathered to keep the max-lines rule active for the rest of the repo;
 // a proper split is tracked as separate follow-up work.
-import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, forwardRef } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger, OnModuleInit, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { InvoiceStatus, Prisma, SubscriptionStatus } from '@prisma/client';
@@ -97,7 +97,7 @@ const HAS_LIVE_SUBSCRIPTION: ReadonlySet<SubscriptionStatus> = new Set([
  * need to actually talk to Stripe fail clearly if it isn't configured.
  */
 @Injectable()
-export class BillingService {
+export class BillingService implements OnModuleInit {
   private readonly logger = new Logger(BillingService.name);
   private stripeClient: Stripe | null = null;
   /**
@@ -120,6 +120,26 @@ export class BillingService {
     @Inject(forwardRef(() => SignupService))
     private readonly signup: SignupService,
   ) {}
+
+  /**
+   * Make the contract-enforcement no-op VISIBLE on boot (Part 7). The 12-month
+   * minimum-term lock-in code path exists (cancelSubscription's CONTRACT_LOCKED
+   * gate, the contractEndsAt stamping in syncSubscription), but it only bites
+   * when BILLING_CONTRACT_ENFORCED=true. That flag is deliberately held OFF
+   * pending legal sign-off on the ACL unfair-contract-term risk flagged in the
+   * lock-in round — so the term is NOT enforced today. Without this log the
+   * disabled state could sit unnoticed indefinitely; in production we warn,
+   * elsewhere we note it at debug.
+   */
+  onModuleInit(): void {
+    if (!this.contractEnforced()) {
+      const msg =
+        'Minimum-term (12-month) enforcement is OFF: BILLING_CONTRACT_ENFORCED is not "true", so cancelSubscription will NOT apply the lock-in. ' +
+        'This is intentional pending legal sign-off on the contract terms. Set BILLING_CONTRACT_ENFORCED=true to activate enforcement once cleared.';
+      if (this.config.get<string>('NODE_ENV') === 'production') this.logger.warn(msg);
+      else this.logger.debug(msg);
+    }
+  }
 
   isConfigured(): boolean {
     return !!this.config.get<string>('STRIPE_SECRET_KEY');
@@ -664,11 +684,18 @@ export class BillingService {
           customer_update: { enabled: true, allowed_updates: ['email', 'address', 'phone', 'tax_id'] },
           invoice_history: { enabled: true },
           payment_method_update: { enabled: true },
-          // Self-serve cancellation is DISABLED in the Stripe portal (Part 2): a
-          // 12-month minimum-term lock-in that a customer could bypass by
-          // cancelling directly in Stripe's portal would not be a lock-in.
-          // Cancellation must go through the app's own gated endpoint
-          // (cancelSubscription), which enforces the term.
+          // Self-serve cancellation is DISABLED in the Stripe portal (Part 2),
+          // and stays hardcoded off INDEPENDENT of BILLING_CONTRACT_ENFORCED.
+          // Rationale (Part 7 decision): the flag governs whether the 12-month
+          // TERM is enforced; the cancellation CHANNEL is a separate, stable
+          // decision — every cancel must route through the app's own endpoint
+          // (cancelSubscription) so it is audited and, once the flag is enabled,
+          // term-gated. Were the portal to follow the flag, turning enforcement
+          // off would also hand customers a second, un-audited cancel path
+          // straight through Stripe, bypassing the app entirely. With
+          // enforcement off today the app endpoint still cancels freely (no
+          // lock-in yet), so nothing legitimate is blocked — the channel is
+          // just kept single and controlled.
           subscription_cancel: { enabled: false },
           subscription_update:
             products.length > 0

@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'crypto';
 import { INestApplication } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 import request from 'supertest';
 import { PERMISSIONS } from '../src/common/permissions/permission-catalog';
 import { buildTestApp } from './utils/build-test-app';
@@ -34,6 +35,7 @@ const FULL = [
 
 describe('Configurable POD', () => {
   let app: INestApplication;
+  const prisma = new PrismaClient();
 
   beforeAll(async () => {
     app = await buildTestApp();
@@ -42,6 +44,7 @@ describe('Configurable POD', () => {
   });
   afterAll(async () => {
     await app.close();
+    await prisma.$disconnect();
     await disconnectFixtures();
   });
 
@@ -90,6 +93,60 @@ describe('Configurable POD', () => {
     const parcelIds = reread.body.stops[0].parcels.map((p: { id: string }) => p.id);
     return { jobId: job.body.id, stopId, parcelIds };
   }
+
+  async function scanParcel(token: string, jobId: string, stopId: string, reference: string) {
+    await request(app.getHttpServer())
+      .post(`/v1/jobs/${jobId}/stops/${stopId}/parcels/scan`)
+      .set(auth(token))
+      .send({ reference })
+      .expect(201);
+  }
+
+  it('records a pod_unconfirmed_override (who/when/what) when a delivery covers an unscanned parcel', async () => {
+    const tenant = await createTestTenant(FULL);
+    const token = await login(tenant.username);
+    // No DELIVERY template → legacy POD path, so no evidence is needed to isolate
+    // the unconfirmed-parcel recording.
+    const { jobId, stopId } = await makeStopWithParcels(token, ['P-A', 'P-B']);
+
+    // Scan only P-A; P-B is delivered WITHOUT ever being scanned/confirmed.
+    await scanParcel(token, jobId, stopId, 'P-A');
+
+    await request(app.getHttpServer())
+      .post(`/v1/jobs/${jobId}/stops/${stopId}/complete`)
+      .set(auth(token))
+      .send({ outcome: 'DELIVERED' })
+      .expect(201);
+
+    // The override was recorded — never silent — naming WHO, WHEN, and exactly
+    // WHAT went out unconfirmed (P-B only; P-A was scanned).
+    const events = await prisma.timelineEvent.findMany({ where: { entityId: jobId, eventType: 'pod_unconfirmed_override' } });
+    expect(events).toHaveLength(1);
+    const event = events[0];
+    expect(event.actorUserId).toBe(tenant.userId); // WHO
+    expect(event.occurredAt).toBeTruthy(); // WHEN
+    const payload = event.payload as { unconfirmedReferences: string[]; unconfirmedCount: number };
+    expect(payload.unconfirmedReferences).toEqual(['P-B']); // WHAT (P-A excluded — it was scanned)
+    expect(payload.unconfirmedCount).toBe(1);
+  });
+
+  it('records NO override when every covered parcel was scanned first', async () => {
+    const tenant = await createTestTenant(FULL);
+    const token = await login(tenant.username);
+    const { jobId, stopId } = await makeStopWithParcels(token, ['Q-A', 'Q-B']);
+
+    await scanParcel(token, jobId, stopId, 'Q-A');
+    await scanParcel(token, jobId, stopId, 'Q-B');
+
+    await request(app.getHttpServer())
+      .post(`/v1/jobs/${jobId}/stops/${stopId}/complete`)
+      .set(auth(token))
+      .send({ outcome: 'DELIVERED' })
+      .expect(201);
+
+    const events = await prisma.timelineEvent.findMany({ where: { entityId: jobId, eventType: 'pod_unconfirmed_override' } });
+    expect(events).toHaveLength(0);
+  });
 
   it('enforces "photo required, signature optional" server-side: rejects a drop without the photo, accepts it with', async () => {
     const tenant = await createTestTenant(FULL);

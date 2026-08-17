@@ -1,16 +1,17 @@
 import { SubscriptionStatus } from '@prisma/client';
 import { isPastDueGraceElapsed } from './entitlements.service';
-import { addBusinessDays } from './business-days';
 
 /**
  * Unit coverage for the non-payment grace gating (item 7): the account stays
- * writable through the whole 5-business-day window (weekends included) and only
+ * writable through the whole 7-calendar-day window (weekends included) and only
  * becomes read-only once the window has genuinely elapsed.
  */
 describe('isPastDueGraceElapsed', () => {
   const pastDue = { subscriptionStatus: SubscriptionStatus.PAST_DUE, paymentFailureCount: 1 };
   const failedAt = new Date('2026-01-01T09:00:00Z'); // Thursday
-  const graceEnd = addBusinessDays(failedAt, 5); // -> 2026-01-08 (spans the weekend)
+  // 7 calendar days (the real logic in billing.service.ts) -> 2026-01-08T09:00Z,
+  // a window that spans a weekend, proving weekend days don't end grace early.
+  const graceEnd = new Date(failedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
 
   it('stays FALSE (account active) through the whole window, including the weekend it spans', () => {
     // A Saturday that falls inside the window — still active, proving weekend days

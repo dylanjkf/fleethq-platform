@@ -427,6 +427,10 @@ export class JobStopsService {
       // delivers nothing.
       if (dto.outcome === StopOutcome.DELIVERED) {
         await this.markParcelsDelivered(tx, stopId, dto.parcelIds, completedAt, podSubmissionId);
+        // Never SILENTLY deliver an unscanned parcel: record any covered parcel
+        // that went out without being scanned/confirmed, the same override-and-
+        // record contract the pre-run load verification uses.
+        await this.recordUnconfirmedParcelOverride(tx, companyId, actorUserId, job, stopId, stop.label, dto.parcelIds, completedAt);
       }
 
       await this.recordStopCompletion(
@@ -508,6 +512,47 @@ export class JobStopsService {
     await tx.stopParcel.updateMany({
       where: { id: { in: targetIds }, deliveredAt: null },
       data: { deliveredAt, podSubmissionId: podSubmissionId ?? null },
+    });
+  }
+
+  /**
+   * Record — never silently allow — a delivery that covers parcels which were
+   * never scanned/confirmed. The office gets a JOB timeline event naming WHO
+   * overrode (actorUserId), WHEN (the completion time), and exactly WHICH
+   * references went out unconfirmed — the same override-and-record contract the
+   * pre-run load verification uses for its discrepancies. The unconfirmed set is
+   * recomputed here from `StopParcel.scannedAt`, so the client can't spoof it. A
+   * stop with no parcels, or where every covered parcel was scanned, records
+   * nothing. (Deliberately additive, not a rejection: a stop can legitimately be
+   * delivered without a scan — the requirement is that it's never *silent*.)
+   */
+  private async recordUnconfirmedParcelOverride(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    actorUserId: string,
+    job: { id: string; title: string },
+    stopId: string,
+    stopLabel: string,
+    parcelIds: string[] | undefined,
+    occurredAt: Date,
+  ) {
+    const parcels = await tx.stopParcel.findMany({
+      where: { stopId },
+      select: { id: true, reference: true, scannedAt: true },
+    });
+    if (parcels.length === 0) return; // no manifest → nothing to confirm against
+    const covered = parcelIds && parcelIds.length > 0 ? parcels.filter((p) => parcelIds.includes(p.id)) : parcels;
+    const unconfirmed = covered.filter((p) => !p.scannedAt);
+    if (unconfirmed.length === 0) return;
+    const references = unconfirmed.map((p) => p.reference);
+    await this.timeline.record(tx, {
+      companyId,
+      entityType: TimelineEntityType.JOB,
+      entityId: job.id,
+      eventType: 'pod_unconfirmed_override',
+      summary: `Stop "${stopLabel}" delivered with ${references.length} unscanned parcel(s) on "${job.title}".`,
+      payload: { stopId, occurredAt: occurredAt.toISOString(), unconfirmedCount: references.length, unconfirmedReferences: references },
+      actorUserId,
     });
   }
 

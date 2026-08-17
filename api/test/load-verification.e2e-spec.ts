@@ -168,6 +168,43 @@ describe('Load verification (item 2)', () => {
     expect(job!.loadVerifiedAt).toBeTruthy();
   });
 
+  it('(d) two concurrent verifications on the same run record the load exactly once (no double-record race)', async () => {
+    const tenant = await createTestTenant(FULL);
+    const token = await login(tenant.username);
+    const { jobId, stopIds } = await seedJob(token);
+
+    // Partial load (B-1 unscanned) so both concurrent calls take the override
+    // branch — the dangerous one, since a lost check-then-write would stamp two
+    // `load_discrepancy_override` events.
+    await scan(token, jobId, stopIds[0], 'A-1');
+    await scan(token, jobId, stopIds[0], 'A-2');
+
+    // Fire two identical overriding confirmations at once. Under READ COMMITTED
+    // both could read loadVerifiedAt as null and each record an event; under the
+    // SERIALIZABLE guard exactly one commits and the other re-runs into the
+    // idempotent replay path.
+    const fire = () =>
+      request(app.getHttpServer())
+        .post(`/v1/jobs/${jobId}/load-verification`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ confirm: true, override: true, missingReferences: ['B-1'] });
+    const [r1, r2] = await Promise.all([fire(), fire()]);
+
+    // Both requests succeed and agree the load is verified — one did the write,
+    // the other saw it already verified (replayed). Neither errored.
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r1.body.verified).toBe(true);
+    expect(r2.body.verified).toBe(true);
+    expect([r1.body.replayed, r2.body.replayed].sort()).toEqual([false, true]);
+
+    // Exactly ONE override event was recorded — no lost update, no double-record.
+    const events = await prisma.timelineEvent.findMany({ where: { entityId: jobId, eventType: 'load_discrepancy_override' } });
+    expect(events).toHaveLength(1);
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    expect(job!.loadVerifiedAt).toBeTruthy();
+  });
+
   it('load-status requires dispatch:view and verification requires dispatch:deliver', async () => {
     const tenant = await createTestTenant(FULL);
     const token = await login(tenant.username);
