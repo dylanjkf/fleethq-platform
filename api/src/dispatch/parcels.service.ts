@@ -36,22 +36,44 @@ export class ParcelsService {
    * Marks a parcel scanned. Idempotent, and forgiving: an unknown reference is
    * created already-scanned (a driver scanning a parcel the office didn't list),
    * an already-scanned one is left as-is rather than re-stamped.
+   *
+   * The find-then-create is a check-then-write racing on `@@unique([stopId,
+   * reference])`: two concurrent scans of the SAME new reference (a driver
+   * double-tap, or an offline outbox replay racing a live retry) both read null
+   * and both insert — one wins, the loser hits P2002. Rather than escalate the
+   * whole path to SERIALIZABLE for one constrained insert, catch that P2002 (the
+   * established pattern across ~a dozen services here — companies, users, depots,
+   * assets, webauthn) and treat it as the idempotent success it is: the winner
+   * already created the row, so re-read and return it. The desired end state
+   * (parcel exists, scanned) holds either way, so no unhandled 500.
    */
   async scanParcel(companyId: string, jobId: string, stopId: string, dto: ScanParcelDto) {
-    return this.prisma.withTenant(companyId, async (tx) => {
-      await this.requireStop(tx, companyId, jobId, stopId);
-      const existing = await tx.stopParcel.findUnique({
-        where: { stopId_reference: { stopId, reference: dto.reference } },
-      });
-      if (existing) {
-        if (!existing.scannedAt) {
-          await tx.stopParcel.update({ where: { id: existing.id }, data: { scannedAt: new Date() } });
+    try {
+      return await this.prisma.withTenant(companyId, async (tx) => {
+        await this.requireStop(tx, companyId, jobId, stopId);
+        const existing = await tx.stopParcel.findUnique({
+          where: { stopId_reference: { stopId, reference: dto.reference } },
+        });
+        if (existing) {
+          if (!existing.scannedAt) {
+            await tx.stopParcel.update({ where: { id: existing.id }, data: { scannedAt: new Date() } });
+          }
+        } else {
+          await tx.stopParcel.create({ data: { companyId, stopId, reference: dto.reference, scannedAt: new Date() } });
         }
-      } else {
-        await tx.stopParcel.create({ data: { companyId, stopId, reference: dto.reference, scannedAt: new Date() } });
+        return this.listParcels(tx, stopId);
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        // Lost the create race — the concurrent scan already inserted the parcel
+        // (scanned). Re-read in a fresh transaction and return the settled state.
+        return this.prisma.withTenant(companyId, async (tx) => {
+          await this.requireStop(tx, companyId, jobId, stopId);
+          return this.listParcels(tx, stopId);
+        });
       }
-      return this.listParcels(tx, stopId);
-    });
+      throw err;
+    }
   }
 
   private async requireStop(tx: Prisma.TransactionClient, companyId: string, jobId: string, stopId: string) {
