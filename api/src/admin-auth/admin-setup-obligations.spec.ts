@@ -62,30 +62,40 @@ function ctx(userId = 'admin-1') {
   } as never;
 }
 
-describe('staffAdminMfaEnforced()', () => {
-  const original = process.env.ENFORCE_STAFF_ADMIN_MFA;
+describe('staffAdminMfaEnforced() — fail closed by default', () => {
+  const originalFlag = process.env.ENFORCE_STAFF_ADMIN_MFA;
+  const originalNodeEnv = process.env.NODE_ENV;
   afterEach(() => {
-    if (original === undefined) delete process.env.ENFORCE_STAFF_ADMIN_MFA;
-    else process.env.ENFORCE_STAFF_ADMIN_MFA = original;
+    if (originalFlag === undefined) delete process.env.ENFORCE_STAFF_ADMIN_MFA;
+    else process.env.ENFORCE_STAFF_ADMIN_MFA = originalFlag;
+    process.env.NODE_ENV = originalNodeEnv;
   });
 
-  it('is OFF by default (unset)', () => {
+  it('is ON by default with no env var set (the regression guard — absence must NOT disable it)', () => {
     delete process.env.ENFORCE_STAFF_ADMIN_MFA;
-    expect(staffAdminMfaEnforced()).toBe(false);
+    expect(staffAdminMfaEnforced()).toBe(true);
   });
 
-  it('is OFF for any value other than an explicit true', () => {
-    for (const v of ['false', 'FALSE', '', '1', 'yes', 'on']) {
+  it('stays ON for anything other than an explicit false opt-out', () => {
+    delete process.env.NODE_ENV; // non-production
+    for (const v of ['true', 'TRUE', '', '1', 'yes', 'on', 'off']) {
+      process.env.ENFORCE_STAFF_ADMIN_MFA = v;
+      expect(staffAdminMfaEnforced()).toBe(true);
+    }
+  });
+
+  it('honours an explicit false opt-out only OUTSIDE production', () => {
+    process.env.NODE_ENV = 'development';
+    for (const v of ['false', 'FALSE', 'False']) {
       process.env.ENFORCE_STAFF_ADMIN_MFA = v;
       expect(staffAdminMfaEnforced()).toBe(false);
     }
   });
 
-  it('is ON only for an explicit truthy opt-in (case-insensitive)', () => {
-    for (const v of ['true', 'TRUE', 'True']) {
-      process.env.ENFORCE_STAFF_ADMIN_MFA = v;
-      expect(staffAdminMfaEnforced()).toBe(true);
-    }
+  it('IGNORES the opt-out in production — staff MFA can never be turned off there', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.ENFORCE_STAFF_ADMIN_MFA = 'false';
+    expect(staffAdminMfaEnforced()).toBe(true);
   });
 });
 
@@ -119,8 +129,8 @@ describe('AdminPermissionGuard — ADMIN_SETUP_REQUIRED obligations gate', () =>
     });
   });
 
-  it('does NOT block an un-enrolled admin when MFA is optional (default OFF)', async () => {
-    delete process.env.ENFORCE_STAFF_ADMIN_MFA;
+  it('does NOT block an un-enrolled admin when MFA is explicitly opted out (non-prod)', async () => {
+    process.env.ENFORCE_STAFF_ADMIN_MFA = 'false'; // deliberate non-prod opt-out
     const adminRoleHasPermission = jest
       .spyOn(adminRolePermissions, 'adminRoleHasPermission')
       .mockResolvedValue(true);
