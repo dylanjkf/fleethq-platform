@@ -58,4 +58,21 @@ describe('Admin System Health', () => {
     expect(res.body.version.apiVersion).toBe('0.1.0');
     expect(res.body.checkedAt).toBeDefined();
   });
+
+  it('reports scheduler + observability panels backed by real data with honest gaps (B4)', async () => {
+    const res = await request(app.getHttpServer()).get('/v1/admin/system/health').set('Authorization', `Bearer ${adminToken}`).expect(200);
+
+    // Scheduler panel: real leases (may be empty in test), coarse-by-design.
+    expect(typeof res.body.scheduler.enabled).toBe('boolean');
+    expect(res.body.scheduler.granularity).toBe('last_claimed'); // no per-run outcome persisted
+    expect(Array.isArray(res.body.scheduler.tasks)).toBe(true);
+
+    // Observability panels are surfaced HONESTLY — status + reason, never a
+    // fabricated 5xx-rate or bounce number. Both real data sources are absent
+    // in this deployment, so the flags say so rather than mocking a value.
+    expect(res.body.observability.errorTracking.summaryAvailable).toBe(false);
+    expect(typeof res.body.observability.errorTracking.note).toBe('string');
+    expect(res.body.observability.emailDelivery.failureLogAvailable).toBe(false);
+    expect(typeof res.body.observability.emailDelivery.note).toBe('string');
+  });
 });
