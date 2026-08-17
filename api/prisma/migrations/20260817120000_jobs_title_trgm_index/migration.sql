@@ -13,3 +13,13 @@ CREATE INDEX IF NOT EXISTS "jobs_title_trgm_idx"
 -- narrow-grant fleetos_admin role. Grant it SELECT on jobs (it already has
 -- companies/users/assets/company_memberships) so the job/load search can run.
 GRANT SELECT ON "jobs" TO fleetos_admin;
+
+-- Cockpit B2 (customer 360) surfaces a "last active" signal from the tenant's
+-- session history. Grant the narrow fleetos_admin role SELECT on user_sessions
+-- for that read-only aggregate (max last_seen_at per company).
+GRANT SELECT ON "user_sessions" TO fleetos_admin;
+
+-- Cockpit B4 (system & ops health) surfaces a coarse scheduler-health panel from
+-- the leader-election lease table (task / holder / last-claimed). Grant the
+-- narrow fleetos_admin role SELECT so the health read stays on the admin role.
+GRANT SELECT ON "scheduler_leases" TO fleetos_admin;

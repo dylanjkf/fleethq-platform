@@ -61,6 +61,16 @@ export class AdminOrganisationsController {
     return this.organisations.getById(id);
   }
 
+  // Support & ops cockpit — customer 360 (B2). Read-only; gated on the same
+  // organisations:view as the rest of the org detail. The write actions it
+  // surfaces stay on their own endpoints, each behind its own permission (B3/B5).
+  @AdminGuarded()
+  @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
+  @Get(':id/cockpit')
+  getCockpit(@Param('id', ParseUUIDPipe) id: string) {
+    return this.organisations.getCockpit(id);
+  }
+
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
   @Get(':id/roles')

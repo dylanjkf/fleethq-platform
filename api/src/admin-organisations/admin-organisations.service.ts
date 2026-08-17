@@ -9,6 +9,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { AdminActionContext } from '../admin-auth/admin-action-context.interface';
 import { provisionCompany } from '../companies/provision-company';
 import { TRIAL_PERIOD_DAYS } from '../billing/plans';
+import { isPastDueGraceElapsed } from '../billing/entitlements.service';
 import { AdminOrganisationsQueryDto } from './dto/admin-organisations-query.dto';
 import { CreateOrganisationDto } from './dto/create-organisation.dto';
 
@@ -207,6 +208,95 @@ export class AdminOrganisationsService {
         locked: !!(m.user.lockedUntil && m.user.lockedUntil > new Date()),
         memberSince: m.createdAt,
       })),
+    };
+  }
+
+  /**
+   * Support & ops cockpit — the customer "360" (B2): everything a FleetHQ staff
+   * member needs to work a support conversation about one company, assembled from
+   * data that already exists (no new event stream, no new aggregates), so five
+   * separate admin pages collapse into one read. Read-only — the actions live in
+   * the existing guarded endpoints (impersonate, billing ops, password reset,
+   * feature flags), surfaced from here in the UI.
+   *
+   * Sources, one per section:
+   *  - billing/grace: the Company's own subscription columns + the SAME grace
+   *    predicate the customer entitlements use (isPastDueGraceElapsed);
+   *  - usage: live counts (assets/operators/members), 30-day job volume, and a
+   *    last-active signal from the tenant's own session history (user_sessions);
+   *  - flags: past-due / in-grace / trial-expiring, plus this company's
+   *    feature-flag overrides;
+   *  - recentActivity: the most recent admin_audit_logs scoped to this org (the
+   *    same rows the Audit Log page reads), so a support agent sees what staff
+   *    last did here.
+   */
+  async getCockpit(id: string) {
+    const company = await this.requireCompany(id);
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+    const [assets, operators, users, recentJobs, lastSession, overrides, recentActivity] = await Promise.all([
+      this.adminPrisma.asset.count({ where: { companyId: id, archivedAt: null } }),
+      this.adminPrisma.operator.count({ where: { companyId: id, archivedAt: null } }),
+      this.adminPrisma.companyMembership.count({ where: { companyId: id, archivedAt: null } }),
+      this.adminPrisma.job.count({ where: { companyId: id, createdAt: { gte: thirtyDaysAgo } } }),
+      this.adminPrisma.userSession.aggregate({ where: { companyId: id }, _max: { lastSeenAt: true } }),
+      this.adminPrisma.featureFlagOverride.findMany({
+        where: { companyId: id },
+        select: { enabled: true, flag: { select: { key: true, name: true } } },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      this.adminPrisma.adminAuditLog.findMany({
+        where: { organisationId: id },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        select: { id: true, action: true, entityType: true, adminUserId: true, reason: true, createdAt: true },
+      }),
+    ]);
+
+    const trialActive = !!company.trialEndsAt && company.trialEndsAt > now;
+    const pastDue = company.subscriptionStatus === 'PAST_DUE';
+    const inGrace = pastDue && !!company.gracePeriodEndsAt && company.gracePeriodEndsAt > now;
+    const graceElapsed = isPastDueGraceElapsed(
+      { subscriptionStatus: company.subscriptionStatus, paymentFailureCount: company.paymentFailureCount, gracePeriodEndsAt: company.gracePeriodEndsAt },
+      now,
+    );
+
+    return {
+      id: company.id,
+      name: company.name,
+      jurisdiction: company.jurisdiction,
+      createdAt: company.createdAt,
+      suspendedAt: company.suspendedAt,
+      suspensionReason: company.suspensionReason,
+      archivedAt: company.archivedAt,
+      billing: {
+        subscriptionStatus: company.subscriptionStatus,
+        planPriceId: company.planPriceId,
+        trialEndsAt: company.trialEndsAt,
+        trialActive,
+        assetQuantity: company.assetQuantity,
+        paymentFailureCount: company.paymentFailureCount,
+        gracePeriodEndsAt: company.gracePeriodEndsAt,
+        nextPaymentAttemptAt: company.nextPaymentAttemptAt,
+        contractEndsAt: company.contractEndsAt,
+      },
+      usage: {
+        assets,
+        operators,
+        users,
+        recentJobs30d: recentJobs,
+        lastActiveAt: lastSession._max.lastSeenAt,
+      },
+      flags: {
+        pastDue,
+        inGrace,
+        graceElapsed,
+        trialExpiringSoon: trialActive && !!company.trialEndsAt && company.trialEndsAt <= threeDaysFromNow,
+        featureFlagOverrides: overrides.map((o) => ({ key: o.flag.key, name: o.flag.name, enabled: o.enabled })),
+      },
+      recentActivity,
     };
   }
 
