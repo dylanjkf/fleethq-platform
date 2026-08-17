@@ -70,7 +70,8 @@ Work top to bottom. Each phase gates the next. Times are rough.
    + `BOOTSTRAP_STAFF_ADMIN_USERNAME/PASSWORD/EMAIL/FULL_NAME` in the deployed
    environment and redeploy — `prod-bootstrap` creates the account on boot
    (created `mustResetPassword`, so the temporary password must be changed on
-   first sign-in; MFA is optional unless you set `ENFORCE_STAFF_ADMIN_MFA=true`).
+   first sign-in; staff MFA is required by default — the console blocks the
+   account until it enrols, and this cannot be disabled in production).
    **Do not run `npm run admin:bootstrap` against
    production** — that `ts-node` script isn't in the runtime image and can't run
    in the container; it's for local dev. Remove the flag + password from the env
