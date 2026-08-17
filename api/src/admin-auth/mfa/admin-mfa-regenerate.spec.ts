@@ -2,7 +2,7 @@
  * Round 4 — AdminMfaService.regenerateBackupCodes (mocked, no DB).
  * The DB-backed path is exercised by test/mfa.e2e-spec.ts in api-ci.
  */
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import * as totp from '../../auth/mfa/totp';
 import { AdminMfaService } from './admin-mfa.service';
 
@@ -26,10 +26,10 @@ describe('AdminMfaService.regenerateBackupCodes', () => {
     await expect(service.regenerateBackupCodes('a1', '123456')).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('refuses on an incorrect current code', async () => {
+  it('refuses on an incorrect current code (400 bad input, not a 401 session error)', async () => {
     jest.spyOn(totp, 'verifyTotp').mockReturnValue(false);
     const { service } = makeService({ mfaSecret: 'S', mfaEnabledAt: new Date(), mfaBackupCodes: [] });
-    await expect(service.regenerateBackupCodes('a1', '000000')).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(service.regenerateBackupCodes('a1', '000000')).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('replaces the backup codes and audits on a valid current code', async () => {

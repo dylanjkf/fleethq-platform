@@ -114,6 +114,44 @@ describe('Admin Auth', () => {
     expect(verifyRes.body.status).toBe('authenticated');
   });
 
+  it('rejects a wrong enrolment code with 400 (not 401) and keeps the session usable', async () => {
+    // Regression: a wrong code at MFA enrolment used to return 401, which made
+    // the admin SPA's interceptor wipe the token and eject the admin back to the
+    // username/password login mid-setup. It must be a 400 (bad input) and leave
+    // the authenticated session intact so they can simply retry.
+    const admin = await createTestAdmin([]);
+    const loginRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    const token = loginRes.body.accessToken as string;
+
+    const setupRes = await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/setup')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    const secret = setupRes.body.secret as string;
+
+    // Wrong 6-digit code → 400, never 401.
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/enable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: '000000' })
+      .expect(400);
+
+    // The session token still works — it was NOT revoked by the failed attempt.
+    await request(app.getHttpServer()).get('/v1/admin/auth/me').set('Authorization', `Bearer ${token}`).expect(200);
+
+    // And a correct code — even entered grouped, with a space — now enrols.
+    const code = totp(secret);
+    const spaced = `${code.slice(0, 3)} ${code.slice(3)}`;
+    await request(app.getHttpServer())
+      .post('/v1/admin/auth/mfa/enable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: spaced })
+      .expect(200);
+  });
+
   it('lists sessions, revokes one, and rejects a revoked session on the next request', async () => {
     const admin = await createTestAdmin([]);
     const first = await request(app.getHttpServer())
@@ -181,11 +219,14 @@ describe('Admin Auth', () => {
       .send({ code: totp(secret) })
       .expect(200);
 
+    // A wrong code from an AUTHENTICATED admin is bad input → 400, never 401.
+    // A 401 here would make the SPA's interceptor treat the still-valid session
+    // as dead and eject the admin to the login screen.
     await request(app.getHttpServer())
       .post('/v1/admin/auth/mfa/disable')
       .set('Authorization', `Bearer ${token}`)
       .send({ code: 'wrong-code' })
-      .expect(401);
+      .expect(400);
 
     await request(app.getHttpServer())
       .post('/v1/admin/auth/mfa/disable')
