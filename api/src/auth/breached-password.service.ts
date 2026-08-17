@@ -4,8 +4,8 @@ import { safeFetch } from '../common/net/safe-fetch';
 
 /**
  * Breached-password screening (security audit M1). The composition rule
- * (IsStrongPassword: ≥8 chars, 2 of 4 classes, small denylist) still lets
- * through passwords near the top of every real breach corpus — `Password1!`,
+ * (IsStrongPassword: ≥8 chars, all 4 character classes, small denylist) still
+ * lets through passwords near the top of every real breach corpus — `Password1!`,
  * `Summer2025!`. This adds a Have I Been Pwned k-anonymity check as a second
  * layer, applied wherever a user *chooses* a password (signup, self-service
  * change, reset).

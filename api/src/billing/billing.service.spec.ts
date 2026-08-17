@@ -297,3 +297,121 @@ describe('BillingService — chargeback webhook (audit remediation)', () => {
     expect(billingMail.sendDisputeCreated).toHaveBeenCalledWith('ada@example.com', 'Ada', 'Acme Couriers', expect.any(String), null);
   });
 });
+
+/**
+ * A5 — direct coverage for the two guards that close the checkout-quantity-bypass
+ * vulnerability: createCheckoutSession's ALREADY_SUBSCRIBED rejection, and
+ * syncSubscription's asset-quantity floor + CAP_BLOCKED audit. The suite's other
+ * company fixture never sets subscriptionStatus, so neither branch was exercised
+ * before this block.
+ */
+describe('BillingService — checkout-quantity-bypass guards (A5)', () => {
+  const PER_ASSET_PRICE = 'price_per_asset';
+
+  function build(company: Record<string, unknown>) {
+    const tx = {
+      company: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue(company),
+        update: jest.fn().mockResolvedValue(company),
+      },
+      asset: { count: jest.fn() },
+      billingAuditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const prisma = { withTenant: jest.fn((_c: string, fn: (tx: unknown) => unknown) => fn(tx)) };
+    const config = {
+      get: (key: string) =>
+        key === 'STRIPE_SECRET_KEY'
+          ? 'sk_test_fake'
+          : key === 'STRIPE_PRICE_PER_ASSET'
+            ? PER_ASSET_PRICE
+            : key === 'STRIPE_PRICE_STARTER'
+              ? 'price_1'
+              : undefined,
+    };
+    const service = new BillingService(prisma as never, {} as never, config as never, {} as never, {} as never, {} as never);
+    const stripe = {
+      customers: { create: jest.fn().mockResolvedValue({ id: 'cus_new' }) },
+      checkout: { sessions: { create: jest.fn().mockResolvedValue({ url: 'https://checkout.example/cs' }) } },
+    };
+    (service as unknown as { stripeClient: unknown }).stripeClient = stripe;
+    return { service, tx, stripe };
+  }
+
+  it('createCheckoutSession rejects ALREADY_SUBSCRIBED for a company with a live subscription (no Stripe session created)', async () => {
+    const { service, stripe } = build({
+      id: 'company-1',
+      name: 'Acme',
+      abn: null,
+      stripeCustomerId: 'cus_x',
+      stripeSubscriptionId: 'sub_live',
+      subscriptionStatus: 'ACTIVE',
+    });
+
+    await expect(
+      service.createCheckoutSession('company-1', 'price_1', 'https://app/success', 'https://app/cancel'),
+    ).rejects.toMatchObject({ response: { code: 'ALREADY_SUBSCRIBED' } });
+    // It bails BEFORE ever starting a Stripe checkout — the re-checkout can't reset the quantity.
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it('createCheckoutSession still proceeds for a company with NO live subscription', async () => {
+    const { service, stripe } = build({
+      id: 'company-1',
+      name: 'Acme',
+      abn: null,
+      stripeCustomerId: 'cus_x',
+      stripeSubscriptionId: null,
+      subscriptionStatus: 'NONE',
+    });
+
+    await service.createCheckoutSession('company-1', 'price_1', 'https://app/success', 'https://app/cancel');
+    expect(stripe.checkout.sessions.create).toHaveBeenCalled();
+  });
+
+  it('syncSubscription floors the cap to live usage and records a CAP_BLOCKED audit row when Stripe reports a quantity below usage', async () => {
+    const { service, tx } = build({ lastStripeEventAt: null, subscriptionStartedAt: new Date('2026-01-01') });
+    tx.asset.count.mockResolvedValue(50); // 50 live assets
+
+    const subscription = {
+      id: 'sub_1',
+      status: 'active',
+      items: { data: [{ price: { id: PER_ASSET_PRICE }, quantity: 3 }] }, // Stripe reports only 3
+    };
+    await (
+      service as unknown as { syncSubscription: (c: string, cust: string, sub: unknown, at: Date) => Promise<void> }
+    ).syncSubscription('company-1', 'cus_x', subscription, new Date('2026-06-01'));
+
+    // The cap is held at live usage (50), NOT the reported 3.
+    expect(tx.company.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ assetQuantity: 50 }) }),
+    );
+    // ...and the divergence is flagged for staff.
+    expect(tx.billingAuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: 'CAP_BLOCKED',
+          detail: expect.objectContaining({ stripeQuantity: 3, liveAssets: 50, heldCapAt: 50 }),
+        }),
+      }),
+    );
+  });
+
+  it('syncSubscription does NOT floor or audit when the Stripe quantity is at/above live usage', async () => {
+    const { service, tx } = build({ lastStripeEventAt: null, subscriptionStartedAt: new Date('2026-01-01') });
+    tx.asset.count.mockResolvedValue(2);
+
+    const subscription = {
+      id: 'sub_1',
+      status: 'active',
+      items: { data: [{ price: { id: PER_ASSET_PRICE }, quantity: 10 }] },
+    };
+    await (
+      service as unknown as { syncSubscription: (c: string, cust: string, sub: unknown, at: Date) => Promise<void> }
+    ).syncSubscription('company-1', 'cus_x', subscription, new Date('2026-06-01'));
+
+    expect(tx.company.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ assetQuantity: 10 }) }),
+    );
+    expect(tx.billingAuditLog.create).not.toHaveBeenCalled();
+  });
+});

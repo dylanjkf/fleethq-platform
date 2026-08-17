@@ -74,7 +74,7 @@ export class AuthSessionsService {
     companyId: string,
     membershipId: string,
     tokenVersion: number,
-    opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string } = {},
+    opts: { ip?: string | null; userAgent?: string | null; rememberMe?: boolean; expiresIn?: string; deviceFingerprint?: string | null } = {},
   ): Promise<string> {
     await this.enforceSessionCap(userId);
     const sessionLifetimeMs = opts.rememberMe ? REMEMBER_ME_SESSION_EXPIRES_IN_MS : SESSION_EXPIRES_IN_MS;
@@ -85,6 +85,10 @@ export class AuthSessionsService {
         membershipId,
         ipAddress: opts.ip ?? 'unknown',
         userAgent: opts.userAgent ?? null,
+        // Hashed, never stored raw (see hashFingerprint) — lets a later login from
+        // the same device be recognised as not-new (A3) without holding a
+        // client-supplied identifier verbatim.
+        deviceFingerprint: opts.deviceFingerprint ? this.hashFingerprint(opts.deviceFingerprint) : null,
         expiresAt: new Date(Date.now() + sessionLifetimeMs),
       },
     });
@@ -199,6 +203,21 @@ export class AuthSessionsService {
     if (!ip || ip === 'unknown') return false;
     const existing = await this.systemPrisma.userSession.findFirst({
       where: { userId, ipAddress: ip, userAgent: userAgent ?? null },
+      select: { id: true },
+    });
+    return !!existing;
+  }
+
+  /**
+   * A3: have we ever recorded a session for this user from this device
+   * fingerprint before? Used only to decide whether the new-device-login alert
+   * is worth sending — a device seen before is not "new", even on a rotating IP.
+   * Deliberately independent of `isDeviceTrusted`: a seen device is NOT trusted
+   * for MFA-skip (that would be unsafe on a shared tablet), it just isn't news.
+   */
+  async hasSeenDeviceFingerprint(userId: string, deviceFingerprint: string): Promise<boolean> {
+    const existing = await this.systemPrisma.userSession.findFirst({
+      where: { userId, deviceFingerprint: this.hashFingerprint(deviceFingerprint) },
       select: { id: true },
     });
     return !!existing;

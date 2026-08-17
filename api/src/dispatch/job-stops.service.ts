@@ -339,7 +339,17 @@ export class JobStopsService {
   }
 
   async completeStop(companyId: string, actorUserId: string, jobId: string, stopId: string, dto: CompleteStopDto) {
-    return this.prisma.withTenant(companyId, async (tx) => {
+    // SERIALIZABLE: this is a check-then-write on stop.outcome. Under READ
+    // COMMITTED (plain withTenant) two concurrent completions of the same stop —
+    // a driver double-tap, or an offline outbox replay racing a live retry —
+    // could both read outcome=PENDING and each run the full completion body,
+    // producing duplicate stop_completed / pod_unconfirmed_override timeline
+    // events and duplicate failed-delivery notifications. Under SERIALIZABLE,
+    // Postgres SSI aborts one and withTenantSerializable re-runs it, where the
+    // idempotency guard below now sees the non-PENDING outcome and returns the
+    // replayed no-op. Same fix pattern as verifyLoad; retry is bounded inside
+    // withTenantSerializable (SQLSTATE 40001 → P2034).
+    return this.prisma.withTenantSerializable(companyId, async (tx) => {
       const job = await this.support.requireJob(tx, companyId, jobId);
       const stop = await tx.jobStop.findUnique({ where: { id: stopId } });
       if (!stop || stop.companyId !== companyId || stop.jobId !== jobId) {
