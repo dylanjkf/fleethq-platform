@@ -57,6 +57,7 @@ import { PERMISSION_CATALOG } from '../common/permissions/permission-catalog';
 import { provisionCompany } from '../companies/provision-company';
 import { isStrongPassword } from '../common/validators/is-strong-password.validator';
 import { reconcileAdminPermissions, SUPER_ADMIN_ROLE_NAME } from './admin-permissions-reconcile';
+import { seedFeatureFlags } from './bootstrap-feature-flags';
 import { ADMIN_AUDIT_ACTIONS } from '../admin-audit/admin-audit.service';
 
 /**
@@ -299,6 +300,7 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
   try {
     await seedReferenceData(prisma);
+    await seedFeatureFlags(prisma);
     // Admin-platform permission catalog + Super Admin / Support system roles —
     // idempotent, and a prerequisite for maybeCreateStaffAdmin below.
     const adminReconcile = await reconcileAdminPermissions(prisma);

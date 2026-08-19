@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { RequireFeature } from '../common/decorators/require-feature.decorator';
+import { RequireFeatureFlag } from '../common/decorators/require-feature-flag.decorator';
 import { PERMISSIONS } from '../common/permissions/permission-catalog';
 import { AuthenticatedRequestUser } from '../auth/jwt-payload.interface';
 import { WarehouseService } from './warehouse.service';
@@ -29,13 +30,25 @@ import { CopyMachineScheduleDto, CreateMachinePlanDto, UpdateMachinePlanDto } fr
  *    company paid for the add-on at all"). Without it the request is rejected
  *    with 402 `FEATURE_NOT_IN_PLAN`, so hiding the module in the client is no
  *    longer the only thing standing between a Free plan and the add-on.
+ *  - **Admin rollout flag** — the `warehouse` feature flag, enforced server-side
+ *    by FeatureFlagGuard via the controller-level `@RequireFeatureFlag` below
+ *    ("has FleetHQ staff turned this module on for this company"). This is what
+ *    hides the still-maturing Warehouse module by default: `prod-bootstrap`
+ *    seeds the flag `globalEnabled = false`, so every route returns 403
+ *    `FEATURE_DISABLED` until an admin flips the global flag on (or sets a
+ *    per-company override) from the admin console — no deploy needed, and no
+ *    data is touched. The flag is deliberately separate from the billing
+ *    entitlement above, so it works regardless of whether `BILLING_ENFORCED`
+ *    is on. (Feature flags fail OPEN when no row exists — so in tests, which
+ *    don't seed the flag, the module keeps working exactly as before.)
  *
  * The paywall is inert until `BILLING_ENFORCED=true` — see FeatureGuard.
- * Existing warehouse data is never deleted when a plan lapses; it simply
- * becomes unreachable until the company upgrades again.
+ * Existing warehouse data is never deleted when a plan lapses or the flag is
+ * turned off; it simply becomes unreachable until the company is re-enabled.
  */
 @Controller({ path: 'warehouse', version: '1' })
 @RequireFeature('warehouse')
+@RequireFeatureFlag('warehouse')
 export class WarehouseController {
   constructor(private readonly warehouse: WarehouseService) {}
 
