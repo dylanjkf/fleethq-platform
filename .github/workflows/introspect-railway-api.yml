@@ -33,7 +33,7 @@ jobs:
           set +e
           echo "railway whoami:"; railway whoami 2>&1 | sed 's/^/  /'
           echo; echo "railway status:"; railway status 2>&1 | sed 's/^/  /'
-          echo; echo "Fetching variables for service '${SVC}populate'..."
+          echo; echo "Fetching variables for service '${SVC}'..."
           railway variables --service "$SVC" --json > /tmp/vars.json 2>/tmp/verr
           if [ ! -s /tmp/vars.json ]; then
             echo "  --json failed ($(cat /tmp/verr)); trying --kv (redacting)"
@@ -57,6 +57,71 @@ jobs:
             fi
           done
 
+      - name: Boot-config health (secret-safe — flags what would fail env.validation)
+        run: |
+          set +e
+          echo "Reports why the container may be failing to boot after a variable change."
+          echo "Values of secrets are NEVER printed — only length/prefix/format. These logs are public."
+          echo
+          problems=0
+          val() { jq -r --arg k "$1" '.[$k] // empty' /tmp/vars.json; }
+          # Detect a stray trailing/leading space or an embedded newline — the classic
+          # copy-paste breakage that silently invalidates a key or URL.
+          whitespace_note() {
+            local v="$1"
+            case "$v" in
+              *$'\n'*) echo "  ⚠ contains a NEWLINE — re-paste without the line break";;
+            esac
+            [ "$v" != "$(printf '%s' "$v" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')" ] && echo "  ⚠ has leading/trailing whitespace — trim it"
+          }
+
+          echo '=== Required (missing/malformed => app refuses to boot) ==='
+          for k in DATABASE_URL APP_DATABASE_URL AUTH_DATABASE_URL ADMIN_DATABASE_URL; do
+            v=$(val "$k"); if [ -z "$v" ]; then echo "  ✗ $k is MISSING"; problems=$((problems+1)); else echo "  ✓ $k present"; whitespace_note "$v"; fi
+          done
+
+          appb=$(val APP_BASE_URL)
+          if [ -z "$appb" ]; then echo "  ✗ APP_BASE_URL is MISSING (required in production)"; problems=$((problems+1));
+          elif ! printf '%s' "$appb" | grep -Eq '^https?://.+'; then echo "  ✗ APP_BASE_URL is not an absolute http(s) URL: '$appb'"; problems=$((problems+1));
+          else echo "  ✓ APP_BASE_URL = $appb"; whitespace_note "$appb"; fi
+
+          js=$(val JWT_SECRET); as=$(val ADMIN_JWT_SECRET)
+          if [ -z "$js" ]; then echo "  ✗ JWT_SECRET MISSING"; problems=$((problems+1));
+          elif [ "${#js}" -lt 32 ]; then echo "  ✗ JWT_SECRET too short (${#js} chars, need >=32)"; problems=$((problems+1));
+          else echo "  ✓ JWT_SECRET length ${#js}"; fi
+          if [ -z "$as" ]; then echo "  ✗ ADMIN_JWT_SECRET MISSING"; problems=$((problems+1));
+          elif [ "${#as}" -lt 32 ]; then echo "  ✗ ADMIN_JWT_SECRET too short (${#as} chars, need >=32)"; problems=$((problems+1));
+          else echo "  ✓ ADMIN_JWT_SECRET length ${#as}"; fi
+          [ -n "$js" ] && [ "$js" = "$as" ] && { echo "  ✗ JWT_SECRET and ADMIN_JWT_SECRET are IDENTICAL (must differ)"; problems=$((problems+1)); }
+
+          ik=$(val INTEGRATION_CREDENTIAL_KEY)
+          if [ -z "$ik" ]; then echo "  ✗ INTEGRATION_CREDENTIAL_KEY MISSING"; problems=$((problems+1));
+          else
+            bytes=$(printf '%s' "$ik" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+            if printf '%s' "$ik" | grep -Eiq '^[0-9a-f]{64}$'; then bytes=32; fi
+            if [ "$bytes" = "32" ]; then echo "  ✓ INTEGRATION_CREDENTIAL_KEY decodes to 32 bytes"; else echo "  ✗ INTEGRATION_CREDENTIAL_KEY does NOT decode to 32 bytes (got ${bytes})"; problems=$((problems+1)); fi
+            whitespace_note "$ik"
+          fi
+
+          echo; echo '=== Stripe / signup (not boot-critical, but checked for format) ==='
+          sk=$(val STRIPE_SECRET_KEY)
+          if [ -z "$sk" ]; then echo "  – STRIPE_SECRET_KEY unset (signup stays disabled)"; else
+            case "$sk" in sk_test_*) echo "  ✓ STRIPE_SECRET_KEY is a TEST secret key (len ${#sk})";; sk_live_*) echo "  ✓ STRIPE_SECRET_KEY is a LIVE secret key (len ${#sk})";; rk_*) echo "  ⚠ STRIPE_SECRET_KEY is a RESTRICTED key (rk_) — may lack Checkout perms";; pk_*) echo "  ✗ STRIPE_SECRET_KEY is a PUBLISHABLE key (pk_) — wrong key, use the SECRET key";; *) echo "  ⚠ STRIPE_SECRET_KEY has an unexpected prefix (len ${#sk})";; esac
+            whitespace_note "$sk"
+          fi
+          pp=$(val STRIPE_PRICE_PER_ASSET)
+          if [ -z "$pp" ]; then echo "  – STRIPE_PRICE_PER_ASSET unset (signup stays disabled)"; else
+            case "$pp" in price_*) echo "  ✓ STRIPE_PRICE_PER_ASSET = $pp";; prod_*) echo "  ✗ STRIPE_PRICE_PER_ASSET is a PRODUCT id (prod_) — use the PRICE id (price_...)";; *) echo "  ⚠ STRIPE_PRICE_PER_ASSET unexpected: $pp";; esac
+            whitespace_note "$pp"
+          fi
+          ws=$(val STRIPE_WEBHOOK_SECRET)
+          if [ -z "$ws" ]; then echo "  – STRIPE_WEBHOOK_SECRET unset (provisioning webhook won't verify)"; else
+            case "$ws" in whsec_*) echo "  ✓ STRIPE_WEBHOOK_SECRET present (whsec_, len ${#ws})";; *) echo "  ⚠ STRIPE_WEBHOOK_SECRET unexpected prefix (len ${#ws})";; esac
+            whitespace_note "$ws"
+          fi
+
+          echo; if [ "$problems" -gt 0 ]; then echo "RESULT: $problems boot-critical problem(s) found above — fix those variables in Railway and redeploy."; else echo "RESULT: no boot-critical variable problems detected. The failure is likely elsewhere (migration/healthcheck) — check the live probe below."; fi
+
       - name: Probe the discovered API URL
         env:
           PW: ${{ github.event.inputs.password }}
@@ -72,6 +137,9 @@ jobs:
           echo; echo "GET $API/health/ready:"
           curl -sS -m 20 -o /tmp/r.txt -w '  HTTP %{http_code}\n' "$API/health/ready" 2>/tmp/e || echo "  unreachable: $(cat /tmp/e)"
           head -c 300 /tmp/r.txt 2>/dev/null | sed 's/^/  /'; echo
+          echo; echo "GET $API/v1/signup/config (is self-serve signup enabled?):"
+          curl -sS -m 20 -o /tmp/sc.txt -w '  HTTP %{http_code}\n' "$API/v1/signup/config" 2>/tmp/e3 || echo "  unreachable: $(cat /tmp/e3)"
+          head -c 400 /tmp/sc.txt 2>/dev/null | sed 's/^/  /'; echo
           echo; echo "POST $API/v1/auth/login (admin@titan):"
           BODY=$(jq -nc --arg u 'admin@titan' --arg p "$PW" '{username:$u,password:$p}')
           code=$(curl -sS -m 20 -o /tmp/l.txt -w '%{http_code}' -X POST "$API/v1/auth/login" -H 'content-type: application/json' --data "$BODY" 2>/tmp/e2 || echo 000)
