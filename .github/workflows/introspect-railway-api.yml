@@ -122,6 +122,17 @@ jobs:
 
           echo; if [ "$problems" -gt 0 ]; then echo "RESULT: $problems boot-critical problem(s) found above — fix those variables in Railway and redeploy."; else echo "RESULT: no boot-critical variable problems detected. The failure is likely elsewhere (migration/healthcheck) — check the live probe below."; fi
 
+      - name: Capture recent deployment logs (best-effort — reveals a boot crash)
+        run: |
+          set +e
+          echo "Attempting to fetch the latest deployment's runtime logs for service '$SVC'."
+          echo "If the newest deployment is the FAILED one, its crash output shows here."
+          echo '--- railway logs (deploy) ---'
+          timeout 30 railway logs --service "$SVC" 2>&1 | tail -120 | sed 's/^/  /'
+          echo '--- railway logs --build (last build) ---'
+          timeout 30 railway logs --service "$SVC" --build 2>&1 | tail -60 | sed 's/^/  /'
+          echo '(end of logs)'
+
       - name: Probe the discovered API URL
         env:
           PW: ${{ github.event.inputs.password }}
