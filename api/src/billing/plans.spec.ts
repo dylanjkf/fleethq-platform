@@ -1,5 +1,5 @@
 import { SubscriptionStatus } from '@prisma/client';
-import { FREE_TIER, isSubscriptionActive, perAssetTier, resolvePlanTier } from './plans';
+import { FREE_TIER, isSubscriptionActive, flatMonthlyTier, resolvePlanTier } from './plans';
 
 describe('resolvePlanTier', () => {
   const priceIds = { STRIPE_PRICE_STARTER: 'price_s', STRIPE_PRICE_PRO: 'price_p', STRIPE_PRICE_ENTERPRISE: undefined };
@@ -35,16 +35,13 @@ describe('isSubscriptionActive', () => {
   });
 });
 
-describe('perAssetTier', () => {
-  it('sets the asset limit to the purchased quantity, every feature on, operators uncapped', () => {
-    const tier = perAssetTier(10);
-    expect(tier.key).toBe('per_asset');
-    expect(tier.limits.maxAssets).toBe(10);
+describe('flatMonthlyTier', () => {
+  it('is unlimited on assets and operators (flat pricing does not cap by fleet size), every feature on', () => {
+    const tier = flatMonthlyTier();
+    expect(tier.key).toBe('flat');
+    // Asset count is purely operational now — no billing-driven cap.
+    expect(tier.limits.maxAssets).toBeNull();
     expect(tier.limits.maxOperators).toBeNull();
     expect(tier.features).toEqual(expect.arrayContaining(['core', 'forms', 'intelligence', 'warehouse']));
-  });
-
-  it('fails closed: a null quantity caps assets at 0, never unlimited', () => {
-    expect(perAssetTier(null).limits.maxAssets).toBe(0);
   });
 });

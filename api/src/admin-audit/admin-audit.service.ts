@@ -37,7 +37,6 @@ export const ADMIN_AUDIT_ACTIONS = {
   BILLING_PAYMENT_RETRIED: 'billing.payment_retried',
   BILLING_SUBSCRIPTION_CANCELED: 'billing.subscription_canceled',
   BILLING_SUBSCRIPTION_REINSTATED: 'billing.subscription_reinstated',
-  BILLING_QUANTITY_CHANGED: 'billing.quantity_changed',
   /** `cancel_for_cause` — staff release of a company from the 12-month minimum term (Part 2). */
   BILLING_CONTRACT_RELEASED: 'billing.contract_released',
   CUSTOMER_USER_VERIFICATION_RESENT: 'customer_users.verification_resent',

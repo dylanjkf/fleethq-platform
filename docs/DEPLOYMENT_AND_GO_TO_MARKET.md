@@ -127,7 +127,7 @@ the corresponding feature is real.
 |---|---|---|
 | **Outbound email** (verify/reset/invite, digests) | Verify a From address with your email provider (e.g. **AWS SES**, moved out of its sending sandbox) | `EMAIL_PROVIDER`, `EMAIL_FROM_ADDRESS`, `AWS_REGION` (+ the provider's credentials) |
 | **Attachment storage in S3** (POD/fault photos) | Create a bucket; set it before real photo volume (inline-in-Postgres is fine for a pilot) | `ATTACHMENTS_BUCKET` (+ AWS credentials) |
-| **Billing (Stripe)** | Create a Stripe account, create live-mode Prices, add the keys | `STRIPE_*`, `BILLING_ENFORCED=true` once tested, the four `STRIPE_PRICE_*` ids (`STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_ENTERPRISE`, `STRIPE_PRICE_PER_ASSET`) |
+| **Billing (Stripe)** | Create a Stripe account, create the live-mode flat monthly Price, add the keys | `STRIPE_*`, `BILLING_ENFORCED=true` once tested, `STRIPE_PRICE_MONTHLY` (the flat $29/month price; the legacy `STRIPE_PRICE_STARTER`/`_PRO`/`_ENTERPRISE` tier ids remain optional/backward-compatible) |
 | **Error tracking (Sentry)** | Create a Sentry project | `SENTRY_DSN` |
 | **Web push** | Generate VAPID keys (`npx web-push generate-vapid-keys`) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` |
 | **Social sign-in (SSO)** | Register an OAuth/OIDC app with Google and/or Microsoft; the server verifies the returned ID token by audience, so only the client id (and Microsoft tenant) is needed — no client secret or server-side redirect URI | `GOOGLE_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_TENANT_ID` (each optional; unset simply hides that provider on the login page) |

@@ -9,7 +9,6 @@ import { ADMIN_PERMISSIONS } from '../common/permissions/admin-permission-catalo
 import { AdminBillingService } from './admin-billing.service';
 import { ListInvoicesQueryDto } from './dto/list-invoices-query.dto';
 import { AuditTrailQueryDto } from './dto/audit-trail-query.dto';
-import { ChangeQuantityDto } from './dto/change-quantity.dto';
 import { RefundDto } from './dto/refund.dto';
 import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { ManualInvoiceDto } from './dto/manual-invoice.dto';
@@ -48,21 +47,6 @@ export class AdminBillingController {
     return this.billing.getAuditTrail(companyId, query);
   }
 
-  /** Staff-side manual change of the paid asset quantity (the hard cap). */
-  @AdminGuarded()
-  @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)
-  @Throttle(ADMIN_SENSITIVE_ACTION_THROTTLE)
-  @Post('quantity')
-  @HttpCode(HttpStatus.OK)
-  changeQuantity(
-    @Param('companyId', ParseUUIDPipe) companyId: string,
-    @Body() dto: ChangeQuantityDto,
-    @CurrentAdmin() admin: AuthenticatedAdminRequestUser,
-    @Ip() ip: string,
-    @Req() req: Request,
-  ) {
-    return this.billing.changeQuantity(companyId, dto, { adminUserId: admin.adminUserId, ip, userAgent: req.get('user-agent') });
-  }
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.BILLING_MANAGE)

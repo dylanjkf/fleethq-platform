@@ -247,7 +247,6 @@ export class BillingService implements OnModuleInit {
           stripeCustomerId: true,
           stripeSubscriptionId: true,
           trialEndsAt: true,
-          assetQuantity: true,
           paymentFailureCount: true,
           lastPaymentFailedAt: true,
           nextPaymentAttemptAt: true,
@@ -255,8 +254,6 @@ export class BillingService implements OnModuleInit {
         },
       }),
     );
-    const perAssetPriceId = this.perAssetPriceId();
-    const onPerAsset = !!perAssetPriceId && company.planPriceId === perAssetPriceId;
     // The non-payment banner counts down to this server-stored deadline (the
     // single source of truth), so a page refresh can't reset the count. Present
     // whenever a payment has failed and not yet recovered; null once recovered.
@@ -278,11 +275,6 @@ export class BillingService implements OnModuleInit {
       // failure is outstanding.
       gracePeriodEndsAt: graceEndsAt ? graceEndsAt.toISOString() : null,
       graceDaysRemaining,
-      // Per-asset billing: whether the company is on the per-asset plan and how
-      // many asset slots it currently pays for (the hard cap). Null quantity when
-      // not on the per-asset plan.
-      onPerAssetPlan: onPerAsset,
-      assetQuantity: onPerAsset ? company.assetQuantity : null,
     };
   }
 
@@ -293,28 +285,28 @@ export class BillingService implements OnModuleInit {
    * "contact us" rather than a dead Subscribe button.
    */
   async listPlans() {
-    const perAssetPriceId = this.perAssetPriceId() ?? null;
+    const flatPriceId = this.flatPriceId() ?? null;
     const settings = await this.getBillingSettings();
-    // The per-asset plan is the headline product under the per-asset model: one
-    // plan, priced per active asset, cap = purchased quantity. Reported first so
-    // the picker leads with it. `pricePerAssetCents` comes from billing_settings
-    // (one source of truth), not a hardcoded literal.
-    const perAssetPlan = {
-      key: 'per_asset',
-      name: 'Per-asset',
+    // The flat monthly plan is the headline product: one flat price for the whole
+    // account (does not scale with fleet size), every feature on, no asset cap.
+    // Reported first so the picker leads with it. `priceCents` comes from
+    // billing_settings (one source of truth), not a hardcoded literal.
+    const flatPlan = {
+      key: 'flat',
+      name: 'Monthly',
       features: ['core', 'forms', 'intelligence', 'warehouse'] as const,
       limits: { maxOperators: null, maxAssets: null },
-      priceId: perAssetPriceId,
-      purchasable: !!perAssetPriceId && this.isConfigured(),
-      perAsset: true as const,
-      pricePerAssetCents: settings.pricePerAssetCents,
+      priceId: flatPriceId,
+      purchasable: !!flatPriceId && this.isConfigured(),
+      flat: true as const,
+      priceCents: settings.priceCents,
       currency: settings.currency,
       billingInterval: settings.billingInterval,
     };
     return {
       billingConfigured: this.isConfigured(),
       plans: [
-        perAssetPlan,
+        flatPlan,
         // Legacy fixed tiers remain resolvable for any grandfathered tenant, but
         // are only offered in the picker when their price id is configured.
         ...Object.entries(PAID_TIERS)
@@ -327,7 +319,7 @@ export class BillingService implements OnModuleInit {
               limits: tier.limits,
               priceId,
               purchasable: !!priceId && this.isConfigured(),
-              perAsset: false as const,
+              flat: false as const,
             };
           })
           .filter((p) => p.purchasable),
@@ -393,26 +385,31 @@ export class BillingService implements OnModuleInit {
       const priceId = this.config.get<string>(configVar);
       if (priceId) ids.add(priceId);
     }
-    const perAsset = this.perAssetPriceId();
-    if (perAsset) ids.add(perAsset);
+    const flat = this.flatPriceId();
+    if (flat) ids.add(flat);
     return ids;
   }
 
-  /** The Stripe Price id for the per-asset plan ($9 AUD/asset/month), if configured. */
-  private perAssetPriceId(): string | undefined {
-    return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+  /**
+   * The Stripe Price id for the flat monthly plan ($29 AUD/month), if configured.
+   * Reads `STRIPE_PRICE_MONTHLY`, falling back to the legacy `STRIPE_PRICE_PER_ASSET`
+   * env name during the flat-rate transition.
+   */
+  private flatPriceId(): string | undefined {
+    return this.config.get<string>('STRIPE_PRICE_MONTHLY') ?? this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
 
   /**
-   * The single-row per-asset billing config (price_per_asset_cents, currency,
-   * interval, gst_rate, abn). `billing_settings` is global platform config with
-   * no RLS, so it resolves the same on any connection; falls back to the launch
-   * defaults if the row is somehow absent (e.g. a DB restored before the seed).
+   * The single-row billing config (price_cents = the flat monthly price,
+   * currency, interval, gst_rate, abn). `billing_settings` is global platform
+   * config with no RLS, so it resolves the same on any connection; falls back to
+   * the launch defaults if the row is somehow absent (e.g. a DB restored before
+   * the seed).
    */
-  async getBillingSettings(): Promise<{ pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number; abn: string | null }> {
+  async getBillingSettings(): Promise<{ priceCents: number; currency: string; billingInterval: string; gstRate: number; abn: string | null }> {
     const row = await this.prisma.billingSettings.findUnique({ where: { id: 1 } });
     return {
-      pricePerAssetCents: row?.pricePerAssetCents ?? 900,
+      priceCents: row?.priceCents ?? 2900,
       currency: row?.currency ?? 'AUD',
       billingInterval: row?.billingInterval ?? 'month',
       gstRate: row?.gstRate ?? 0.1,
@@ -425,7 +422,6 @@ export class BillingService implements OnModuleInit {
     priceId: string,
     successUrl: string,
     cancelUrl: string,
-    quantity = 1,
   ): Promise<{ url: string }> {
     const stripe = this.getStripe();
     this.assertAppOriginUrl(successUrl, 'successUrl');
@@ -443,14 +439,6 @@ export class BillingService implements OnModuleInit {
       });
     }
 
-    // For the per-asset price the checkout quantity is the number of asset slots
-    // being purchased — the value that becomes the company's hard cap. It must
-    // be a whole number ≥ 1; for a fixed-tier price the quantity is always 1
-    // (one subscription, not N seats), so ignore any client-supplied value there
-    // rather than let it multiply the tier's price.
-    const isPerAsset = priceId === this.perAssetPriceId();
-    const lineQuantity = isPerAsset ? this.assertValidQuantity(quantity) : 1;
-
     const company = await this.prisma.withTenant(companyId, (tx) =>
       tx.company.findUniqueOrThrow({
         where: { id: companyId },
@@ -458,19 +446,15 @@ export class BillingService implements OnModuleInit {
       }),
     );
 
-    // Revenue-integrity guard (security review #… — the checkout-quantity bypass):
-    // an EXISTING subscriber must NOT be able to re-run Checkout to silently
-    // reset their paid quantity. A completed checkout.session.completed for an
-    // existing company routes to syncSubscription, which writes assetQuantity
-    // straight from the Stripe line item — skipping the QUANTITY_BELOW_USAGE
-    // downgrade guard that lives ONLY in changeAssetQuantity. So a company at 50
-    // live assets could re-checkout at quantity 1 and end up with a cap of 1.
-    // Force all post-subscription quantity changes through the guarded path.
+    // Revenue-integrity guard: an EXISTING subscriber must NOT re-run Checkout —
+    // under flat pricing that would open a second, duplicate subscription for the
+    // same account. Payment-method and cancellation changes go through the Stripe
+    // portal instead. (The pricing no longer scales with a quantity, so this is
+    // now purely a duplicate-subscription guard, not a quantity-reset guard.)
     if (company.stripeSubscriptionId && HAS_LIVE_SUBSCRIPTION.has(company.subscriptionStatus)) {
       throw new BadRequestException({
         code: 'ALREADY_SUBSCRIBED',
-        message:
-          'This company already has an active subscription. Change the number of paid asset slots from the billing page (which validates the change against current usage) rather than starting a new checkout.',
+        message: 'This company already has an active subscription. Manage it from the billing page rather than starting a new checkout.',
       });
     }
 
@@ -480,14 +464,10 @@ export class BillingService implements OnModuleInit {
       {
         mode: 'subscription',
         customer: customerId,
-        // Per-asset lets the customer adjust the slot count on Stripe's own
-        // Checkout page (a natural place to pick their fleet size); a fixed tier
-        // is a single non-adjustable line.
-        line_items: [
-          isPerAsset
-            ? { price: priceId, quantity: lineQuantity, adjustable_quantity: { enabled: true, minimum: 1 } }
-            : { price: priceId, quantity: lineQuantity },
-        ],
+        // Flat monthly price: a single non-adjustable line at quantity 1. The
+        // charge is the same regardless of fleet size — quantity never multiplies
+        // the price.
+        line_items: [{ price: priceId, quantity: 1 }],
         success_url: successUrl,
         cancel_url: cancelUrl,
         client_reference_id: company.id,
@@ -500,106 +480,15 @@ export class BillingService implements OnModuleInit {
       },
       // Idempotency key so a double-click or a client timeout-retry reuses the
       // same Checkout Session instead of opening a second, independent one. The
-      // hour bucket lets a genuinely new checkout for the same plan proceed
-      // later while collapsing rapid retries of the same action. Quantity is in
-      // the key so changing the requested slot count opens a fresh session.
-      { idempotencyKey: `checkout:${company.id}:${priceId}:${lineQuantity}:${Math.floor(Date.now() / 3_600_000)}` },
+      // hour bucket lets a genuinely new checkout for the same plan proceed later
+      // while collapsing rapid retries of the same action.
+      { idempotencyKey: `checkout:${company.id}:${priceId}:${Math.floor(Date.now() / 3_600_000)}` },
     );
 
     if (!session.url) {
       throw new BadRequestException({ code: 'CHECKOUT_SESSION_FAILED', message: 'Stripe did not return a checkout URL.' });
     }
     return { url: session.url };
-  }
-
-  /** Validates a per-asset slot count: a whole number in [1, 100000]. Throws a clear 400 otherwise. */
-  private assertValidQuantity(quantity: number): number {
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100_000) {
-      throw new BadRequestException({
-        code: 'INVALID_ASSET_QUANTITY',
-        message: 'The number of asset slots must be a whole number of at least 1.',
-      });
-    }
-    return quantity;
-  }
-
-  /**
-   * Changes the purchased asset-slot count on an existing per-asset
-   * subscription (the customer's "buy more / release" action). Stripe prorates
-   * the change (`create_prorations`): buying more slots mid-cycle is charged
-   * pro-rata immediately; releasing slots credits the unused remainder.
-   *
-   * Downgrade guard (the security/revenue-critical rule): a company can never
-   * set its paid quantity BELOW the assets it currently has live — that would
-   * put it permanently over its own cap. To reduce the count it must first
-   * archive assets. This blocks-new-only model means quantity only drops by an
-   * explicit action that's already valid against current usage; it never strands
-   * data. The webhook (`customer.subscription.updated`) is what writes the new
-   * `assetQuantity` — Stripe stays source of truth — so this method deliberately
-   * does NOT optimistically change the stored cap: an increase only takes effect
-   * once Stripe confirms it (fail-closed), and the guard already ensures a
-   * decrease can't drop below live usage.
-   */
-  async changeAssetQuantity(companyId: string, newQuantity: number, actorUserId?: string, via: 'customer' | 'admin' = 'customer'): Promise<{ quantity: number }> {
-    const quantity = this.assertValidQuantity(newQuantity);
-    const perAssetPriceId = this.perAssetPriceId();
-
-    const { subscriptionId, currentQuantity, liveAssets } = await this.prisma.withTenant(companyId, async (tx) => {
-      const company = await tx.company.findUniqueOrThrow({
-        where: { id: companyId },
-        select: { stripeSubscriptionId: true, planPriceId: true, subscriptionStatus: true, assetQuantity: true },
-      });
-      if (!perAssetPriceId || company.planPriceId !== perAssetPriceId || !isSubscriptionActive(company.subscriptionStatus) || !company.stripeSubscriptionId) {
-        throw new BadRequestException({
-          code: 'NOT_ON_PER_ASSET_PLAN',
-          message: 'This company is not on the per-asset plan. Start a per-asset checkout first.',
-        });
-      }
-      const liveAssets = await tx.asset.count({ where: { archivedAt: null } });
-      return { subscriptionId: company.stripeSubscriptionId, currentQuantity: company.assetQuantity ?? 0, liveAssets };
-    });
-
-    if (quantity < liveAssets) {
-      throw new BadRequestException({
-        code: 'QUANTITY_BELOW_USAGE',
-        message: `You currently have ${liveAssets} active assets. Archive assets down to ${quantity} or fewer before reducing your paid quantity to ${quantity}.`,
-        liveAssets,
-        requested: quantity,
-      });
-    }
-
-    // Update the single subscription item's quantity with proration. Retrieve
-    // the subscription to find the item id (the per-asset subscription has one
-    // recurring line). Idempotency key collapses a double-submit of the same
-    // target quantity within the hour into one Stripe write. Stripe is only
-    // touched here — after the plan/usage validation above — so an invalid
-    // request is rejected without needing Stripe configured.
-    const stripe = this.getStripe();
-    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    const item = subscription.items.data[0];
-    if (!item) {
-      throw new BadRequestException({ code: 'SUBSCRIPTION_ITEM_MISSING', message: 'Could not find the subscription line item to update.' });
-    }
-    await stripe.subscriptions.update(
-      subscriptionId,
-      { items: [{ id: item.id, quantity }], proration_behavior: 'create_prorations' },
-      { idempotencyKey: `qty:${companyId}:${quantity}:${Math.floor(Date.now() / 3_600_000)}` },
-    );
-
-    // Append-only evidence of the change (who, from→to). Written on the tenant
-    // connection since this runs inside an authenticated request, not a webhook.
-    await this.prisma.withTenant(companyId, (tx) =>
-      tx.billingAuditLog.create({
-        data: {
-          companyId,
-          eventType: 'QUANTITY_CHANGED',
-          actorUserId: actorUserId ?? null,
-          detail: { from: currentQuantity, to: quantity, liveAssets, via },
-        },
-      }),
-    );
-
-    return { quantity };
   }
 
   /** The Stripe-hosted portal for managing payment method, viewing invoices, or cancelling. */
@@ -1299,46 +1188,12 @@ export class BillingService implements OnModuleInit {
       const contractFields = startsContract
         ? { subscriptionStartedAt: eventCreatedAt, contractEndsAt: addMonths(eventCreatedAt, CONTRACT_TERM_MONTHS) }
         : {};
-      // Per-asset billing: the purchased quantity (subscription item quantity)
-      // is the company's hard asset cap. Capture it whenever the subscription is
-      // on the per-asset price; clear it (→ null) when it isn't, so switching off
-      // the per-asset plan doesn't leave a stale cap behind. This is THE point
-      // where Stripe's authoritative quantity flows into FleetOS's own cap.
+      // Flat monthly billing: the subscription is a single flat line at
+      // quantity 1, so there is no per-asset quantity to capture and no asset cap
+      // to floor — asset count is purely operational now. We just record which
+      // Stripe price the company is on.
       const item = subscription.items.data[0];
       const priceId = item?.price.id ?? null;
-      const perAssetPriceId = this.perAssetPriceId();
-      const onPerAsset = !!perAssetPriceId && priceId === perAssetPriceId;
-      const incomingQuantity = onPerAsset ? (item?.quantity ?? null) : null;
-
-      // Fail-safe cap floor (defense in depth for the checkout-quantity bypass).
-      // syncSubscription is the ONLY place assetQuantity is written, so clamping
-      // here protects the cap against EVERY side door — a re-run checkout, the
-      // Stripe billing portal, or a manual edit in the Stripe dashboard — not
-      // just the one we block in createCheckoutSession. The guarded
-      // changeAssetQuantity path already refuses to go below live usage, so on
-      // that path this clamp is a no-op; it only bites when a lower quantity
-      // arrives from somewhere that skipped the guard. We never lower the cap
-      // below the number of live (non-archived) assets, and flag the divergence
-      // for staff via a CAP_BLOCKED billing-audit row.
-      let assetQuantity = incomingQuantity;
-      if (onPerAsset && incomingQuantity != null) {
-        const liveAssets = await tx.asset.count({ where: { archivedAt: null } });
-        if (incomingQuantity < liveAssets) {
-          assetQuantity = liveAssets;
-          this.logger.warn(
-            `Stripe reported quantity ${incomingQuantity} for company ${companyId} but ${liveAssets} assets are live; ` +
-              `holding the cap at ${liveAssets}. A quantity change reached Stripe outside the guarded changeAssetQuantity path.`,
-          );
-          await tx.billingAuditLog.create({
-            data: {
-              companyId,
-              eventType: 'CAP_BLOCKED',
-              actorUserId: null,
-              detail: { stripeQuantity: incomingQuantity, liveAssets, heldCapAt: liveAssets, reason: 'sync_below_usage' },
-            },
-          });
-        }
-      }
 
       await tx.company.update({
         where: { id: companyId },
@@ -1347,7 +1202,6 @@ export class BillingService implements OnModuleInit {
           stripeSubscriptionId: subscription.id,
           subscriptionStatus: newStatus,
           planPriceId: priceId,
-          assetQuantity,
           lastStripeEventAt: eventCreatedAt,
           ...contractFields,
         },

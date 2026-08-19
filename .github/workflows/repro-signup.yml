@@ -5,7 +5,7 @@ name: Repro signup
 #   1. Product server-side signup: GET <api>/v1/signup/config -> enabled + reason
 #   2. Marketing site (fleethq.net.au): the actual href of the signup CTA and
 #      what the /signup page is.
-#   3. Whether Stripe + per-asset price are configured on the API service
+#   3. Whether Stripe + flat monthly price are configured on the API service
 #      (presence only, via RAILWAY_TOKEN; values redacted).
 # Nothing is written.
 
@@ -59,11 +59,11 @@ jobs:
           npm install -g @railway/cli >/dev/null 2>&1 || npm install -g @railway/cli
           railway variables --service "$SVC" --json > /tmp/v.json 2>/tmp/e || { echo "railway variables failed: $(cat /tmp/e)"; exit 0; }
           echo '--- signup-relevant config (presence only) ---'
-          for k in APP_BASE_URL STRIPE_PRICE_PER_ASSET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET; do
+          for k in APP_BASE_URL STRIPE_PRICE_MONTHLY STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET; do
             v=$(jq -r --arg k "$k" '.[$k] // empty' /tmp/v.json)
             if [ -n "$v" ]; then
               case "$k" in
-                APP_BASE_URL|STRIPE_PRICE_PER_ASSET) echo "  $k = $v" ;;
+                APP_BASE_URL|STRIPE_PRICE_MONTHLY) echo "  $k = $v" ;;
                 *) echo "  $k = <set, redacted len ${#v}>" ;;
               esac
             else

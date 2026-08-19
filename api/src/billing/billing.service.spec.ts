@@ -299,14 +299,13 @@ describe('BillingService — chargeback webhook (audit remediation)', () => {
 });
 
 /**
- * A5 — direct coverage for the two guards that close the checkout-quantity-bypass
- * vulnerability: createCheckoutSession's ALREADY_SUBSCRIBED rejection, and
- * syncSubscription's asset-quantity floor + CAP_BLOCKED audit. The suite's other
- * company fixture never sets subscriptionStatus, so neither branch was exercised
- * before this block.
+ * Flat monthly pricing: the checkout always buys quantity 1 of the flat price
+ * (the charge never scales with fleet size), an existing subscriber can't open a
+ * duplicate subscription (ALREADY_SUBSCRIBED), and syncSubscription no longer
+ * derives an asset cap from the Stripe quantity (there is no cap anymore).
  */
-describe('BillingService — checkout-quantity-bypass guards (A5)', () => {
-  const PER_ASSET_PRICE = 'price_per_asset';
+describe('BillingService — flat-rate checkout guards & sync', () => {
+  const FLAT_PRICE = 'price_flat_monthly';
 
   function build(company: Record<string, unknown>) {
     const tx = {
@@ -322,8 +321,8 @@ describe('BillingService — checkout-quantity-bypass guards (A5)', () => {
       get: (key: string) =>
         key === 'STRIPE_SECRET_KEY'
           ? 'sk_test_fake'
-          : key === 'STRIPE_PRICE_PER_ASSET'
-            ? PER_ASSET_PRICE
+          : key === 'STRIPE_PRICE_MONTHLY'
+            ? FLAT_PRICE
             : key === 'STRIPE_PRICE_STARTER'
               ? 'price_1'
               : undefined,
@@ -350,11 +349,11 @@ describe('BillingService — checkout-quantity-bypass guards (A5)', () => {
     await expect(
       service.createCheckoutSession('company-1', 'price_1', 'https://app/success', 'https://app/cancel'),
     ).rejects.toMatchObject({ response: { code: 'ALREADY_SUBSCRIBED' } });
-    // It bails BEFORE ever starting a Stripe checkout — the re-checkout can't reset the quantity.
+    // It bails BEFORE ever starting a Stripe checkout — no duplicate subscription.
     expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
   });
 
-  it('createCheckoutSession still proceeds for a company with NO live subscription', async () => {
+  it('createCheckoutSession buys the flat price at quantity 1 — the charge does not scale', async () => {
     const { service, stripe } = build({
       id: 'company-1',
       name: 'Acme',
@@ -364,54 +363,31 @@ describe('BillingService — checkout-quantity-bypass guards (A5)', () => {
       subscriptionStatus: 'NONE',
     });
 
-    await service.createCheckoutSession('company-1', 'price_1', 'https://app/success', 'https://app/cancel');
-    expect(stripe.checkout.sessions.create).toHaveBeenCalled();
+    await service.createCheckoutSession('company-1', FLAT_PRICE, 'https://app/success', 'https://app/cancel');
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({ line_items: [{ price: FLAT_PRICE, quantity: 1 }] }),
+      expect.anything(),
+    );
   });
 
-  it('syncSubscription floors the cap to live usage and records a CAP_BLOCKED audit row when Stripe reports a quantity below usage', async () => {
+  it('syncSubscription records the plan price but never writes an asset cap or a CAP_BLOCKED row, no matter how many assets are live', async () => {
     const { service, tx } = build({ lastStripeEventAt: null, subscriptionStartedAt: new Date('2026-01-01') });
-    tx.asset.count.mockResolvedValue(50); // 50 live assets
+    tx.asset.count.mockResolvedValue(50); // 50 live assets — irrelevant under flat pricing
 
     const subscription = {
       id: 'sub_1',
       status: 'active',
-      items: { data: [{ price: { id: PER_ASSET_PRICE }, quantity: 3 }] }, // Stripe reports only 3
+      items: { data: [{ price: { id: FLAT_PRICE }, quantity: 1 }] },
     };
     await (
       service as unknown as { syncSubscription: (c: string, cust: string, sub: unknown, at: Date) => Promise<void> }
     ).syncSubscription('company-1', 'cus_x', subscription, new Date('2026-06-01'));
 
-    // The cap is held at live usage (50), NOT the reported 3.
-    expect(tx.company.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ assetQuantity: 50 }) }),
-    );
-    // ...and the divergence is flagged for staff.
-    expect(tx.billingAuditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          eventType: 'CAP_BLOCKED',
-          detail: expect.objectContaining({ stripeQuantity: 3, liveAssets: 50, heldCapAt: 50 }),
-        }),
-      }),
-    );
-  });
-
-  it('syncSubscription does NOT floor or audit when the Stripe quantity is at/above live usage', async () => {
-    const { service, tx } = build({ lastStripeEventAt: null, subscriptionStartedAt: new Date('2026-01-01') });
-    tx.asset.count.mockResolvedValue(2);
-
-    const subscription = {
-      id: 'sub_1',
-      status: 'active',
-      items: { data: [{ price: { id: PER_ASSET_PRICE }, quantity: 10 }] },
-    };
-    await (
-      service as unknown as { syncSubscription: (c: string, cust: string, sub: unknown, at: Date) => Promise<void> }
-    ).syncSubscription('company-1', 'cus_x', subscription, new Date('2026-06-01'));
-
-    expect(tx.company.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ assetQuantity: 10 }) }),
-    );
+    const updateArg = tx.company.update.mock.calls[0][0] as { data: Record<string, unknown> };
+    expect(updateArg.data.planPriceId).toBe(FLAT_PRICE);
+    // No asset cap is derived from the subscription anymore.
+    expect(updateArg.data).not.toHaveProperty('assetQuantity');
+    // ...and no CAP_BLOCKED / quantity-floor audit is ever written.
     expect(tx.billingAuditLog.create).not.toHaveBeenCalled();
   });
 });

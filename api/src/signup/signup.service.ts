@@ -54,8 +54,8 @@ export class SignupService {
     private readonly billing: BillingService,
   ) {}
 
-  private perAssetPriceId(): string | undefined {
-    return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+  private flatPriceId(): string | undefined {
+    return this.config.get<string>('STRIPE_PRICE_MONTHLY') ?? this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
 
   /**
@@ -66,25 +66,26 @@ export class SignupService {
    * `no_app_base_url` can't happen (env.validation fails the boot), so a live
    * disabled signup is almost always billing/price misconfiguration.
    */
-  signupDisabledReason(): 'billing_not_configured' | 'no_per_asset_price' | 'no_app_base_url' | null {
+  signupDisabledReason(): 'billing_not_configured' | 'no_monthly_price' | 'no_app_base_url' | null {
     if (!this.billing.isConfigured()) return 'billing_not_configured';
-    if (!this.perAssetPriceId()) return 'no_per_asset_price';
+    if (!this.flatPriceId()) return 'no_monthly_price';
     if (!this.config.get<string>('APP_BASE_URL')) return 'no_app_base_url';
     return null;
   }
 
-  /** Whether self-serve signup can run on this deployment (Stripe + per-asset price + app base URL configured). */
+  /** Whether self-serve signup can run on this deployment (Stripe + flat monthly price + app base URL configured). */
   isEnabled(): boolean {
     return this.signupDisabledReason() === null;
   }
 
   /**
    * Public pricing config for the signup page's live price preview. The preview
-   * is convenience only — the actual charge is always recomputed server-side
-   * (price × quantity) at Checkout — but serving the authoritative per-asset
-   * price from here keeps the preview honest (one source of truth: billing_settings).
+   * is convenience only — the actual charge is always the flat monthly price
+   * charged by Stripe at Checkout (quantity 1) — but serving the authoritative
+   * flat price from here keeps the preview honest (one source of truth:
+   * billing_settings).
    */
-  async getSignupConfig(): Promise<{ enabled: boolean; disabledReason: string | null; pricePerAssetCents: number; currency: string; billingInterval: string; gstRate: number }> {
+  async getSignupConfig(): Promise<{ enabled: boolean; disabledReason: string | null; priceCents: number; currency: string; billingInterval: string; gstRate: number }> {
     const settings = await this.billing.getBillingSettings();
     const disabledReason = this.signupDisabledReason();
     if (disabledReason) {
@@ -95,7 +96,7 @@ export class SignupService {
     return {
       enabled: disabledReason === null,
       disabledReason,
-      pricePerAssetCents: settings.pricePerAssetCents,
+      priceCents: settings.priceCents,
       currency: settings.currency,
       billingInterval: settings.billingInterval,
       gstRate: settings.gstRate,
@@ -113,7 +114,7 @@ export class SignupService {
     if (dto.website && dto.website.trim() !== '') {
       throw new BadRequestException({ code: 'SIGNUP_REJECTED', message: 'Signup could not be completed.' });
     }
-    const priceId = this.perAssetPriceId();
+    const priceId = this.flatPriceId();
     const appBase = this.config.get<string>('APP_BASE_URL')?.replace(/\/$/, '');
     const disabledReason = this.signupDisabledReason();
     if (disabledReason || !priceId || !appBase) {
@@ -130,7 +131,6 @@ export class SignupService {
       throw new ConflictException({ code: 'EMAIL_TAKEN', message: 'An account with this email already exists. Please sign in instead.' });
     }
 
-    const quantity = dto.quantity;
     const pendingId = randomUUID();
     const stripe = this.billing.getStripeClient();
     // Hash before any persistence so plaintext never lands in the DB.
@@ -140,7 +140,9 @@ export class SignupService {
       {
         mode: 'subscription',
         customer_email: email,
-        line_items: [{ price: priceId, quantity, adjustable_quantity: { enabled: true, minimum: 1 } }],
+        // Flat monthly price: one non-adjustable line at quantity 1. The charge
+        // is $29/month for the whole account regardless of fleet size.
+        line_items: [{ price: priceId, quantity: 1 }],
         // Success page observes provisioning + logs the user in; cancel returns
         // to the signup form. No client-supplied URLs (avoids open-redirect).
         success_url: `${appBase}/signup/complete?session_id={CHECKOUT_SESSION_ID}`,
@@ -169,13 +171,15 @@ export class SignupService {
         companyName: dto.companyName.trim(),
         adminEmail: email,
         adminName: dto.adminName.trim(),
-        requestedQuantity: quantity,
+        // Flat plan — no purchased quantity. The column is retained (nullable/
+        // default) but always 1 now; it no longer represents a paid asset count.
+        requestedQuantity: 1,
         hashedPassword,
         expiresAt: new Date(Date.now() + SIGNUP_TTL_MS),
       },
     });
     await this.systemPrisma.billingAuditLog.create({
-      data: { eventType: 'SIGNUP_STARTED', detail: { pendingId, quantity, email, ip: ctx.ip ?? null } },
+      data: { eventType: 'SIGNUP_STARTED', detail: { pendingId, email, ip: ctx.ip ?? null } },
     });
 
     return { url: session.url };
@@ -204,7 +208,6 @@ export class SignupService {
     if (claim.count === 0) return;
 
     const item = subscription.items.data[0];
-    const quantity = item?.quantity ?? pending.requestedQuantity;
     const priceId = item?.price.id ?? null;
     const period = subscription as unknown as { current_period_start?: number; current_period_end?: number };
     const companyId = randomUUID();
@@ -230,7 +233,6 @@ export class SignupService {
             stripeSubscriptionItemId: item?.id ?? null,
             subscriptionStatus: mapStripeStatus(subscription.status),
             planPriceId: priceId,
-            assetQuantity: quantity,
             currentPeriodStart: period.current_period_start ? new Date(period.current_period_start * 1000) : null,
             currentPeriodEnd: period.current_period_end ? new Date(period.current_period_end * 1000) : null,
             lastStripeEventAt: new Date(),
@@ -243,7 +245,7 @@ export class SignupService {
         data: {
           companyId,
           eventType: 'SIGNUP_COMPLETED',
-          detail: { quantity, sessionId: session.id, subscriptionId: subscription.id },
+          detail: { sessionId: session.id, subscriptionId: subscription.id },
         },
       });
 
@@ -265,7 +267,7 @@ export class SignupService {
         // swallow — verification can be re-requested in-app
       }
 
-      this.logger.log(`Provisioned self-serve signup: company ${companyId} (${quantity} assets) from session ${session.id}`);
+      this.logger.log(`Provisioned self-serve signup: company ${companyId} from session ${session.id}`);
     } catch (err) {
       // Roll the claim back so Stripe's webhook redelivery re-attempts. provisionCompany
       // is a single transaction, so nothing partial persists on failure.

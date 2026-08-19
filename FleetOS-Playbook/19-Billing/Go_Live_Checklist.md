@@ -1,7 +1,7 @@
 # FleetHQ Billing — Go-Live Checklist (founder actions)
 
-Everything **you** need to do before self-serve signup + per-asset billing can go
-live. Grouped by system, in the order that unblocks the most. Items marked
+Everything **you** need to do before self-serve signup + flat monthly billing can
+go live. Grouped by system, in the order that unblocks the most. Items marked
 **🔴 BLOCKS TESTING** gate my end-to-end verification, so start those first.
 Items marked **🟡 DECISION** need an answer from you (defaults I'm using are noted).
 
@@ -20,10 +20,11 @@ is configuring your Stripe account correctly — the app just mirrors it.
       - You do **not** need the publishable key — Checkout is hosted, so the app
         never handles card data.
 - [ ] **🔴 Create the Product + Price** (Dashboard → Product catalog → Add product):
-      - Product name: **FleetHQ Asset Subscription**
-      - Price: **A$9.00**, **Recurring**, **Monthly**, **usage type = Licensed**
-        (quantity-based — *not* metered/usage-based).
-      - Copy the resulting **Price ID** (`price_live_…`) → env `STRIPE_PRICE_PER_ASSET`.
+      - Product name: **FleetHQ Subscription**
+      - Price: **A$29.00**, **Recurring**, **Monthly**, **usage type = Licensed**
+        (a single flat price — quantity is always 1, *not* metered/usage-based and
+        *not* per-asset).
+      - Copy the resulting **Price ID** (`price_live_…`) → env `STRIPE_PRICE_MONTHLY`.
       - I'll also store it (and the Product id) into the `billing_settings` row so
         it's in one place.
 - [ ] **🔴 Enable Stripe Tax** (Dashboard → Settings → Tax) and register your
@@ -78,9 +79,9 @@ On the **API** (fleethq-platform) production environment:
 |---|---|---|
 | `STRIPE_SECRET_KEY` | `sk_live_…` | 🔴 never commit/log |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | 🔴 from the webhook endpoint above |
-| `STRIPE_PRICE_PER_ASSET` | `price_live_…` | 🔴 the $9/asset price |
+| `STRIPE_PRICE_MONTHLY` | `price_live_…` | 🔴 the $29/month flat price |
 | `STRIPE_TAX_ENABLED` | `true` | **only after** GST registration (§1) |
-| `BILLING_ENFORCED` | `true` | **flips the hard cap + read-only ON.** Leave unset until you've tested — see §7 |
+| `BILLING_ENFORCED` | `true` | **flips plan feature-gating + payment-failure read-only ON.** (Flat pricing has no asset cap.) Leave unset until you've tested — see §7 |
 | `APP_BASE_URL` | `https://app.fleethq…` | used for Checkout success/cancel + redirect allowlist |
 | `CORS_ALLOWED_ORIGINS` | your app + website origins | so the signup redirect is allowed |
 
@@ -110,18 +111,22 @@ On the **website** (FleetHQWebsite) production environment:
 ## 7. Turning it on safely (test mode first)
 
 - [ ] Do a **full dry run in Stripe test mode** first (test keys + test Price +
-      `4242 4242 4242 4242`): sign up → pay → land logged in → add assets up to the
-      cap → get blocked at cap+1 → upgrade quantity → see the prorated invoice.
+      `4242 4242 4242 4242`): sign up → pay the flat $29 → land logged in → add as
+      many assets as you like (no cap) → confirm the invoice is the flat $29
+      regardless of fleet size.
       *(This is the run I'll do for you once the keys above exist — it's why the
       🔴 items block testing.)*
 - [ ] Only after that passes, set the **live** keys and **`BILLING_ENFORCED=true`**.
       Enforcement is off by default precisely so nothing bites before you're ready —
       until it's `true`, the cap and read-only mode are inert.
-- [ ] **⚠️ Existing companies:** enabling `BILLING_ENFORCED` applies the cap to
-      *every* company. Any existing tenant without a subscription drops to the Free
-      fallback (3 assets). Before flipping it, decide how to handle current
-      tenants (grandfather them onto a subscription, or set their `assetQuantity`).
-      **Ask me to prepare a one-off backfill** for existing companies before go-live.
+- [ ] **⚠️ Existing companies:** enabling `BILLING_ENFORCED` applies feature-gating
+      to *every* company. Any existing tenant without a subscription drops to the Free
+      fallback. Before flipping it, decide how to handle current tenants (grandfather
+      them onto the flat $29/month subscription, or leave them on Free). Flat pricing
+      has no per-asset cap, so there is no quantity to backfill — a tenant is either
+      subscribed (flat $29) or on the Free fallback. **Ask me to prepare a one-off
+      backfill** (attach subscriptions to existing companies) before go-live if you
+      want current tenants grandfathered.
 
 ## 8. Optional / lower-priority decisions
 
@@ -140,9 +145,9 @@ On the **website** (FleetHQWebsite) production environment:
 ## 9. Legal
 
 - [ ] Confirm the **Terms of Service / cancellation policy** wording shown on the
-      signup page ("$9 AUD per asset per month, billed monthly, after a 7-day
-      free trial, with a 12-month minimum term" — see Part 2; the old "cancel
-      anytime" phrasing no longer applies).
+      signup page ("$29 AUD per month for the whole account, flat, billed monthly,
+      after a 7-day free trial, with a 12-month minimum term" — see Part 2; the old
+      "cancel anytime" phrasing no longer applies).
       Point me at the ToS/Privacy URLs if they should link out.
 
 ---

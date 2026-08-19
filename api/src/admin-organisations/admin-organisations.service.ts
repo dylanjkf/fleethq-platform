@@ -276,7 +276,6 @@ export class AdminOrganisationsService {
         planPriceId: company.planPriceId,
         trialEndsAt: company.trialEndsAt,
         trialActive,
-        assetQuantity: company.assetQuantity,
         paymentFailureCount: company.paymentFailureCount,
         gracePeriodEndsAt: company.gracePeriodEndsAt,
         nextPaymentAttemptAt: company.nextPaymentAttemptAt,

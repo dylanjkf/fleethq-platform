@@ -94,20 +94,20 @@ export function isSubscriptionActive(status: SubscriptionStatus): boolean {
 }
 
 /**
- * Per-asset plan (19-Billing/Per_Asset_Billing.md): the single purchasable
- * plan under the per-asset model. Every feature is on; the asset limit is the
- * company's purchased Stripe subscription quantity (`Company.assetQuantity`),
- * NOT a fixed constant — so the cap moves only when the customer explicitly
- * changes their quantity. Operators are not capped on this plan (billing is
- * per asset). A `null` quantity (subscription active but quantity not yet
- * synced) is treated as 0 to fail closed rather than grant unlimited assets.
+ * Flat monthly plan (19-Billing/Billing_And_Subscriptions.md): the single
+ * purchasable plan under FleetHQ's flat-rate pricing — one flat $29/month for
+ * the WHOLE account, every feature on. Per the flat-rate decision, asset count
+ * is purely operational and no longer drives billing, so assets AND operators
+ * are unlimited: there is no per-asset quantity and no billing-driven asset cap
+ * anymore. (Replaces the former per-asset tier whose cap was the purchased
+ * Stripe quantity.)
  */
-export function perAssetTier(quantity: number | null): PlanTier {
+export function flatMonthlyTier(): PlanTier {
   return {
-    key: 'per_asset',
-    name: 'Per-asset',
+    key: 'flat',
+    name: 'Monthly',
     features: ['core', 'forms', 'intelligence', 'warehouse'],
-    limits: { maxOperators: null, maxAssets: quantity ?? 0 },
+    limits: { maxOperators: null, maxAssets: null },
   };
 }
 

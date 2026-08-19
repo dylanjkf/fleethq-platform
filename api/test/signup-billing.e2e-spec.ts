@@ -1,19 +1,18 @@
 /**
- * Per-asset billing + self-serve signup (19-Billing/Per_Asset_Billing.md,
+ * Flat monthly billing + self-serve signup (19-Billing/Billing_And_Subscriptions.md,
  * Self_Serve_Signup.md). Exercises the revenue/security-critical mechanics
- * end-to-end against real Postgres:
- *  - the hard asset cap = purchased quantity, enforced at the API (402),
- *  - its race-safety under concurrent creates (the advisory-lock guarantee),
- *  - the CAP_BLOCKED audit trail,
+ * end-to-end against real Postgres under the FLAT pricing model:
+ *  - asset count is purely operational — it no longer caps or bills, so adding
+ *    assets has zero effect on the subscription and raises no CAP_BLOCKED audit,
  *  - idempotent, payment-first provisioning from a completed checkout, and the
  *    single-use instant-login that lands the new admin straight in the app,
- *  - the signup honeypot, and the abandoned-checkout expiry sweep.
+ *  - the signup honeypot, the abandoned-checkout expiry sweep, and reconcile,
+ *  - payment-failure read-only enforcement (unchanged by the pricing model).
  *
- * BILLING_ENFORCED + the per-asset price are set for this file only and torn
- * down after, so they can't leak into suites that rely on the default
- * permissive behaviour. Stripe itself is never called: provisioning is driven
- * with a plain fake session/subscription (the webhook already verified them),
- * and the best-effort Stripe metadata-tag/email are no-ops when unconfigured.
+ * BILLING_ENFORCED + the flat monthly price are set for this file only and torn
+ * down after. Stripe itself is never called: provisioning is driven with a plain
+ * fake session/subscription (the webhook already verified them), and the
+ * best-effort Stripe metadata-tag/email are no-ops when unconfigured.
  */
 import { randomUUID } from 'crypto';
 import { INestApplication } from '@nestjs/common';
@@ -27,16 +26,16 @@ import { buildTestApp } from './utils/build-test-app';
 import { TEST_PASSWORD, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
 
 const ownerPrisma = new PrismaClient();
-const PER_ASSET_PRICE = 'price_per_asset_test';
+const FLAT_PRICE = 'price_flat_monthly_test';
 
-describe('Per-asset billing + self-serve signup', () => {
+describe('Flat monthly billing + self-serve signup', () => {
   let app: INestApplication;
   let signup: SignupService;
   let billing: BillingService;
 
   beforeAll(async () => {
     process.env.BILLING_ENFORCED = 'true';
-    process.env.STRIPE_PRICE_PER_ASSET = PER_ASSET_PRICE;
+    process.env.STRIPE_PRICE_MONTHLY = FLAT_PRICE;
     process.env.APP_BASE_URL = 'https://app.fleethq.test';
     app = await buildTestApp();
     signup = app.get(SignupService);
@@ -47,7 +46,7 @@ describe('Per-asset billing + self-serve signup', () => {
 
   afterAll(async () => {
     delete process.env.BILLING_ENFORCED;
-    delete process.env.STRIPE_PRICE_PER_ASSET;
+    delete process.env.STRIPE_PRICE_MONTHLY;
     delete process.env.APP_BASE_URL;
     await app.close();
     await disconnectFixtures();
@@ -59,12 +58,12 @@ describe('Per-asset billing + self-serve signup', () => {
     return res.body.accessToken as string;
   }
 
-  /** A company on the per-asset plan with `quantity` paid slots. */
-  async function perAssetCompany(quantity: number) {
+  /** An active company on the flat monthly plan (no per-asset quantity exists). */
+  async function flatCompany() {
     const tenant = await createTestTenant([PERMISSIONS.ASSETS_CREATE, PERMISSIONS.ASSETS_VIEW]);
     await ownerPrisma.company.update({
       where: { id: tenant.companyId },
-      data: { subscriptionStatus: 'ACTIVE', planPriceId: PER_ASSET_PRICE, assetQuantity: quantity },
+      data: { subscriptionStatus: 'ACTIVE', planPriceId: FLAT_PRICE, stripeSubscriptionId: `sub_${randomUUID()}` },
     });
     return tenant;
   }
@@ -72,46 +71,46 @@ describe('Per-asset billing + self-serve signup', () => {
   const postAsset = (token: string, name: string) =>
     request(app.getHttpServer()).post('/v1/assets').set('Authorization', `Bearer ${token}`).send({ name });
 
-  describe('the hard asset cap is the purchased quantity', () => {
-    it('reports the per-asset plan and blocks the create past the paid quantity (402) + audits it', async () => {
-      const tenant = await perAssetCompany(2);
+  describe('asset count is operational, not billed', () => {
+    it('reports the flat plan with no asset cap, and adding many assets is never blocked or audited', async () => {
+      const tenant = await flatCompany();
       const token = await login(tenant.username);
 
       const ent = await request(app.getHttpServer()).get('/v1/billing/entitlements').set('Authorization', `Bearer ${token}`).expect(200);
-      expect(ent.body).toMatchObject({ planKey: 'per_asset', enforced: true, assetQuantity: 2 });
-      expect(ent.body.limits.maxAssets).toBe(2);
+      expect(ent.body).toMatchObject({ planKey: 'flat', enforced: true });
+      // No billing-driven asset cap under flat pricing.
+      expect(ent.body.limits.maxAssets).toBeNull();
+      // The per-asset-only field is gone from the entitlements payload.
+      expect(ent.body).not.toHaveProperty('assetQuantity');
 
-      await postAsset(token, 'Truck 1').expect(201);
-      await postAsset(token, 'Truck 2').expect(201);
-      const blocked = await postAsset(token, 'Truck 3 (over cap)').expect(402);
-      expect(blocked.body.error.code).toBe('PLAN_LIMIT_REACHED');
-      expect(blocked.body.error.resource).toBe('assets');
-      expect(blocked.body.error.limit).toBe(2);
-
-      const audits = await ownerPrisma.billingAuditLog.findMany({
-        where: { companyId: tenant.companyId, eventType: 'CAP_BLOCKED' },
-      });
-      expect(audits.length).toBeGreaterThanOrEqual(1);
-      expect(audits[0].detail).toMatchObject({ resource: 'assets', limit: 2, attempted: 3 });
-    });
-
-    it('is race-safe: three concurrent creates at the last slot yield exactly one success', async () => {
-      const tenant = await perAssetCompany(5);
-      const token = await login(tenant.username);
-      for (let i = 0; i < 4; i += 1) {
-        await postAsset(token, `Seed ${i}`).expect(201);
+      // Create well beyond what any old per-asset cap would have allowed.
+      for (let i = 0; i < 30; i += 1) {
+        await postAsset(token, `Truck ${i}`).expect(201);
       }
 
-      // Three creates fired together for the single remaining slot. The advisory
-      // lock must serialise them so only one commits.
-      const statuses = await Promise.all(
-        ['r1', 'r2', 'r3'].map((n) => postAsset(token, n).then((res) => res.status)),
-      );
-      expect(statuses.filter((s) => s === 201)).toHaveLength(1);
-      expect(statuses.filter((s) => s === 402)).toHaveLength(2);
+      const capBlocks = await ownerPrisma.billingAuditLog.findMany({
+        where: { companyId: tenant.companyId, eventType: 'CAP_BLOCKED' },
+      });
+      expect(capBlocks).toHaveLength(0);
+    });
 
-      const live = await ownerPrisma.asset.count({ where: { companyId: tenant.companyId, archivedAt: null } });
-      expect(live).toBe(5); // never 6 or 7
+    it('adding/removing assets has zero effect on the Stripe subscription state stored on the company', async () => {
+      const tenant = await flatCompany();
+      const token = await login(tenant.username);
+      const before = await ownerPrisma.company.findUniqueOrThrow({ where: { id: tenant.companyId } });
+
+      const created = await postAsset(token, 'Reg-1').expect(201);
+      await postAsset(token, 'Reg-2').expect(201);
+      // Archive one back off — still no billing movement.
+      await request(app.getHttpServer())
+        .post(`/v1/assets/${created.body.id}/archive`)
+        .set('Authorization', `Bearer ${token}`);
+
+      const after = await ownerPrisma.company.findUniqueOrThrow({ where: { id: tenant.companyId } });
+      // The subscription identity/price the company is billed on is untouched by asset churn.
+      expect(after.planPriceId).toBe(before.planPriceId);
+      expect(after.stripeSubscriptionId).toBe(before.stripeSubscriptionId);
+      expect(after.subscriptionStatus).toBe(before.subscriptionStatus);
     });
   });
 
@@ -129,7 +128,7 @@ describe('Per-asset billing + self-serve signup', () => {
           companyName,
           adminEmail: email,
           adminName: 'Founder Person',
-          requestedQuantity: 3,
+          requestedQuantity: 1,
           hashedPassword: await bcrypt.hash(TEST_PASSWORD, 10),
           expiresAt: new Date(Date.now() + 3_600_000),
         },
@@ -145,7 +144,7 @@ describe('Per-asset billing + self-serve signup', () => {
       const subscription = {
         id: subId,
         status: 'active',
-        items: { data: [{ id: itemId, quantity: 3, price: { id: PER_ASSET_PRICE } }] },
+        items: { data: [{ id: itemId, quantity: 1, price: { id: FLAT_PRICE } }] },
         current_period_start: nowSec,
         current_period_end: nowSec + 30 * 24 * 3600,
       } as never;
@@ -158,8 +157,7 @@ describe('Per-asset billing + self-serve signup', () => {
       expect(companies).toHaveLength(1);
       expect(companies[0]).toMatchObject({
         subscriptionStatus: 'ACTIVE',
-        planPriceId: PER_ASSET_PRICE,
-        assetQuantity: 3,
+        planPriceId: FLAT_PRICE,
         stripeCustomerId: customerId,
         stripeSubscriptionId: subId,
         stripeSubscriptionItemId: itemId,
@@ -176,7 +174,7 @@ describe('Per-asset billing + self-serve signup', () => {
         .get('/v1/billing/entitlements')
         .set('Authorization', `Bearer ${accessToken}`)
         .expect(200);
-      expect(me.body).toMatchObject({ planKey: 'per_asset', assetQuantity: 3 });
+      expect(me.body).toMatchObject({ planKey: 'flat' });
 
       // The login mint is single-use — a replay of the (browser-visible) session id can't re-login.
       const again = await signup.getSignupStatus(sessionId, {});
@@ -199,7 +197,6 @@ describe('Per-asset billing + self-serve signup', () => {
           adminName: 'Bot',
           adminEmail: `bot-${randomUUID()}@example.com`,
           adminPassword: 'Password-123!',
-          quantity: 1,
           acceptedTerms: true,
           website: 'http://spam.example', // honeypot — real users never fill this
         })
@@ -241,9 +238,9 @@ describe('Per-asset billing + self-serve signup', () => {
     /**
      * A fake Stripe client whose Checkout Session lookup reports `paid + complete`
      * only for `paidSessionId` (any other id looks abandoned, so reconcile skips
-     * it) and whose subscription lookup returns a per-asset subscription.
+     * it) and whose subscription lookup returns a flat monthly subscription.
      */
-    function fakeStripe(paidSessionId: string, subId: string, customerId: string, itemId: string, quantity: number) {
+    function fakeStripe(paidSessionId: string, subId: string, customerId: string, itemId: string) {
       const nowSec = Math.floor(Date.now() / 1000);
       return {
         checkout: {
@@ -258,7 +255,7 @@ describe('Per-asset billing + self-serve signup', () => {
           retrieve: async () => ({
             id: subId,
             status: 'active',
-            items: { data: [{ id: itemId, quantity, price: { id: PER_ASSET_PRICE } }] },
+            items: { data: [{ id: itemId, quantity: 1, price: { id: FLAT_PRICE } }] },
             current_period_start: nowSec,
             current_period_end: nowSec + 30 * 24 * 3600,
           }),
@@ -281,7 +278,7 @@ describe('Per-asset billing + self-serve signup', () => {
           companyName,
           adminEmail: email,
           adminName: 'Stuck Founder',
-          requestedQuantity: 2,
+          requestedQuantity: 1,
           hashedPassword: await bcrypt.hash(TEST_PASSWORD, 10),
           status: 'PENDING',
           createdAt: new Date(Date.now() - 20 * 60 * 1000), // older than the 10-min grace
@@ -290,7 +287,7 @@ describe('Per-asset billing + self-serve signup', () => {
       });
 
       const cfg = jest.spyOn(billing, 'isConfigured').mockReturnValue(true);
-      const client = jest.spyOn(billing, 'getStripeClient').mockReturnValue(fakeStripe(sessionId, subId, customerId, itemId, 2));
+      const client = jest.spyOn(billing, 'getStripeClient').mockReturnValue(fakeStripe(sessionId, subId, customerId, itemId));
       try {
         const result = await signup.reconcileStuckSignups();
         expect(result.recovered).toBeGreaterThanOrEqual(1);
@@ -301,7 +298,7 @@ describe('Per-asset billing + self-serve signup', () => {
 
       const companies = await ownerPrisma.company.findMany({ where: { name: companyName } });
       expect(companies).toHaveLength(1);
-      expect(companies[0]).toMatchObject({ planPriceId: PER_ASSET_PRICE, assetQuantity: 2, stripeSubscriptionId: subId });
+      expect(companies[0]).toMatchObject({ planPriceId: FLAT_PRICE, stripeSubscriptionId: subId });
       const row = await ownerPrisma.pendingSignup.findUnique({ where: { stripeCheckoutSessionId: sessionId } });
       expect(row?.status).toBe('COMPLETED');
     });
@@ -328,7 +325,7 @@ describe('Per-asset billing + self-serve signup', () => {
       const cfg = jest.spyOn(billing, 'isConfigured').mockReturnValue(true);
       const client = jest
         .spyOn(billing, 'getStripeClient')
-        .mockReturnValue(fakeStripe(sessionId, `sub_x_${suffix}`, `cus_x_${suffix}`, `si_x_${suffix}`, 1));
+        .mockReturnValue(fakeStripe(sessionId, `sub_x_${suffix}`, `cus_x_${suffix}`, `si_x_${suffix}`));
       const prov = jest.spyOn(signup, 'provisionFromCompletedCheckout').mockRejectedValue(new Error('db exploded'));
       try {
         await signup.reconcileStuckSignups();
@@ -349,17 +346,16 @@ describe('Per-asset billing + self-serve signup', () => {
   });
 
   describe('payment-failure read-only enforcement', () => {
-    // A per-asset company that is past due AND whose 7-day grace window
-    // has already elapsed (gracePeriodEndsAt in the past) — the point at which the
-    // read-only restriction actually applies (item 7).
+    // A flat-plan company that is past due AND whose 7-day grace window has already
+    // elapsed (gracePeriodEndsAt in the past) — the point at which the read-only
+    // restriction actually applies (item 7).
     async function readOnlyCompany(gracePeriodEndsAt: Date = new Date(Date.now() - 24 * 60 * 60 * 1000)) {
       const tenant = await createTestTenant([PERMISSIONS.ASSETS_CREATE, PERMISSIONS.ASSETS_VIEW, PERMISSIONS.BILLING_MANAGE]);
       await ownerPrisma.company.update({
         where: { id: tenant.companyId },
         data: {
           subscriptionStatus: 'PAST_DUE',
-          planPriceId: PER_ASSET_PRICE,
-          assetQuantity: 5,
+          planPriceId: FLAT_PRICE,
           stripeSubscriptionId: `sub_ro_${randomUUID()}`,
           stripeCustomerId: `cus_ro_${randomUUID()}`,
           paymentFailureCount: 4,
@@ -398,7 +394,7 @@ describe('Per-asset billing + self-serve signup', () => {
     });
 
     it('does not affect a healthy active company', async () => {
-      const tenant = await perAssetCompany(3);
+      const tenant = await flatCompany();
       const token = await login(tenant.username);
       await postAsset(token, 'Healthy asset').expect(201);
     });
