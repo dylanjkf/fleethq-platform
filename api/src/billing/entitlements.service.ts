@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemPrismaService } from '../prisma/system-prisma.service';
-import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, perAssetTier, resolvePlanTier } from './plans';
+import { FeatureKey, PlanTier, UNLIMITED_TIER, isSubscriptionActive, isTrialActive, flatMonthlyTier, resolvePlanTier } from './plans';
 
 /**
  * Pure predicate for "is this company past due AND past its non-payment grace
@@ -43,14 +43,6 @@ export interface Entitlements {
   trialEndsAt: string | null;
   trialActive: boolean;
   trialDaysLeft: number | null;
-  /**
-   * Per-asset billing: the purchased Stripe quantity (the hard asset cap), or
-   * null when the company isn't on the per-asset plan. Distinct from
-   * `limits.maxAssets` (which is null=unlimited when enforcement is off) — this
-   * is the true paid count regardless of `enforced`, so the UI can always show
-   * "7 of 10 paid asset slots used" and a "buy more" affordance.
-   */
-  assetQuantity: number | null;
   /**
    * Payment-failure read-only state: true when enforcement is on and the
    * company's paid subscription has exhausted its dunning retries (past due with
@@ -92,9 +84,14 @@ export class EntitlementsService {
     };
   }
 
-  /** The Stripe Price id for the per-asset plan ($9 AUD/asset/month), if configured. */
-  private perAssetPriceId(): string | undefined {
-    return this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+  /**
+   * The Stripe Price id for the flat monthly plan ($29 AUD/month), if configured.
+   * Reads `STRIPE_PRICE_MONTHLY`, falling back to the legacy `STRIPE_PRICE_PER_ASSET`
+   * env name during the flat-rate transition so a half-migrated deployment still
+   * resolves the plan.
+   */
+  private flatPriceId(): string | undefined {
+    return this.config.get<string>('STRIPE_PRICE_MONTHLY') ?? this.config.get<string>('STRIPE_PRICE_PER_ASSET');
   }
 
   /**
@@ -125,7 +122,7 @@ export class EntitlementsService {
     plan: PlanTier,
     trialEndsAt: Date | null,
     usage: { operators: number; assets: number },
-    context: { assetQuantity: number | null; billingReadOnly: boolean },
+    context: { billingReadOnly: boolean },
   ): Entitlements {
     const enforced = this.isEnforced();
     const effective = enforced ? plan : UNLIMITED_TIER;
@@ -141,7 +138,6 @@ export class EntitlementsService {
       trialEndsAt: trialEndsAt ? trialEndsAt.toISOString() : null,
       trialActive,
       trialDaysLeft,
-      assetQuantity: context.assetQuantity,
       billingReadOnly: context.billingReadOnly,
     };
   }
@@ -186,7 +182,6 @@ export class EntitlementsService {
         subscriptionStatus: true,
         planPriceId: true,
         trialEndsAt: true,
-        assetQuantity: true,
         stripeSubscriptionId: true,
         nextPaymentAttemptAt: true,
         paymentFailureCount: true,
@@ -196,32 +191,29 @@ export class EntitlementsService {
     const plan = this.resolvePlan(company);
     const usage = await this.getUsage(tx);
     return this.toEntitlements(plan, company.trialEndsAt, usage, {
-      assetQuantity: company.assetQuantity,
       billingReadOnly: this.computeBillingReadOnly(company),
     });
   }
 
   /**
-   * Resolves the plan tier. Under the per-asset model (19-Billing/
-   * Per_Asset_Billing.md) an active subscription on the per-asset price yields
-   * a plan whose asset limit is the company's purchased `assetQuantity` — the
-   * hard cap moves only when quantity changes, never when an asset is added.
-   * Any other state falls through to the legacy tier resolution (trial / Free
-   * fallback still apply), so mixed/legacy tenants keep working.
+   * Resolves the plan tier. An active subscription on the flat monthly price
+   * yields the flat plan (every feature on, no asset/operator cap — asset count
+   * is operational, not billed). Any other state falls through to the legacy
+   * tier resolution (trial / Free fallback still apply), so mixed/legacy tenants
+   * keep working.
    */
   private resolvePlan(company: {
     subscriptionStatus: SubscriptionStatus;
     planPriceId: string | null;
     trialEndsAt: Date | null;
-    assetQuantity: number | null;
   }): PlanTier {
-    const perAssetPriceId = this.perAssetPriceId();
+    const flatPriceId = this.flatPriceId();
     if (
-      perAssetPriceId &&
-      company.planPriceId === perAssetPriceId &&
+      flatPriceId &&
+      company.planPriceId === flatPriceId &&
       isSubscriptionActive(company.subscriptionStatus)
     ) {
-      return perAssetTier(company.assetQuantity);
+      return flatMonthlyTier();
     }
     return resolvePlanTier(company.subscriptionStatus, company.planPriceId, this.priceIds(), company.trialEndsAt);
   }

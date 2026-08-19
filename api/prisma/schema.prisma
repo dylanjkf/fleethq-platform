@@ -58,10 +58,11 @@ model BillingSettings {
   /// Fixed singleton id — always 1. A CHECK constraint in the migration keeps
   /// it that way, so `findUnique({ id: 1 })` always resolves the one config row.
   id                 Int      @id @default(1)
-  /// Price per active asset, per billing interval, in the smallest currency
-  /// unit (cents). 900 = $9.00 AUD. Integer cents throughout — never floats —
-  /// to avoid rounding error on money.
-  pricePerAssetCents Int      @default(900) @map("price_per_asset_cents")
+  /// The flat price for the WHOLE account, per billing interval, in the
+  /// smallest currency unit (cents). 2900 = $29.00 AUD. Flat rate — it does NOT
+  /// scale with fleet size / asset count. Integer cents throughout — never
+  /// floats — to avoid rounding error on money.
+  priceCents         Int      @default(2900) @map("price_cents")
   currency           String   @default("AUD")
   billingInterval    String   @default("month") @map("billing_interval")
   /// GST rate as a fraction (0.10 = 10%). Australian GST. Stripe Tax computes
@@ -318,21 +319,11 @@ model Company {
   /// is FleetOS's native, no-card trial. (Payment-first self-serve signup pays
   /// immediately and grants no native trial.)
   trialEndsAt              DateTime?          @map("trial_ends_at")
-  /// Per-asset billing (19-Billing/Per_Asset_Billing.md): the number of asset
-  /// slots this company currently pays for — the Stripe subscription item
-  /// quantity on the per-asset price ($9 AUD/asset/month). This is the SOURCE
-  /// OF TRUTH for the hard asset cap: live assets (archived_at IS NULL) may
-  /// never exceed it. Kept in sync FROM Stripe by the subscription webhooks
-  /// (Stripe remains authoritative); it only ever increases via an explicit
-  /// upgrade action and only decreases via an explicit downgrade — never
-  /// implicitly when an asset is added or archived. `null` = the company is not
-  /// on the per-asset plan (still on the native trial or Free fallback).
-  assetQuantity            Int?               @map("asset_quantity")
-  /// Per-asset billing: the Stripe subscription ITEM id (the line whose
-  /// quantity is the paid asset count) — needed to update quantity on the item
-  /// directly for the buy-more/release flow. And the current Stripe billing
-  /// period, mirrored from the subscription so the admin/customer billing views
-  /// can show "next bills on …" without a live Stripe round-trip.
+  /// The Stripe subscription ITEM id (the single flat monthly line), and the
+  /// current Stripe billing period, mirrored from the subscription so the
+  /// admin/customer billing views can show "next bills on …" without a live
+  /// Stripe round-trip. (Flat pricing has no per-asset quantity, so there is no
+  /// asset-slot count stored here anymore — asset count is purely operational.)
   stripeSubscriptionItemId String?            @map("stripe_subscription_item_id")
   currentPeriodStart       DateTime?          @map("current_period_start")
   currentPeriodEnd         DateTime?          @map("current_period_end")

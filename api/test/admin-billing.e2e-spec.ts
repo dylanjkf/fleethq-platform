@@ -127,31 +127,21 @@ describe('Admin Billing', () => {
       .expect(400);
   });
 
-  it('reports per-asset usage-vs-paid for a company on the per-asset plan', async () => {
-    const perAssetTenant = await createTestTenant([]);
-    await ownerPrisma.company.update({
-      where: { id: perAssetTenant.companyId },
-      data: { subscriptionStatus: 'ACTIVE', assetQuantity: 5 },
-    });
+  it('billing status has no per-asset usage-vs-paid block under flat pricing', async () => {
     const res = await request(app.getHttpServer())
-      .get(`/v1/admin/organisations/${perAssetTenant.companyId}/billing`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .expect(200);
-    expect(res.body.perAsset).toMatchObject({ paidQuantity: 5, liveAssets: 0, availableSlots: 5, overCap: false });
-    // A non-per-asset company reports null (no assetQuantity).
-    const plain = await request(app.getHttpServer())
       .get(`/v1/admin/organisations/${companyId}/billing`)
       .set('Authorization', `Bearer ${adminToken}`)
       .expect(200);
-    expect(plain.body.perAsset).toBeNull();
+    // The per-asset paid-quantity concept is gone — flat pricing has no cap.
+    expect(res.body).not.toHaveProperty('perAsset');
   });
 
   it('returns the company billing audit trail (newest first)', async () => {
     const auditTenant = await createTestTenant([]);
     await ownerPrisma.billingAuditLog.createMany({
       data: [
-        { companyId: auditTenant.companyId, eventType: 'SIGNUP_COMPLETED', detail: { quantity: 3 } },
-        { companyId: auditTenant.companyId, eventType: 'QUANTITY_CHANGED', detail: { from: 3, to: 4, via: 'admin' } },
+        { companyId: auditTenant.companyId, eventType: 'SIGNUP_STARTED', detail: {} },
+        { companyId: auditTenant.companyId, eventType: 'SIGNUP_COMPLETED', detail: {} },
       ],
     });
     const res = await request(app.getHttpServer())
@@ -161,31 +151,16 @@ describe('Admin Billing', () => {
     expect(res.body.items.length).toBeGreaterThanOrEqual(2);
     const types = res.body.items.map((r: { eventType: string }) => r.eventType);
     expect(types).toContain('SIGNUP_COMPLETED');
-    expect(types).toContain('QUANTITY_CHANGED');
+    expect(types).toContain('SIGNUP_STARTED');
   });
 
-  it('rejects a manual quantity change from a view-only admin', async () => {
-    await request(app.getHttpServer())
-      .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
-      .set('Authorization', `Bearer ${viewOnlyToken}`)
-      .send({ quantity: 3 })
-      .expect(403);
-  });
-
-  it('refuses a manual quantity change for a company not on the per-asset plan', async () => {
-    const res = await request(app.getHttpServer())
-      .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({ quantity: 3 })
-      .expect(400);
-    expect(res.body.error.code).toBe('NOT_ON_PER_ASSET_PLAN');
-  });
-
-  it('rejects an invalid manual quantity payload', async () => {
+  it('the manual asset-quantity endpoint no longer exists under flat pricing (404)', async () => {
+    // Flat pricing has no paid quantity to change; the whole endpoint was removed
+    // so staff can never log a price-implying QUANTITY_CHANGED action anymore.
     await request(app.getHttpServer())
       .post(`/v1/admin/organisations/${companyId}/billing/quantity`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ quantity: 0 })
-      .expect(400);
+      .send({ quantity: 3 })
+      .expect(404);
   });
 });

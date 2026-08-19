@@ -14,7 +14,6 @@ import { BillingService } from './billing.service';
 import { EntitlementsService } from './entitlements.service';
 import { CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { CreatePortalSessionDto } from './dto/create-portal-session.dto';
-import { ChangeAssetQuantityDto } from './dto/change-asset-quantity.dto';
 
 @Controller({ path: 'billing', version: '1' })
 export class BillingController {
@@ -51,19 +50,7 @@ export class BillingController {
   @RequirePermission(PERMISSIONS.BILLING_MANAGE)
   @AllowWhenReadOnly() // A past-due customer must be able to start a checkout to pay.
   createCheckoutSession(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: CreateCheckoutSessionDto) {
-    return this.billingService.createCheckoutSession(user.companyId, dto.priceId, dto.successUrl, dto.cancelUrl, dto.quantity ?? 1);
-  }
-
-  /**
-   * Change the number of paid asset slots on the per-asset plan (buy more or
-   * release). Prorated by Stripe; the server blocks reducing below current live
-   * asset usage. The new cap is applied by the resulting subscription webhook.
-   */
-  @Post('quantity')
-  @RequirePermission(PERMISSIONS.BILLING_MANAGE)
-  @AllowWhenReadOnly() // Managing the subscription (e.g. reducing seats) is a billing action, allowed while past-due.
-  changeAssetQuantity(@CurrentUser() user: AuthenticatedRequestUser, @Body() dto: ChangeAssetQuantityDto) {
-    return this.billingService.changeAssetQuantity(user.companyId, dto.quantity, user.userId);
+    return this.billingService.createCheckoutSession(user.companyId, dto.priceId, dto.successUrl, dto.cancelUrl);
   }
 
   @Post('portal-session')

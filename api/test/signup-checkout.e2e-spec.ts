@@ -5,8 +5,9 @@
  * pending_signup directly, so the checkout-session *creation* path (the public
  * POST /v1/signup that talks to Stripe and writes the hashed password) had no
  * direct coverage. This exercises it with a stubbed Stripe client and asserts:
- *  - H9: a checkout session is created with the configured per-asset price and
- *        requested quantity, and a PENDING pending_signup row is written; and
+ *  - H9: a checkout session is created with the configured flat monthly price at
+ *        quantity 1 (the charge never scales with fleet size), and a PENDING
+ *        pending_signup row is written; and
  *  - H3: the stored password hash encodes the centralized bcrypt cost (12),
  *        not the previously-hardcoded 10.
  */
@@ -20,7 +21,7 @@ import { buildTestApp } from './utils/build-test-app';
 import { disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
 
 const ownerPrisma = new PrismaClient();
-const PER_ASSET_PRICE = 'price_signup_checkout_test';
+const FLAT_PRICE = 'price_signup_checkout_test';
 
 describe('Signup checkout-session creation', () => {
   let app: INestApplication;
@@ -28,7 +29,7 @@ describe('Signup checkout-session creation', () => {
   let createSession: jest.Mock;
 
   beforeAll(async () => {
-    process.env.STRIPE_PRICE_PER_ASSET = PER_ASSET_PRICE;
+    process.env.STRIPE_PRICE_MONTHLY = FLAT_PRICE;
     process.env.APP_BASE_URL = 'https://app.fleethq.test';
     app = await buildTestApp();
     billing = app.get(BillingService);
@@ -37,7 +38,7 @@ describe('Signup checkout-session creation', () => {
   });
 
   afterAll(async () => {
-    delete process.env.STRIPE_PRICE_PER_ASSET;
+    delete process.env.STRIPE_PRICE_MONTHLY;
     delete process.env.APP_BASE_URL;
     await app.close();
     await disconnectFixtures();
@@ -45,7 +46,9 @@ describe('Signup checkout-session creation', () => {
   });
 
   beforeEach(() => {
-    createSession = jest.fn().mockResolvedValue({ id: `cs_${randomUUID()}`, url: 'https://checkout.stripe.test/session' });
+    // A fresh session id per call — stripeCheckoutSessionId is unique, so two
+    // signups in one test must not collide.
+    createSession = jest.fn().mockImplementation(() => Promise.resolve({ id: `cs_${randomUUID()}`, url: 'https://checkout.stripe.test/session' }));
     // Stripe is never really reached: stub the client + configuration flags so
     // the checkout-start path runs end-to-end without network.
     jest.spyOn(billing, 'isConfigured').mockReturnValue(true);
@@ -61,13 +64,12 @@ describe('Signup checkout-session creation', () => {
       adminName: 'Dana Owner',
       adminEmail: `owner-${randomUUID()}@acmefreight.test`,
       adminPassword: 'Str0ng-Passw0rd!',
-      quantity: 7,
       acceptedTerms: true,
       ...overrides,
     };
   }
 
-  it('H9: creates a Stripe checkout session with the configured price + quantity and stages a PENDING signup', async () => {
+  it('H9: creates a Stripe checkout session with the flat monthly price at quantity 1 and stages a PENDING signup', async () => {
     const body = payload();
     const res = await request(app.getHttpServer()).post('/v1/signup').send(body).expect(201);
     expect(res.body.checkoutUrl ?? res.body.url).toBe('https://checkout.stripe.test/session');
@@ -75,13 +77,28 @@ describe('Signup checkout-session creation', () => {
     expect(createSession).toHaveBeenCalledTimes(1);
     const [params] = createSession.mock.calls[0];
     expect(params.mode).toBe('subscription');
-    expect(params.line_items[0].price).toBe(PER_ASSET_PRICE);
-    expect(params.line_items[0].quantity).toBe(7);
+    expect(params.line_items[0].price).toBe(FLAT_PRICE);
+    // Flat pricing: always exactly one unit, no adjustable quantity.
+    expect(params.line_items[0].quantity).toBe(1);
+    expect(params.line_items[0].adjustable_quantity).toBeUndefined();
     expect(params.success_url).toContain('/signup/complete');
 
     const staged = await ownerPrisma.pendingSignup.findFirst({ where: { adminEmail: body.adminEmail } });
     expect(staged?.status).toBe('PENDING');
-    expect(staged?.requestedQuantity).toBe(7);
+  });
+
+  it('the charge never scales with fleet size: two separate signups both check out at quantity 1 of the same flat price', async () => {
+    // The signup body no longer accepts an asset/fleet count at all, so two
+    // different customers necessarily produce the identical flat subscription.
+    await request(app.getHttpServer()).post('/v1/signup').send(payload({ companyName: 'Small — 3 vehicles' })).expect(201);
+    const first = createSession.mock.calls.at(-1)![0];
+    await request(app.getHttpServer()).post('/v1/signup').send(payload({ companyName: 'Big — 50 vehicles' })).expect(201);
+    const second = createSession.mock.calls.at(-1)![0];
+
+    for (const params of [first, second]) {
+      expect(params.line_items[0].price).toBe(FLAT_PRICE);
+      expect(params.line_items[0].quantity).toBe(1);
+    }
   });
 
   it('H3: stores the admin password hashed at the centralized bcrypt cost (12), not 10', async () => {

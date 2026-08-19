@@ -1,12 +1,13 @@
-import { Equals, IsBoolean, IsEmail, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { Equals, IsBoolean, IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { IsStrongPassword } from '../../common/validators/is-strong-password.validator';
 
 /**
- * Public self-serve signup body (POST /v1/signup). Everything financial
- * (quantity, price) is re-validated/-computed server-side — the client is never
- * trusted for the charge amount. Starts a Stripe Checkout that opens a 7-day
- * free trial (TRIAL_PERIOD_DAYS); the account is provisioned by the webhook once
- * the checkout completes, and billing begins after the trial.
+ * Public self-serve signup body (POST /v1/signup). The price is a fixed flat
+ * monthly rate computed server-side (not sent by the client) — there is no
+ * quantity/fleet-size input, since billing no longer scales with asset count.
+ * Starts a Stripe Checkout that opens a 7-day free trial (TRIAL_PERIOD_DAYS);
+ * the account is provisioned by the webhook once the checkout completes, and
+ * billing begins after the trial.
  */
 export class SignupDto {
   @IsString()
@@ -35,12 +36,6 @@ export class SignupDto {
   @MinLength(8)
   @MaxLength(72)
   adminPassword!: string;
-
-  /** Number of asset slots to purchase — the initial paid quantity / hard cap. */
-  @IsInt()
-  @Min(1)
-  @Max(100_000)
-  quantity!: number;
 
   /** Must be true — records ToS/Privacy acceptance at signup. */
   @IsBoolean()

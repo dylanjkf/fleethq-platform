@@ -132,22 +132,22 @@ describe('Billing / subscriptions', () => {
     expect(res.body.hasStripeCustomer).toBe(false);
   });
 
-  it('leads the plan picker with the per-asset plan', async () => {
+  it('leads the plan picker with the flat monthly plan', async () => {
     const tenant = await createTestTenant([PERMISSIONS.BILLING_VIEW]);
     const token = await login(tenant.username);
 
     const res = await request(app.getHttpServer()).get('/v1/billing/plans').set('Authorization', `Bearer ${token}`).expect(200);
     expect(Array.isArray(res.body.plans)).toBe(true);
-    // Under the per-asset model the picker leads with the single per-asset plan;
+    // Under flat pricing the picker leads with the single flat monthly plan;
     // legacy fixed tiers (starter/pro/enterprise) only surface when their Stripe
     // price ids are configured on this deployment (they are not in CI).
-    const perAsset = res.body.plans[0];
-    expect(perAsset.key).toBe('per_asset');
-    expect(perAsset.perAsset).toBe(true);
-    expect(perAsset.features).toEqual(expect.arrayContaining(['core', 'intelligence']));
-    expect(perAsset).toHaveProperty('priceId');
-    expect(perAsset).toHaveProperty('purchasable');
-    expect(perAsset).toHaveProperty('pricePerAssetCents');
+    const flat = res.body.plans[0];
+    expect(flat.key).toBe('flat');
+    expect(flat.flat).toBe(true);
+    expect(flat.features).toEqual(expect.arrayContaining(['core', 'intelligence']));
+    expect(flat).toHaveProperty('priceId');
+    expect(flat).toHaveProperty('purchasable');
+    expect(flat).toHaveProperty('priceCents');
     // Any legacy tier that does appear must be marked purchasable.
     for (const p of res.body.plans.slice(1)) {
       expect(p.purchasable).toBe(true);
