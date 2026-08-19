@@ -122,15 +122,24 @@ jobs:
 
           echo; if [ "$problems" -gt 0 ]; then echo "RESULT: $problems boot-critical problem(s) found above — fix those variables in Railway and redeploy."; else echo "RESULT: no boot-critical variable problems detected. The failure is likely elsewhere (migration/healthcheck) — check the live probe below."; fi
 
+      - name: Attempt a redeploy (so the crash lands in the logs captured next)
+        id: redeploy
+        continue-on-error: true
+        run: |
+          echo "Redeploying current code + current variables so the failing container's"
+          echo "output becomes the newest deployment, which the next step can read."
+          railway redeploy --service "$SVC" --yes 2>&1 | tail -40 | sed 's/^/  /'
+
       - name: Capture recent deployment logs (best-effort — reveals a boot crash)
+        if: always()
         run: |
           set +e
-          echo "Attempting to fetch the latest deployment's runtime logs for service '$SVC'."
-          echo "If the newest deployment is the FAILED one, its crash output shows here."
-          echo '--- railway logs (deploy) ---'
-          timeout 30 railway logs --service "$SVC" 2>&1 | tail -120 | sed 's/^/  /'
-          echo '--- railway logs --build (last build) ---'
-          timeout 30 railway logs --service "$SVC" --build 2>&1 | tail -60 | sed 's/^/  /'
+          echo "Waiting a moment for the deployment to start and (possibly) crash..."
+          sleep 45
+          echo '--- railway logs (deploy runtime — look for a stack trace / migration / env error) ---'
+          timeout 40 railway logs --service "$SVC" 2>&1 | tail -160 | sed 's/^/  /'
+          echo '--- railway logs --build ---'
+          timeout 30 railway logs --service "$SVC" --build 2>&1 | tail -40 | sed 's/^/  /'
           echo '(end of logs)'
 
       - name: Probe the discovered API URL
