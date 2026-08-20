@@ -1,4 +1,4 @@
-import { Equals, IsBoolean, IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { Equals, IsBoolean, IsEmail, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { IsStrongPassword } from '../../common/validators/is-strong-password.validator';
 
 /**
@@ -41,6 +41,21 @@ export class SignupDto {
   @IsBoolean()
   @Equals(true)
   acceptedTerms!: boolean;
+
+  /**
+   * DEPRECATED — transition-compatibility only, ignored by the server. Flat
+   * pricing always charges the flat monthly rate at quantity 1, so this value is
+   * never read (see SignupService.createSignupCheckout). It is accepted
+   * (optional) purely so a not-yet-redeployed client from the per-asset era that
+   * still posts a `quantity` isn't rejected by the API's `forbidNonWhitelisted`
+   * validation during the flat-pricing rollout. Remove once every client build is
+   * on flat pricing.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100000)
+  quantity?: number;
 
   /**
    * Honeypot: a hidden field real users never fill. A non-empty value is almost
