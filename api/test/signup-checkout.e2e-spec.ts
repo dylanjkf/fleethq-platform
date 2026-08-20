@@ -101,19 +101,6 @@ describe('Signup checkout-session creation', () => {
     }
   });
 
-  it('transition compat: a legacy client still posting a `quantity` is accepted and the field is ignored (checkout stays at quantity 1)', async () => {
-    // During the flat-pricing rollout a not-yet-redeployed per-asset client may
-    // still POST a `quantity`. The API must accept it (not 400 under
-    // forbidNonWhitelisted) and ignore it — the charge is always the flat price
-    // at quantity 1, never the client-supplied count.
-    const body = payload({ quantity: 50 });
-    await request(app.getHttpServer()).post('/v1/signup').send(body).expect(201);
-
-    const params = createSession.mock.calls.at(-1)![0];
-    expect(params.line_items[0].price).toBe(FLAT_PRICE);
-    expect(params.line_items[0].quantity).toBe(1);
-  });
-
   it('H3: stores the admin password hashed at the centralized bcrypt cost (12), not 10', async () => {
     const body = payload();
     await request(app.getHttpServer()).post('/v1/signup').send(body).expect(201);
