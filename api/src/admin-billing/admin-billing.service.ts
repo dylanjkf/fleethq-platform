@@ -382,6 +382,19 @@ export class AdminBillingService {
       beforeValue: { status: before.status, cancelAtPeriodEnd: before.cancel_at_period_end },
       afterValue: { atPeriodEnd: !!dto.atPeriodEnd, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end },
     });
+    // Also record on the COMPANY's own billing ledger (billing_audit_logs), not
+    // only the staff-side admin audit log, so the company's billing history
+    // reflects a staff-initiated cancellation the same way a customer self-serve
+    // cancel does. adminPrisma (fleetos_admin) has INSERT on billing_audit_logs
+    // and bypasses RLS.
+    await this.adminPrisma.billingAuditLog.create({
+      data: {
+        companyId,
+        eventType: 'SUBSCRIPTION_CANCELED',
+        actorAdminId: context.adminUserId,
+        detail: { via: 'staff', atPeriodEnd: !!dto.atPeriodEnd },
+      },
+    });
 
     return { subscriptionId: subscription.id, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end };
   }
@@ -410,6 +423,17 @@ export class AdminBillingService {
       ip: context.ip,
       userAgent: context.userAgent,
       afterValue: { contractReleasedAt: releasedAt.toISOString(), reason: dto.reason },
+    });
+    // Also record on the COMPANY's own billing ledger (billing_audit_logs) so
+    // the release shows in the company's billing history, not only the staff
+    // admin audit log. adminPrisma (fleetos_admin) has INSERT + bypasses RLS.
+    await this.adminPrisma.billingAuditLog.create({
+      data: {
+        companyId: company.id,
+        eventType: 'MANUAL_OVERRIDE',
+        actorAdminId: context.adminUserId,
+        detail: { action: 'cancel_for_cause', reason: dto.reason },
+      },
     });
     return { companyId: company.id, contractReleasedAt: releasedAt.toISOString() };
   }

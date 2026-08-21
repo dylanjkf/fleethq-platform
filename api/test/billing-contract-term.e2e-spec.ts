@@ -1,109 +1,146 @@
 /**
- * The 12-month minimum-term lock-in (Part 2), verified end-to-end AFTER the
- * flat-rate billing rewrite — since a lot of billing.service.ts changed, this
- * pins that the lock-in still works and is orthogonal to per-asset vs flat
- * pricing (it keys only on `contractEndsAt`/`contractReleasedAt`, never a price
- * or quantity).
+ * The 12-month minimum-term lock-in (Part 2), verified through the REAL HTTP
+ * routes rather than a service method — an earlier version of this suite called
+ * `BillingService.releaseFromContract` directly, which turned out to be dead code
+ * (zero callers): the live staff `cancel_for_cause` route is wired to
+ * `AdminBillingService.releaseFromContract`, a different implementation. Testing
+ * the route (not a hand-picked function) is what stops a refactor from silently
+ * re-opening that "tested the wrong function" gap.
  *
- * `isWithinMinimumTerm`'s boundary logic is unit-tested in minimum-term.spec;
- * this exercises the actual gate and the escape hatch:
- *  - with BILLING_CONTRACT_ENFORCED=true, a company inside its term is blocked
- *    from online self-cancellation with CONTRACT_LOCKED (before Stripe is
- *    touched, so no network/keys needed); and
- *  - the staff-only `cancel_for_cause` override (`releaseFromContract`) releases
- *    the company early and writes an audited MANUAL_OVERRIDE.
+ * Two parallel implementations exist by design: the CUSTOMER self-serve cancel
+ * (`BillingService.cancelSubscription`, POST /v1/billing/cancel) carries the
+ * CONTRACT_LOCKED gate; the STAFF surface (`AdminBillingService`, the
+ * /admin/organisations/:id/billing routes) can cancel/release regardless (staff
+ * override) and writes to both the staff admin-audit log AND the company's own
+ * billing_audit_logs ledger.
  */
 import { randomUUID } from 'crypto';
-import { BadRequestException, INestApplication } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import request from 'supertest';
 import { BillingService } from '../src/billing/billing.service';
-import { isWithinMinimumTerm } from '../src/billing/billing.service';
+import { PERMISSIONS } from '../src/common/permissions/permission-catalog';
+import { ADMIN_PERMISSIONS } from '../src/common/permissions/admin-permission-catalog';
 import { buildTestApp } from './utils/build-test-app';
-import { createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
+import { TEST_PASSWORD, createTestTenant, disconnectFixtures, ensureAssetClasses, ensurePermissions } from './utils/fixtures';
+import { createTestAdmin, disconnectAdminFixtures, TEST_ADMIN_PASSWORD } from './utils/admin-fixtures';
 
 const ownerPrisma = new PrismaClient();
 const IN_200_DAYS = () => new Date(Date.now() + 200 * 24 * 60 * 60 * 1000);
 
-describe('Billing 12-month minimum term (BILLING_CONTRACT_ENFORCED)', () => {
+describe('Billing 12-month minimum term — real HTTP routes', () => {
   let app: INestApplication;
   let billing: BillingService;
+  let adminToken: string;
 
   beforeAll(async () => {
-    // The lock-in is inert unless enforcement is on (held off by default pending
-    // legal sign-off). Turn it on for this suite only, and tear it down after so
-    // it can't leak into other suites.
+    // The customer-side CONTRACT_LOCKED gate is inert unless enforcement is on.
+    // Set for this suite only (per-worker env), torn down after.
     process.env.BILLING_CONTRACT_ENFORCED = 'true';
+    await ensurePermissions();
     app = await buildTestApp();
     billing = app.get(BillingService);
     await ensureAssetClasses();
-    await ensurePermissions();
+
+    const admin = await createTestAdmin([ADMIN_PERMISSIONS.BILLING_VIEW, ADMIN_PERMISSIONS.BILLING_MANAGE]);
+    const res = await request(app.getHttpServer())
+      .post('/v1/admin/auth/login')
+      .send({ username: admin.username, password: TEST_ADMIN_PASSWORD })
+      .expect(200);
+    adminToken = res.body.accessToken as string;
   });
   afterAll(async () => {
     delete process.env.BILLING_CONTRACT_ENFORCED;
     await app.close();
     await disconnectFixtures();
+    await disconnectAdminFixtures();
     await ownerPrisma.$disconnect();
   });
+  afterEach(() => jest.restoreAllMocks());
 
-  /** A company with a live subscription whose 12-month term is still running. */
-  async function subscribedWithinTerm(): Promise<string> {
-    const tenant = await createTestTenant([]);
+  /** A customer tenant with a live subscription still inside its 12-month term. */
+  async function subscribedWithinTerm() {
+    const tenant = await createTestTenant([PERMISSIONS.BILLING_MANAGE]);
     await ownerPrisma.company.update({
       where: { id: tenant.companyId },
       data: {
         subscriptionStatus: 'ACTIVE',
-        // stripe_subscription_id is unique; keep it fresh per company so reruns
-        // (persistent test tenants aren't torn down) don't collide.
+        stripeCustomerId: `cus_${randomUUID()}`,
         stripeSubscriptionId: `sub_${randomUUID()}`,
         subscriptionStartedAt: new Date(),
         contractEndsAt: IN_200_DAYS(),
         contractReleasedAt: null,
       },
     });
-    return tenant.companyId;
+    return tenant;
+  }
+  async function customerToken(username: string): Promise<string> {
+    const r = await request(app.getHttpServer()).post('/v1/auth/login').send({ username, password: TEST_PASSWORD }).expect(200);
+    return r.body.accessToken as string;
   }
 
-  it('blocks online cancellation while inside the term with CONTRACT_LOCKED, before touching Stripe', async () => {
-    const companyId = await subscribedWithinTerm();
+  it('customer self-serve cancel is blocked with CONTRACT_LOCKED within the term (POST /v1/billing/cancel)', async () => {
+    const tenant = await subscribedWithinTerm();
+    const token = await customerToken(tenant.username);
 
-    let thrown: unknown;
-    try {
-      await billing.cancelSubscription(companyId);
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeInstanceOf(BadRequestException);
-    expect((thrown as BadRequestException).getResponse()).toMatchObject({ code: 'CONTRACT_LOCKED' });
+    const res = await request(app.getHttpServer()).post('/v1/billing/cancel').set('Authorization', `Bearer ${token}`).expect(400);
+    expect(res.body.error.code).toBe('CONTRACT_LOCKED');
 
-    // The rejection happens before any Stripe call or audit write.
-    const audit = await ownerPrisma.billingAuditLog.findFirst({
-      where: { companyId, eventType: 'SUBSCRIPTION_CANCELED' },
-    });
+    // The rejection happens before Stripe / any ledger write.
+    const audit = await ownerPrisma.billingAuditLog.findFirst({ where: { companyId: tenant.companyId, eventType: 'SUBSCRIPTION_CANCELED' } });
     expect(audit).toBeNull();
   });
 
-  it('cancel_for_cause releases the company early and writes an audited MANUAL_OVERRIDE', async () => {
-    const companyId = await subscribedWithinTerm();
-    const actorId = randomUUID();
+  it('staff cancel_for_cause via the real admin route releases the company AND writes a MANUAL_OVERRIDE ledger row', async () => {
+    const tenant = await subscribedWithinTerm();
 
-    await billing.releaseFromContract(companyId, 'company shutting down', actorId);
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/organisations/${tenant.companyId}/billing/release-contract`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'company shutting down' })
+      .expect(200);
+    expect(res.body.contractReleasedAt).toBeTruthy();
 
     const company = await ownerPrisma.company.findUniqueOrThrow({
-      where: { id: companyId },
-      select: { contractReleasedAt: true, contractReleaseReason: true, contractEndsAt: true },
+      where: { id: tenant.companyId },
+      select: { contractReleasedAt: true, contractReleaseReason: true },
     });
     expect(company.contractReleasedAt).not.toBeNull();
     expect(company.contractReleaseReason).toBe('company shutting down');
 
-    const audit = await ownerPrisma.billingAuditLog.findFirst({
-      where: { companyId, eventType: 'MANUAL_OVERRIDE' },
+    // The company's own billing ledger records the override — this is the write
+    // that the prior round's fix targeted on a dead function instead of here.
+    const ledger = await ownerPrisma.billingAuditLog.findFirst({
+      where: { companyId: tenant.companyId, eventType: 'MANUAL_OVERRIDE' },
       orderBy: { createdAt: 'desc' },
     });
-    expect(audit).not.toBeNull();
-    expect(audit!.detail).toMatchObject({ action: 'cancel_for_cause', reason: 'company shutting down' });
-    expect(audit!.actorUserId).toBe(actorId);
+    expect(ledger).not.toBeNull();
+    expect(ledger!.detail).toMatchObject({ action: 'cancel_for_cause', reason: 'company shutting down' });
+    expect(ledger!.actorAdminId).toBeTruthy();
+  });
 
-    // The release lifts the lock even though the calendar term is still running.
-    expect(isWithinMinimumTerm({ contractEndsAt: company.contractEndsAt, contractReleasedAt: company.contractReleasedAt })).toBe(false);
+  it('staff-initiated cancellation via the real admin route writes a SUBSCRIPTION_CANCELED ledger row', async () => {
+    const tenant = await subscribedWithinTerm();
+
+    // The admin cancel path retrieves then updates/cancels the Stripe sub.
+    const retrieve = jest.fn().mockResolvedValue({ status: 'active', cancel_at_period_end: false });
+    const update = jest.fn().mockResolvedValue({ id: 'sub_x', status: 'active', cancel_at_period_end: true });
+    const cancel = jest.fn().mockResolvedValue({ id: 'sub_x', status: 'canceled', cancel_at_period_end: false });
+    jest.spyOn(billing, 'getStripeClient').mockReturnValue({ subscriptions: { retrieve, update, cancel } } as never);
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/admin/organisations/${tenant.companyId}/billing/cancel`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ atPeriodEnd: true })
+      .expect(200);
+    expect(res.body.subscriptionId).toBeTruthy();
+
+    const ledger = await ownerPrisma.billingAuditLog.findFirst({
+      where: { companyId: tenant.companyId, eventType: 'SUBSCRIPTION_CANCELED' },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(ledger).not.toBeNull();
+    expect(ledger!.detail).toMatchObject({ via: 'staff' });
+    expect(ledger!.actorAdminId).toBeTruthy();
   });
 });
