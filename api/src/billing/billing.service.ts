@@ -1241,9 +1241,13 @@ export class BillingService implements OnModuleInit {
     }
     const stripe = this.getStripe();
     await stripe.subscriptions.update(company.stripeSubscriptionId, { cancel_at_period_end: true });
-    await this.prisma.withTenant(companyId, (tx) =>
-      tx.billingAuditLog.create({ data: { companyId, eventType: 'SUBSCRIPTION_CANCELED', actorUserId: null, detail: { via: 'customer_self_serve', atPeriodEnd: true } } }),
-    );
+    // Audit via systemPrisma (fleetos_auth) — the tenant runtime role (fleetos_app)
+    // is only GRANTed SELECT on billing_audit_logs, never INSERT, so writing the
+    // audit through withTenant would fail with "permission denied". Every other
+    // billing-audit write already uses systemPrisma for exactly this reason.
+    await this.systemPrisma.billingAuditLog.create({
+      data: { companyId, eventType: 'SUBSCRIPTION_CANCELED', actorUserId: null, detail: { via: 'customer_self_serve', atPeriodEnd: true } },
+    });
     return { status: 'cancelling_at_period_end' };
   }
 
@@ -1256,11 +1260,14 @@ export class BillingService implements OnModuleInit {
    * exposed to customers.
    */
   async releaseFromContract(companyId: string, reason: string, actorUserId: string | null): Promise<void> {
-    await this.prisma.withTenant(companyId, async (tx) => {
-      await tx.company.update({ where: { id: companyId }, data: { contractReleasedAt: new Date(), contractReleaseReason: reason } });
-      await tx.billingAuditLog.create({
-        data: { companyId, eventType: 'MANUAL_OVERRIDE', actorUserId, detail: { action: 'cancel_for_cause', reason } },
-      });
+    await this.prisma.withTenant(companyId, (tx) =>
+      tx.company.update({ where: { id: companyId }, data: { contractReleasedAt: new Date(), contractReleaseReason: reason } }),
+    );
+    // Audit via systemPrisma (fleetos_auth): the tenant runtime role has only
+    // SELECT on billing_audit_logs, so a withTenant INSERT would be denied — same
+    // reason every other billing-audit write goes through systemPrisma.
+    await this.systemPrisma.billingAuditLog.create({
+      data: { companyId, eventType: 'MANUAL_OVERRIDE', actorUserId, detail: { action: 'cancel_for_cause', reason } },
     });
   }
 }
