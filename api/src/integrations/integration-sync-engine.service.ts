@@ -15,6 +15,15 @@ const MAX_DEAD_LETTER_ATTEMPTS = 5;
 const RETRY_BACKOFF_BASE_MINUTES = 2;
 const RETRY_BACKOFF_CAP_MINUTES = 24 * 60;
 
+/**
+ * How long a dead letter may sit claimed (RETRYING) before a later sweep treats
+ * the claim as abandoned and reclaims it. A single-row retry is fast (one import
+ * dispatch), so 15 minutes comfortably clears any real retry while still letting
+ * a row stranded by a crashed worker get picked up again rather than stuck
+ * RETRYING forever.
+ */
+const DEAD_LETTER_RETRY_LEASE_MINUTES = 15;
+
 type ImportDispatch = (
   companyId: string,
   actorUserId: string | undefined,
@@ -295,14 +304,37 @@ export class IntegrationSyncEngine {
 
   // ---- Scheduled sweeps (called from SchedulerService, per company) ---------
 
-  /** Runs every enabled connection whose nextRunAt has arrived; always advances nextRunAt afterward. */
+  /**
+   * Runs every enabled connection whose nextRunAt has arrived. Each run is
+   * claimed with an atomic compare-and-swap on nextRunAt BEFORE it executes, so
+   * two sweeps that overlap — a run outlasting the scheduler's per-company lease,
+   * so the next tick starts while this one is still going — can't both fire the
+   * same connection. Without the claim both sweeps see the same due row and both
+   * call runSync, double-importing every row (Asset/Operator/AttachedUnit/
+   * ComplianceDocument imports have no natural-key dedup, so that means duplicate
+   * records, not idempotent no-ops). Advancing nextRunAt at claim time rather
+   * than after the run is also crash-safe: a process death mid-run skips one
+   * slot instead of re-firing the connector on every tick forever.
+   */
   async runDueScheduledSyncsForCompany(companyId: string): Promise<{ ran: number; failures: number }> {
+    const now = new Date();
     const due = await this.prisma.withTenant(companyId, (tx) =>
-      tx.integrationConnection.findMany({ where: { isEnabled: true, archivedAt: null, nextRunAt: { lte: new Date() } } }),
+      tx.integrationConnection.findMany({ where: { isEnabled: true, archivedAt: null, nextRunAt: { lte: now } } }),
     );
     let ran = 0;
     let failures = 0;
     for (const connection of due) {
+      // Advance nextRunAt out of the due window (success or failure alike — a
+      // permanently-broken connector must not fire every tick; its failures
+      // surface in the Sync Dashboard / Error Centre). The `nextRunAt` guard is
+      // the exact value we read, so a concurrent sweep re-evaluating this UPDATE
+      // under the row lock matches 0 rows and skips — the connection runs once.
+      const next = connection.scheduleCron ? computeNextCronRun(connection.scheduleCron, now) : null;
+      const claim = await this.prisma.withTenant(companyId, (tx) =>
+        tx.integrationConnection.updateMany({ where: { id: connection.id, nextRunAt: connection.nextRunAt }, data: { nextRunAt: next } }),
+      );
+      if (claim.count === 0) continue; // another overlapping sweep already claimed this run
+
       try {
         await this.runSync(companyId, connection.id, 'SCHEDULED');
         ran++;
@@ -310,25 +342,51 @@ export class IntegrationSyncEngine {
         failures++;
         this.logger.error(`Scheduled sync failed for connection ${connection.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      // Always advance nextRunAt (success or failure) — a permanently-broken
-      // connector must not fire every scheduler tick forever; its failures
-      // surface in the Sync Dashboard / Error Centre instead.
-      const next = connection.scheduleCron ? computeNextCronRun(connection.scheduleCron, new Date()) : null;
-      await this.prisma
-        .withTenant(companyId, (tx) => tx.integrationConnection.update({ where: { id: connection.id }, data: { nextRunAt: next } }))
-        .catch((err) => this.logger.error(`Failed to advance nextRunAt for connection ${connection.id}: ${err instanceof Error ? err.message : String(err)}`));
     }
     return { ran, failures };
   }
 
-  /** Retries every PENDING_RETRY dead letter whose backoff has elapsed, one row at a time. */
+  /**
+   * Retries every due dead letter, one row at a time. Each row is claimed with
+   * an atomic PENDING_RETRY → RETRYING transition BEFORE it is retried, so two
+   * overlapping sweeps (a sweep outlasting the scheduler lease) can't both retry
+   * the same row and double-import it — the loser's guarded update matches 0 rows
+   * and skips. RETRYING is the pre-existing in-flight state the Sync Dashboard
+   * already counts as "still pending"; nothing set it until now. A row is left
+   * RETRYING only if the process dies mid-retry, so the sweep also reclaims a
+   * RETRYING row whose claim has gone stale (older than the lease) — otherwise a
+   * crash would strand a dead letter as un-retryable forever.
+   */
   async retryDueDeadLettersForCompany(companyId: string): Promise<{ retried: number; resolved: number; failed: number }> {
+    const now = new Date();
+    const staleClaimBefore = new Date(now.getTime() - DEAD_LETTER_RETRY_LEASE_MINUTES * 60_000);
     const due = await this.prisma.withTenant(companyId, (tx) =>
-      tx.integrationDeadLetter.findMany({ where: { status: 'PENDING_RETRY', nextRetryAt: { lte: new Date() } } }),
+      tx.integrationDeadLetter.findMany({
+        where: {
+          OR: [
+            { status: 'PENDING_RETRY', nextRetryAt: { lte: now } },
+            // A prior sweep claimed this row (RETRYING) but never finished — its
+            // worker died. Reclaim it once the lease has elapsed.
+            { status: 'RETRYING', updatedAt: { lte: staleClaimBefore } },
+          ],
+        },
+      }),
     );
     let resolved = 0;
     let failed = 0;
     for (const deadLetter of due) {
+      // Claim: flip this exact row (guarded on the status + updatedAt version we
+      // read) to RETRYING. A concurrent sweep that selected the same row
+      // re-evaluates this predicate under the row lock and matches 0 rows, so
+      // only ONE sweep imports it — no duplicate record.
+      const claim = await this.prisma.withTenant(companyId, (tx) =>
+        tx.integrationDeadLetter.updateMany({
+          where: { id: deadLetter.id, status: deadLetter.status, updatedAt: deadLetter.updatedAt },
+          data: { status: 'RETRYING' },
+        }),
+      );
+      if (claim.count === 0) continue; // another overlapping sweep already claimed this row
+
       try {
         const outcome = await this.retryDeadLetter(companyId, deadLetter);
         if (outcome === 'RESOLVED') resolved++;
@@ -338,7 +396,7 @@ export class IntegrationSyncEngine {
         this.logger.error(`Dead letter retry failed for ${deadLetter.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return { retried: due.length, resolved, failed };
+    return { retried: resolved + failed, resolved, failed };
   }
 
   /** Manual "retry now" — the same single-row retry path, callable directly from the Error Centre. */
@@ -346,6 +404,19 @@ export class IntegrationSyncEngine {
     const deadLetter = await this.prisma.withTenant(companyId, (tx) => tx.integrationDeadLetter.findUnique({ where: { id } }));
     if (!deadLetter || deadLetter.companyId !== companyId) {
       throw new NotFoundException({ code: 'INTEGRATION_DEAD_LETTER_NOT_FOUND', message: 'Dead letter not found.' });
+    }
+    // Claim the same way the sweep does, so a manual "retry now" and a scheduled
+    // sweep can't retry the same row at once (which would double-import it). Only
+    // a PENDING_RETRY/DEAD row is claimable; if it is already RETRYING a sweep
+    // has it, so we return its current state instead of running a second import.
+    const claim = await this.prisma.withTenant(companyId, (tx) =>
+      tx.integrationDeadLetter.updateMany({
+        where: { id, status: { in: ['PENDING_RETRY', 'DEAD'] }, updatedAt: deadLetter.updatedAt },
+        data: { status: 'RETRYING' },
+      }),
+    );
+    if (claim.count === 0) {
+      return this.prisma.withTenant(companyId, (tx) => tx.integrationDeadLetter.findUniqueOrThrow({ where: { id } }));
     }
     await this.retryDeadLetter(companyId, deadLetter);
     return this.prisma.withTenant(companyId, (tx) => tx.integrationDeadLetter.findUniqueOrThrow({ where: { id } }));
