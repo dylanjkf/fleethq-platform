@@ -392,11 +392,10 @@ export class BillingService implements OnModuleInit {
 
   /**
    * The Stripe Price id for the flat monthly plan ($29 AUD/month), if configured.
-   * Reads `STRIPE_PRICE_MONTHLY`, falling back to the legacy `STRIPE_PRICE_PER_ASSET`
-   * env name during the flat-rate transition.
+   * Reads `STRIPE_PRICE_MONTHLY`.
    */
   private flatPriceId(): string | undefined {
-    return this.config.get<string>('STRIPE_PRICE_MONTHLY') ?? this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+    return this.config.get<string>('STRIPE_PRICE_MONTHLY');
   }
 
   /**

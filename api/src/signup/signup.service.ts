@@ -55,7 +55,7 @@ export class SignupService {
   ) {}
 
   private flatPriceId(): string | undefined {
-    return this.config.get<string>('STRIPE_PRICE_MONTHLY') ?? this.config.get<string>('STRIPE_PRICE_PER_ASSET');
+    return this.config.get<string>('STRIPE_PRICE_MONTHLY');
   }
 
   /**
