@@ -51,6 +51,28 @@ export class MessagesService {
   }
 
   async send(companyId: string, actorUserId: string, dto: SendMessageDto) {
+    try {
+      return await this.sendInner(companyId, actorUserId, dto);
+    } catch (err) {
+      // Lost the idempotent-replay race: a concurrent request with the same
+      // clientRequestId both read null and inserted — the loser hits the
+      // [companyId, clientRequestId] unique constraint (P2002). Re-read and
+      // return the winner (established pattern — parcels.scanParcel), so an
+      // offline replay racing a live retry can't double-post or 500.
+      if (dto.clientRequestId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const existing = await this.prisma.withTenant(companyId, (tx) =>
+          tx.message.findFirst({
+            where: { companyId, clientRequestId: dto.clientRequestId },
+            include: { senderUser: { select: { id: true, fullName: true } } },
+          }),
+        );
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  private async sendInner(companyId: string, actorUserId: string, dto: SendMessageDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
       // Idempotent replay: a DriverOS message queued offline and re-sent after a
       // lost response carries a stable clientRequestId — return the existing

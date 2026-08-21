@@ -216,21 +216,34 @@ export class CustomersService {
     address?: string,
     contactName?: string,
   ) {
-    return this.prisma.withTenant(companyId, async (tx) => {
-      const existing = await this.findByName(tx, companyId, name);
-      if (existing) return existing;
+    try {
+      return await this.prisma.withTenant(companyId, async (tx) => {
+        const existing = await this.findByName(tx, companyId, name);
+        if (existing) return existing;
 
-      const customer = await tx.customer.create({ data: { companyId, name, address, contactName } });
-      await this.timeline.record(tx, {
-        companyId,
-        entityType: TimelineEntityType.CUSTOMER,
-        entityId: customer.id,
-        eventType: 'created',
-        summary: `Customer "${customer.name}" created from a stop import.`,
-        actorUserId,
+        const customer = await tx.customer.create({ data: { companyId, name, address, contactName } });
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: TimelineEntityType.CUSTOMER,
+          entityId: customer.id,
+          eventType: 'created',
+          summary: `Customer "${customer.name}" created from a stop import.`,
+          actorUserId,
+        });
+        return customer;
       });
-      return customer;
-    });
+    } catch (err) {
+      // Lost the match-or-create race: two concurrent stop imports for the same
+      // new customer both read null and inserted — the loser hits the
+      // `customers_company_id_name_active_key` partial-unique index (P2002).
+      // Re-read and return the winner (same pattern importByName below uses), so
+      // concurrent imports are idempotent instead of one 500-ing.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const existing = await this.prisma.withTenant(companyId, (tx) => this.findByName(tx, companyId, name));
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   /**

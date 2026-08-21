@@ -33,6 +33,25 @@ export class FuelService {
   ) {}
 
   async create(companyId: string, actorUserId: string, dto: CreateFuelEntryDto) {
+    try {
+      return await this.createInner(companyId, actorUserId, dto);
+    } catch (err) {
+      // Lost the idempotent-replay race: a concurrent request with the same
+      // clientRequestId both read null and inserted — the loser hits the
+      // [companyId, clientRequestId] unique constraint (P2002). Re-read and
+      // return the winner (established pattern — parcels.scanParcel), so an
+      // offline replay racing a live retry can't double-count fuel spend or 500.
+      if (dto.clientRequestId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const existing = await this.prisma.withTenant(companyId, (tx) =>
+          tx.fuelEntry.findFirst({ where: { companyId, clientRequestId: dto.clientRequestId }, include: FUEL_INCLUDE }),
+        );
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  private async createInner(companyId: string, actorUserId: string, dto: CreateFuelEntryDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
       // Idempotent replay: a DriverOS fuel entry queued offline and re-sent after
       // a lost response carries a stable clientRequestId — return the existing
