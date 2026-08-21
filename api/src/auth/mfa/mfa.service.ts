@@ -132,7 +132,11 @@ export class MfaService {
    */
   async verifyChallenge(user: MfaUser, code: string): Promise<{ ok: boolean; usedBackupCode: boolean }> {
     if (!user.mfaSecret || !user.mfaEnabledAt) return { ok: false, usedBackupCode: false };
-    if (verifyTotp(user.mfaSecret, code)) return { ok: true, usedBackupCode: false };
+    // Authenticator apps display the 6-digit code grouped ("123 456"), and a
+    // user may paste it with the space. Strip whitespace before the TOTP check —
+    // verifyTotp's strict /^\d{6}$/ would otherwise reject a spaced code. (The
+    // backup-code path below normalises separately.)
+    if (verifyTotp(user.mfaSecret, code.replace(/\s/g, ''))) return { ok: true, usedBackupCode: false };
 
     // Backup-code path: constant-work compare against each remaining hash.
     const normalised = this.normalise(code);
