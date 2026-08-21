@@ -69,6 +69,26 @@ describe('MFA (TOTP)', () => {
     expect(me.body.mfaEnabled).toBe(true);
   });
 
+  it('accepts a space-grouped TOTP code at the login challenge ("123 456")', async () => {
+    const tenant = await createTestTenant([]);
+    const first = await login(tenant.username).expect(200);
+    const { secret } = await enrol(first.body.accessToken);
+
+    const challenge = await login(tenant.username).expect(200);
+    expect(challenge.body.status).toBe('mfa_required');
+
+    // Authenticator apps show the code grouped; a user may paste "123 456".
+    const raw = totp(secret);
+    const spaced = `${raw.slice(0, 3)} ${raw.slice(3)}`;
+    expect(spaced).toContain(' ');
+    const done = await http()
+      .post('/v1/auth/mfa/verify')
+      .send({ mfaToken: challenge.body.mfaToken, code: spaced })
+      .expect(200);
+    expect(done.body.status).toBe('authenticated');
+    expect(done.body.accessToken).toBeTruthy();
+  });
+
   it('accepts a single-use backup code and then rejects its reuse', async () => {
     const tenant = await createTestTenant([]);
     const initial = await login(tenant.username).expect(200);
