@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TimelineService } from '../timeline/timeline.service';
@@ -14,6 +14,8 @@ import { UpdateCompanyDto } from './dto/update-company.dto';
 
 @Injectable()
 export class CompaniesService {
+  private readonly logger = new Logger(CompaniesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly timeline: TimelineService,
@@ -58,8 +60,14 @@ export class CompaniesService {
         try {
           const token = await this.authTokens.issue(result.adminUserId, 'EMAIL_VERIFY');
           await this.authMail.sendVerification(dto.adminEmail, dto.adminFullName, token);
-        } catch {
-          // swallow — verification can be re-requested from the app
+        } catch (err) {
+          // Best-effort — verification can be re-requested from the app. Logged
+          // so a new signup whose verification email silently never sent is
+          // diagnosable (otherwise the admin looks "stuck unverified" for no
+          // visible reason).
+          this.logger.warn(
+            `Verification email for new company admin ${result.adminUserId} failed to send: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
 

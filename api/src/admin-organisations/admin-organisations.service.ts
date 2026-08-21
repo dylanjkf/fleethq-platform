@@ -280,6 +280,8 @@ export class AdminOrganisationsService {
         gracePeriodEndsAt: company.gracePeriodEndsAt,
         nextPaymentAttemptAt: company.nextPaymentAttemptAt,
         contractEndsAt: company.contractEndsAt,
+        contractReleasedAt: company.contractReleasedAt,
+        contractReleaseReason: company.contractReleaseReason,
       },
       usage: {
         assets,
@@ -293,6 +295,10 @@ export class AdminOrganisationsService {
         inGrace,
         graceElapsed,
         trialExpiringSoon: trialActive && !!company.trialEndsAt && company.trialEndsAt <= threeDaysFromNow,
+        // Still inside the 12-month minimum term and not released for cause — so
+        // a "cancel for me" support request must be declined (or escalated to a
+        // release), not actioned. Cleared the moment contractReleasedAt is set.
+        lockedIn: !company.contractReleasedAt && !!company.contractEndsAt && company.contractEndsAt > now,
         featureFlagOverrides: overrides.map((o) => ({ key: o.flag.key, name: o.flag.name, enabled: o.enabled })),
       },
       recentActivity,

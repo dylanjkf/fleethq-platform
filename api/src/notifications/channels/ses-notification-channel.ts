@@ -82,9 +82,17 @@ export class SesNotificationChannel implements NotificationChannel {
   /** Build a multipart/mixed MIME message (UTF-8 text body + base64 attachments). */
   private buildRawMime(message: EmailMessage): Uint8Array {
     const boundary = `=_fleethq_${Buffer.from(`${this.fromAddress}:${message.to}:${message.subject}`).toString('hex').slice(0, 24)}`;
+    // Sanitize the address headers before interpolation, exactly as the
+    // attachment filename/content-type below are. `to` can be a user-controlled
+    // recipient (a member's own email address), so a CR/LF in it would otherwise
+    // let that value smuggle an extra header — e.g. a `Bcc:` — into the raw MIME
+    // when the message carries an attachment (the report-PDF path). `from` is
+    // trusted config, but sanitizing it too costs nothing and closes the class.
+    const from = sanitizeMimeHeaderValue(this.fromAddress);
+    const to = sanitizeMimeHeaderValue(message.to);
     const parts: string[] = [
-      `From: ${this.fromAddress}`,
-      `To: ${message.to}`,
+      `From: ${from}`,
+      `To: ${to}`,
       `Subject: ${encodeHeaderWord(message.subject)}`,
       'MIME-Version: 1.0',
       `Content-Type: multipart/mixed; boundary="${boundary}"`,

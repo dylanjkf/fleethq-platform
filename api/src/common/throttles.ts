@@ -59,6 +59,16 @@ export const GPS_INGEST_THROTTLE = routeThrottle(120);
 export const INBOUND_WEBHOOK_THROTTLE = routeThrottle(60);
 
 /**
+ * Cross-tenant admin search (`GET /v1/admin/search`). Each call runs
+ * case-insensitive `contains` scans across several tables (orgs/users/assets),
+ * so it is markedly heavier than an ordinary read — the 300/min default would
+ * let a single logged-in staff account hammer it. 120/min is generous enough
+ * for a debounced type-ahead a real person drives, tight enough to bound a
+ * script fanning the multi-table scan.
+ */
+export const SEARCH_THROTTLE = routeThrottle(120);
+
+/**
  * FleetHQ-staff admin-platform actions with real financial or account-
  * takeover blast radius (billing mutations, impersonation, resetting a
  * customer's MFA/lockout) — the app-wide 300/min default is far too loose

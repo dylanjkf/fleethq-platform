@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { resolveBcryptCost } from '../common/security/bcrypt-cost';
@@ -15,6 +15,8 @@ import { AdminActionContext } from '../admin-auth/admin-action-context.interface
 
 @Injectable()
 export class AdminCustomerUsersService {
+  private readonly logger = new Logger(AdminCustomerUsersService.name);
+
   constructor(
     private readonly adminPrisma: AdminPrismaService,
     private readonly audit: AdminAuditService,
@@ -211,8 +213,13 @@ export class AdminCustomerUsersService {
       try {
         const token = await this.authTokens.issue(userId, 'PASSWORD_RESET');
         await this.authMail.sendPasswordReset(dto.email, dto.fullName, token);
-      } catch {
-        // Best-effort — the account still exists; the admin can retry sendPasswordReset.
+      } catch (err) {
+        // Best-effort — the account still exists; the admin can retry
+        // sendPasswordReset. Logged so a silently-undelivered invite (the user
+        // never got the link to set a password) is diagnosable.
+        this.logger.warn(
+          `Invite/password-reset email to customer user ${userId} failed to send: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 
