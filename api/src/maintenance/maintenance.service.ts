@@ -29,6 +29,26 @@ export class MaintenanceService {
   ) {}
 
   async create(companyId: string, actorUserId: string, dto: CreateMaintenanceJobDto) {
+    try {
+      return await this.createInner(companyId, actorUserId, dto);
+    } catch (err) {
+      // Lost the idempotent-replay race: a concurrent request with the same
+      // clientRequestId (offline outbox replay racing a live retry, or a
+      // double-tap) read null and both inserted — the loser hits the
+      // [companyId, clientRequestId] unique constraint (P2002). Re-read and
+      // return the winner as the idempotent success it is (established pattern —
+      // parcels.scanParcel, customers.importByName). No unhandled 500.
+      if (dto.clientRequestId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const existing = await this.prisma.withTenant(companyId, (tx) =>
+          tx.maintenanceJob.findFirst({ where: { companyId, clientRequestId: dto.clientRequestId } }),
+        );
+        if (existing) return existing;
+      }
+      throw err;
+    }
+  }
+
+  private async createInner(companyId: string, actorUserId: string, dto: CreateMaintenanceJobDto) {
     return this.prisma.withTenant(companyId, async (tx) => {
       // Idempotent replay: a DriverOS fault report queued offline and re-sent
       // after a lost response carries a stable clientRequestId — return the
