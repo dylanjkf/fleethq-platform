@@ -1,8 +1,10 @@
 import { Controller, Get, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
 import { AdminGuarded } from '../admin-auth/decorators/admin-guarded.decorator';
 import { RequireAdminPermission } from '../admin-auth/decorators/require-admin-permission.decorator';
 import { ADMIN_PERMISSIONS } from '../common/permissions/admin-permission-catalog';
+import { SEARCH_THROTTLE } from '../common/throttles';
 import { AdminSearchService } from './admin-search.service';
 
 /**
@@ -17,6 +19,7 @@ export class AdminSearchController {
 
   @AdminGuarded()
   @RequireAdminPermission(ADMIN_PERMISSIONS.ORGANISATIONS_VIEW)
+  @Throttle(SEARCH_THROTTLE)
   @Get()
   find(@Query('q') q?: string) {
     return this.search.search(q);

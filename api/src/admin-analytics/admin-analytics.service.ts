@@ -13,6 +13,14 @@ import { PAID_TIERS } from '../billing/plans';
 const CHURN_WINDOW_DAYS = 30;
 const DEFAULT_SIGNUP_DAYS = 30;
 const DEFAULT_TRIAL_EXPIRY_DAYS = 7;
+/**
+ * Hard cap on the trials-expiring list. `days` is caller-supplied, so a large
+ * window (or a spike in trials) could otherwise return an unbounded result set
+ * and load the full row into memory. 200 is far more than the soonest-expiring
+ * trials a human triages from this view; the ordering is soonest-first, so the
+ * cap keeps exactly the ones that matter.
+ */
+const MAX_TRIALS_EXPIRING_PAGE_SIZE = 200;
 
 const PAYING_STATUSES = ['ACTIVE', 'PAST_DUE'] as const;
 
@@ -198,6 +206,10 @@ export class AdminAnalyticsService {
     const companies = await this.adminPrisma.company.findMany({
       where: { archivedAt: null, trialEndsAt: { gte: now, lte: until } },
       orderBy: { trialEndsAt: 'asc' },
+      // Bounded: `days` is caller-supplied, so cap the result rather than load an
+      // unbounded set into memory. Soonest-first ordering keeps the ones a human
+      // actually triages first.
+      take: MAX_TRIALS_EXPIRING_PAGE_SIZE,
       select: { id: true, name: true, trialEndsAt: true, suspendedAt: true, _count: { select: { memberships: true } } },
     });
     return companies.map((c) => ({

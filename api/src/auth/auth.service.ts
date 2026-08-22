@@ -781,7 +781,14 @@ export class AuthService {
     // Same "kill every other session on a credential change" treatment as a
     // self-service password change / MFA enable; the current device stays.
     await this.sessions.revokeOtherSessions(userId, currentSessionId);
-    if (user.email) void this.mail.sendPasskeyAdded(user.email, user.fullName, deviceLabel ?? null).catch(() => undefined);
+    if (user.email) {
+      void this.mail
+        .sendPasskeyAdded(user.email, user.fullName, deviceLabel ?? null)
+        // Best-effort security notification (the audit row is already written in
+        // verifyRegistration). Logged rather than swallowed so a silently-
+        // undelivered "a passkey was added to your account" alert is diagnosable.
+        .catch((err: unknown) => this.logger.warn({ err, userId }, 'Passkey-added notification email failed to send'));
+    }
   }
 
   /**

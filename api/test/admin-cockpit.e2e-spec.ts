@@ -92,6 +92,29 @@ describe('Cockpit customer 360 (B2)', () => {
     expect(body.recentActivity.map((a: { action: string }) => a.action)).toContain('organisations.viewed_by_support');
   });
 
+  it('surfaces the 12-month lock-in state: lockedIn true within term, and contractReleasedAt + lockedIn false once released', async () => {
+    const tenant = await createTestTenant([]);
+    const inTerm = new Date(Date.now() + 200 * 24 * 60 * 60 * 1000); // ~200 days out
+
+    // Within the minimum term, not released → a "cancel for me" request must be declined.
+    await ownerPrisma.company.update({ where: { id: tenant.companyId }, data: { contractEndsAt: inTerm } });
+    let body = (await request(app.getHttpServer()).get(`/v1/admin/organisations/${tenant.companyId}/cockpit`).set('Authorization', `Bearer ${adminToken}`).expect(200)).body;
+    expect(new Date(body.billing.contractEndsAt).getTime()).toBe(inTerm.getTime());
+    expect(body.billing.contractReleasedAt).toBeNull();
+    expect(body.flags.lockedIn).toBe(true);
+
+    // Released for cause → the lock-in flag clears and the release is visible to staff.
+    const releasedAt = new Date();
+    await ownerPrisma.company.update({
+      where: { id: tenant.companyId },
+      data: { contractReleasedAt: releasedAt, contractReleaseReason: 'Persistent outage' },
+    });
+    body = (await request(app.getHttpServer()).get(`/v1/admin/organisations/${tenant.companyId}/cockpit`).set('Authorization', `Bearer ${adminToken}`).expect(200)).body;
+    expect(new Date(body.billing.contractReleasedAt).getTime()).toBe(releasedAt.getTime());
+    expect(body.billing.contractReleaseReason).toBe('Persistent outage');
+    expect(body.flags.lockedIn).toBe(false);
+  });
+
   it('is gated on organisations:view (403 for an admin without it)', async () => {
     const tenant = await createTestTenant([]);
     const weak = await createTestAdmin([ADMIN_PERMISSIONS.SYSTEM_VIEW]);

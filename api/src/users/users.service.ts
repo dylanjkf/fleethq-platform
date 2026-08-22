@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, TimelineEntityType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { resolveBcryptCost } from '../common/security/bcrypt-cost';
@@ -33,6 +33,8 @@ function toMembershipView(m: MembershipWithUserAndRole) {
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly systemPrisma: SystemPrismaService,
@@ -133,8 +135,13 @@ export class UsersService {
       try {
         const token = await this.authTokens.issue(created.newUserId, 'PASSWORD_RESET');
         await this.authMail.sendInvite(dto.email, dto.fullName, created.companyName, token);
-      } catch {
-        // swallow — the admin can re-send from the Users screen
+      } catch (err) {
+        // Best-effort — the admin can re-send from the Users screen. But log it:
+        // an unlogged failure here means a silently un-invited user nobody knows
+        // to chase (they never got the link and can't set a password).
+        this.logger.warn(
+          `Invite email to new user ${created.newUserId} failed to send: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 
@@ -241,7 +248,14 @@ export class UsersService {
     if (targetUser.email) {
       void this.authMail
         .sendCompanyAccessGranted(targetUser.email, targetUser.fullName, companyName)
-        .catch(() => undefined);
+        .catch((err) =>
+          // Best-effort transparency email; a failure must not roll back the
+          // grant. Logged so a silently-undelivered "you gained access" notice
+          // is diagnosable rather than invisible.
+          this.logger.warn(
+            `Company-access-granted email to user ${targetUser.id} failed to send: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     }
 
     return view;
