@@ -16,7 +16,11 @@ describe('AdminBillingService (Stripe mocked)', () => {
   const CONTEXT = { adminUserId: 'admin-1', ip: '127.0.0.1', userAgent: 'jest' };
 
   function build(company = COMPANY) {
-    const adminPrisma = { company: { findUnique: jest.fn().mockResolvedValue(company) } };
+    const adminPrisma = {
+      company: { findUnique: jest.fn().mockResolvedValue(company), update: jest.fn().mockResolvedValue(company) },
+      // Staff cancel/release now also write the company's billing_audit_logs ledger.
+      billingAuditLog: { create: jest.fn().mockResolvedValue({ id: 'bal_1' }) },
+    };
     const audit = { record: jest.fn().mockResolvedValue(undefined) };
     const stripe = {
       invoices: {

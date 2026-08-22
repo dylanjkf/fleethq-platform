@@ -1251,25 +1251,13 @@ export class BillingService implements OnModuleInit {
     return { status: 'cancelling_at_period_end' };
   }
 
-  /**
-   * `cancel_for_cause` (Part 2) — staff-only override that releases a company
-   * from the minimum-term lock-in early (company shutting down, dispute,
-   * regulator order). Records when + why on the company, and leaves an audited
-   * trail. Does NOT itself cancel Stripe (staff use the admin cancel path for
-   * that); it removes the contractual block so cancellation is permitted. NOT
-   * exposed to customers.
-   */
-  async releaseFromContract(companyId: string, reason: string, actorUserId: string | null): Promise<void> {
-    await this.prisma.withTenant(companyId, (tx) =>
-      tx.company.update({ where: { id: companyId }, data: { contractReleasedAt: new Date(), contractReleaseReason: reason } }),
-    );
-    // Audit via systemPrisma (fleetos_auth): the tenant runtime role has only
-    // SELECT on billing_audit_logs, so a withTenant INSERT would be denied — same
-    // reason every other billing-audit write goes through systemPrisma.
-    await this.systemPrisma.billingAuditLog.create({
-      data: { companyId, eventType: 'MANUAL_OVERRIDE', actorUserId, detail: { action: 'cancel_for_cause', reason } },
-    });
-  }
+  // NOTE: `cancel_for_cause` (staff release from the 12-month minimum term) lives
+  // ONLY on the staff surface — AdminBillingService.releaseFromContract, wired to
+  // POST /v1/admin/organisations/:id/billing/release-contract. There is no
+  // customer-facing release (a customer can't lift their own lock-in), so this
+  // service intentionally has no releaseFromContract: an earlier duplicate here
+  // had zero callers and only absorbed test coverage that looked like it guarded
+  // production but didn't.
 }
 
 function mapInvoiceStatus(status: Stripe.Invoice.Status | null): InvoiceStatus {
