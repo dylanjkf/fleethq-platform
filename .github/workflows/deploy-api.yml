@@ -52,7 +52,7 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch'
           || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Deploy the exact commit api-ci validated. On workflow_dispatch there is no
           # triggering run, so fall back to the ref the dispatch targeted.
